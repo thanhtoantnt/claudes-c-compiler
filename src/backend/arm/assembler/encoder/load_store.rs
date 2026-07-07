@@ -2410,3 +2410,229 @@ mod prop_encode_adr_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_prfm_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: reference-encoding / differential-vs-`llvm-mc` for the PRFM
+    // (Prefetch Memory) instruction, ARMv8-A ARM §C4.1.89 (PRFM immediate)
+    // and §C4.1.90 (PRFM register).
+    //
+    // Golden encodings produced by `llvm-mc-18 --triple=aarch64` (NOT this
+    // crate's own formula), used to anchor the field layout independently:
+    //
+    //   prfm pldl1keep, [x0]          = 0xF9800000   (opc[23:22]=10)
+    //   prfm pldl1keep, [x0, #8]      = 0xF9800400   (imm12=1 -> [21:10])
+    //   prfm pldl3strm, [x10, #32760] = 0xF9BFFD45   (imm12=0xFFF, rn=10, op=5)
+    //   prfm pldl1keep, [x0, x1]      = 0xF8A16800   (register form)
+    //   prfm pldl1keep, [x0, x1,lsl#3]= 0xF8A17800   (register form, S=1)
+    //
+    // PRFM (immediate, unsigned offset):  11 111 0 01 10 imm12[21:10] Rn[9:5] Rt[4:0]
+    //   base word = 0xF9800000
+    // PRFM (register):                    11 111 0 00 10 1 Rm[20:16] option[15:13]
+    //                                     S[12] 10 Rn[9:5] Rt[4:0]
+    //   fixed bits = 0xC0000000 | 0x38000000 | 0x00800000(opc bit23) | 0x00200000(bit21)
+    //              | 0x00000800([11:10]=10)
+
+    /// Canonical prefetch-operation table (ARM ARM Table C4-25 "prfop").
+    /// (name, 5-bit value). Value structure: target[4:3] | type[2:1] | policy[0].
+    const PRFOP_TABLE: &[(&str, u32)] = &[
+        ("pldl1keep", 0b00000), ("pldl1strm", 0b00001),
+        ("pldl2keep", 0b00010), ("pldl2strm", 0b00011),
+        ("pldl3keep", 0b00100), ("pldl3strm", 0b00101),
+        ("plil1keep", 0b01000), ("plil1strm", 0b01001),
+        ("plil2keep", 0b01010), ("plil2strm", 0b01011),
+        ("plil3keep", 0b01100), ("plil3strm", 0b01101),
+        ("pstl1keep", 0b10000), ("pstl1strm", 0b10001),
+        ("pstl2keep", 0b10010), ("pstl2strm", 0b10011),
+        ("pstl3keep", 0b10100), ("pstl3strm", 0b10101),
+    ];
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    prop_compose! {
+        fn arb_prfop_idx()(i in 0usize..PRFOP_TABLE.len()) -> usize { i }
+    }
+
+    proptest! {
+        // Property 1 — REFERENCE ENCODING (immediate / unsigned-offset form).
+        // For every named prfop, base register x0..x30, and a scaled offset
+        // imm = imm12*8 (0 <= imm12 <= 4095), the encoded word must equal the
+        // ARM-ARM reference formula independently derived from the llvm-mc
+        // golden `prfm pldl1keep,[x0] = 0xF9800000`:
+        //   word = 0xF9800000 | (imm12 << 10) | (Rn << 5) | prfop
+        #[test]
+        fn prop_prfm_immediate_matches_reference(
+            pidx in arb_prfop_idx(),
+            rn in 0u32..=30u32,
+            imm12 in 0u32..=0xFFFu32,
+        ) {
+            let (name, prfop) = PRFOP_TABLE[pidx];
+            let ops = vec![
+                Operand::Symbol(name.to_string()),
+                Operand::Mem { base: format!("x{}", rn), offset: (imm12 as i64) * 8 },
+            ];
+            let w = word(encode_prfm(&ops));
+            let expected = 0xF9800000u32 | (imm12 << 10) | (rn << 5) | prfop;
+            prop_assert_eq!(w, expected);
+            // Rt/prfop field is exactly [4:0]; Rn is exactly [9:5].
+            prop_assert_eq!(w & 0x1F, prfop);
+            prop_assert_eq!((w >> 5) & 0x1F, rn);
+            prop_assert_eq!((w >> 10) & 0xFFF, imm12);
+        }
+
+        // Property 2 — prfop name → value table + structural decomposition.
+        // Every documented name resolves, every undocumented name is rejected,
+        // and the value decomposes as target[4:3] in {PLD=0,PLI=1,PST=2},
+        // type[2:1] in {L1=0,L2=1,L3=2}, policy[0] in {KEEP=0,STRM=1}.
+        #[test]
+        fn prop_prfop_table_and_structure(pidx in arb_prfop_idx()) {
+            let (name, val) = PRFOP_TABLE[pidx];
+            let got = encode_prfop(name).expect("known prfop must resolve");
+            prop_assert_eq!(got, val);
+            let target = got >> 3;
+            let typ = (got >> 1) & 0b11;
+            let policy = got & 1;
+            prop_assert!(target <= 2, "target field {} out of {{0,1,2}}", target);
+            prop_assert!(typ <= 2, "type field {} out of {{0,1,2}}", typ);
+            prop_assert!(policy <= 1);
+            // target prefix consistency with the name.
+            let expect_target = if name.starts_with("pld") { 0u32 }
+                else if name.starts_with("pli") { 1u32 }
+                else { 2u32 };
+            prop_assert_eq!(target, expect_target);
+            // Unknown names are rejected (negative contract).
+            prop_assert!(encode_prfop("nonsense").is_err());
+        }
+
+        // Property 3 — ERROR CONTRACT: invalid operands are rejected, never
+        // silently accepted. Covers: <2 operands, negative offset, misaligned
+        // offset, too-large offset (within u32), out-of-range prfop immediate,
+        // unknown prfop name, and a non-memory second operand.
+        #[test]
+        fn prfm_error_contract_rejects_invalid_operands(
+            kind in 0u8..7u8,
+            bad_offset in 1i64..5000i64,
+            bad_prfop in (32i64..1000i64),
+        ) {
+            let r = match kind {
+                0 => encode_prfm(&[Operand::Symbol("pldl1keep".into())]), // too few
+                1 => encode_prfm(&[
+                    Operand::Symbol("pldl1keep".into()),
+                    Operand::Mem { base: "x0".into(), offset: -bad_offset }, // negative
+                ]),
+                2 => encode_prfm(&[
+                    Operand::Symbol("pldl1keep".into()),
+                    Operand::Mem { base: "x0".into(), offset: bad_offset * 8 + 1 }, // misaligned (%8 != 0)
+                ]),
+                3 => encode_prfm(&[
+                    Operand::Symbol("pldl1keep".into()),
+                    Operand::Mem { base: "x0".into(), offset: 32768 }, // imm12=4096 > 0xFFF
+                ]),
+                4 => encode_prfm(&[
+                    Operand::Imm(bad_prfop), // prfop > 31
+                    Operand::Mem { base: "x0".into(), offset: 0 },
+                ]),
+                5 => encode_prfm(&[
+                    Operand::Imm(-1), // prfop < 0
+                    Operand::Mem { base: "x0".into(), offset: 0 },
+                ]),
+                _ => encode_prfm(&[
+                    Operand::Symbol("pldl1keep".into()),
+                    Operand::Imm(0), // 2nd operand must be memory
+                ]),
+            };
+            prop_assert!(r.is_err(), "expected error for kind={}, got {:?}", kind, r);
+        }
+
+        // Property 4 — REFERENCE ENCODING (register-offset form).
+        // PRFM (register): 11 111 0 00 10 1 Rm option S 10 Rn Rt.
+        // The fixed opcode bit for opc=10 lives at bit 23 (0x00800000), NOT
+        // bit 24. The crate writes `(0b10 << 23)` which sets bit 24 instead,
+        // producing e.g. 0xF9216800 for `prfm pldl1keep,[x0,x1]` whereas
+        // `llvm-mc` mandates 0xF8A16800. This property must hold; against the
+        // current code it FAILS and exposes the off-by-one shift.
+        #[test]
+        fn prop_prfm_register_offset_matches_reference(
+            pidx in arb_prfop_idx(),
+            rn in 0u32..=30u32,
+            rm in 0u32..=30u32,
+            opt_idx in 0u8..4u8,
+            shift_amt in 0u8..4u8,
+        ) {
+            let (name, prfop) = PRFOP_TABLE[pidx];
+            let (extend, shift, expect_option) = match opt_idx {
+                0 => (Some("lsl".to_string()),  Some(shift_amt), 0b011u32),
+                1 => (Some("uxtw".to_string()), Some(shift_amt), 0b010u32),
+                2 => (Some("sxtw".to_string()), Some(shift_amt), 0b110u32),
+                _ => (Some("sxtx".to_string()), Some(shift_amt), 0b111u32),
+            };
+            let s_bit = if shift_amt > 0 { 1u32 } else { 0u32 };
+            let ops = vec![
+                Operand::Symbol(name.to_string()),
+                Operand::MemRegOffset {
+                    base: format!("x{}", rn),
+                    index: format!("x{}", rm),
+                    extend,
+                    shift,
+                },
+            ];
+            let w = word(encode_prfm(&ops));
+            // Reference per ARM ARM §C4.1.90, anchored to llvm-mc 0xF8A16800.
+            let expected = 0xC0000000u32   // size=11 [31:30]
+                | 0x38000000u32            // 111    [29:27]
+                | 0x00800000u32            // opc=10 [23:22]  (bit 23)
+                | 0x00200000u32            // bit 21
+                | (rm << 16)               // Rm     [20:16]
+                | (expect_option << 13)    // option [15:13]
+                | (s_bit << 12)            // S      [12]
+                | 0x00000800u32            // [11:10] = 10
+                | (rn << 5)                // Rn     [9:5]
+                | prfop;                   // Rt     [4:0]
+            prop_assert_eq!(
+                w, expected,
+                "register-offset PRFM opcode mismatch (opc bit placed at 24 \
+                 instead of 23); llvm-mc reference = {:#010x}",
+                expected
+            );
+        }
+
+        // Property 5 — NEGATIVE CONTRACT (silent-truncation guard).
+        // PRFM immediate encodes imm12 = offset/8 into bits [21:10]. Any
+        // offset whose scaled value (offset/8) exceeds 0xFFF is out of range
+        // and MUST be rejected. The crate computes `(imm/8) as u32` BEFORE the
+        // `> 0xFFF` range check, so when imm/8 >= 2^32 the cast wraps to a
+        // small value and the offset is encoded silently instead of rejected.
+        // This property must hold; against the current code it FAILS for the
+        // wrap-region branch and exposes the silent truncation.
+        #[test]
+        fn prop_prfm_large_offset_not_silently_truncated(
+            scaled in prop_oneof![
+                (0x1000_i64..=0xFFFF_FFFF_i64),                  // normal too-large -> must Err
+                (0x1_0000_0000_i64..=0x1_0000_0FFF_i64),         // wraps u32 -> must still Err
+            ]
+        ) {
+            let imm = scaled * 8; // always 8-byte aligned, always >= 0
+            let ops = vec![
+                Operand::Symbol("pldl1keep".to_string()),
+                Operand::Mem { base: "x0".to_string(), offset: imm },
+            ];
+            let r = encode_prfm(&ops);
+            prop_assert!(
+                r.is_err(),
+                "scaled offset {} (imm={}) exceeds the 12-bit field and must \
+                 be rejected, but the encoder returned {:?} \
+                 ((imm/8) as u32 silently wrapped before the range check)",
+                scaled, imm, r
+            );
+        }
+    }
+}
