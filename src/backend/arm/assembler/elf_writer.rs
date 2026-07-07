@@ -917,4 +917,197 @@ mod tests {
             prop_assert!(writer.pending_exprs.is_empty());
         }
     }
+
+    // ---- decode helper for branch-resolution round-trip checks ----
+    fn sign_extend(value: u32, bits: u32) -> i32 {
+        let shift = 32u32.saturating_sub(bits);
+        ((value << shift) as i32) >> shift
+    }
+
+    // =====================================================================
+    // resolve_local_branches — AArch64 branch relocation resolution
+    // Oracle classification: reference / round-trip for in-range encodings,
+    // relocation-emit contract for undefined / cross-section symbols, and a
+    // negative range-validation contract (AArch64 ELF ABI).
+    // =====================================================================
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// Undefined branch symbol → emitted verbatim as an external relocation
+        /// (type, offset, symbol name, addend preserved); section bytes untouched.
+        #[test]
+        fn prop_branch_undefined_symbol_emits_external_reloc(
+            reloc_type in prop_oneof![Just(282u32), Just(283u32), Just(280u32), Just(279u32)],
+            offset in 0u64..60,
+            addend in -1000i64..1000,
+            sym in "[a-z]{1,8}",
+        ) {
+            let mut w = writer_with_text_section(64, 0x00);
+            w.pending_branch_relocs.push(PendingReloc {
+                section: ".text".to_string(),
+                offset,
+                reloc_type,
+                symbol: sym.clone(),
+                addend,
+            });
+            w.resolve_local_branches().unwrap();
+
+            let s = w.base.sections.get(".text").unwrap();
+            prop_assert_eq!(s.relocs.len(), 1);
+            let r = &s.relocs[0];
+            prop_assert_eq!(r.offset, offset);
+            prop_assert_eq!(r.reloc_type, reloc_type);
+            prop_assert_eq!(&r.symbol_name, &sym);
+            prop_assert_eq!(r.addend, addend);
+            prop_assert_eq!(&s.data[..], &vec![0x00u8; 64][..]);
+        }
+
+        /// Cross-section branch → external relocation against the *target section*
+        /// symbol, with the target offset folded into the addend.
+        #[test]
+        fn prop_branch_cross_section_uses_section_symbol(
+            reloc_type in prop_oneof![Just(282u32), Just(283u32), Just(280u32), Just(279u32)],
+            target_offset in 0u64..1000,
+            reloc_offset in 0u64..60,
+            addend in -1000i64..1000,
+        ) {
+            let mut w = writer_with_text_section(64, 0x00);
+            w.base.labels.insert(
+                "tgt".to_string(),
+                (".data".to_string(), target_offset),
+            );
+            w.pending_branch_relocs.push(PendingReloc {
+                section: ".text".to_string(),
+                offset: reloc_offset,
+                reloc_type,
+                symbol: "tgt".to_string(),
+                addend,
+            });
+            w.resolve_local_branches().unwrap();
+
+            let s = w.base.sections.get(".text").unwrap();
+            prop_assert_eq!(s.relocs.len(), 1);
+            let r = &s.relocs[0];
+            prop_assert_eq!(r.offset, reloc_offset);
+            prop_assert_eq!(r.reloc_type, reloc_type);
+            prop_assert_eq!(&r.symbol_name, &".data".to_string());
+            prop_assert_eq!(r.addend, target_offset as i64 + addend);
+        }
+
+        /// Same-section JUMP26/CALL26: the patched word must decode back to the
+        /// exact PC-relative offset (reference oracle on the imm26 field).
+        #[test]
+        fn prop_branch_jump26_call26_round_trips(
+            reloc_words in 1u64..14u64,
+            target_words in 0u64..15u64,
+            reloc_type in prop_oneof![Just(282u32), Just(283u32)],
+        ) {
+            let reloc_offset = reloc_words * 4;
+            let target_offset = target_words * 4;
+            let pc_offset = target_offset as i64 - reloc_offset as i64;
+
+            let mut w = writer_with_text_section(64, 0x00);
+            let base: u32 = 0x1400_0000; // unconditional B with imm26 == 0
+            {
+                let s = w.base.sections.get_mut(".text").unwrap();
+                s.data[reloc_offset as usize..reloc_offset as usize + 4]
+                    .copy_from_slice(&base.to_le_bytes());
+            }
+            w.base.labels.insert("t".to_string(), (".text".to_string(), target_offset));
+            w.pending_branch_relocs.push(PendingReloc {
+                section: ".text".to_string(),
+                offset: reloc_offset,
+                reloc_type,
+                symbol: "t".to_string(),
+                addend: 0,
+            });
+            w.resolve_local_branches().unwrap();
+
+            let s = w.base.sections.get(".text").unwrap();
+            let word = u32::from_le_bytes(
+                s.data[reloc_offset as usize..reloc_offset as usize + 4]
+                    .try_into().unwrap(),
+            );
+            let imm26 = word & 0x03FF_FFFF;
+            let decoded = sign_extend(imm26, 26) as i64 * 4;
+            prop_assert_eq!(decoded, pc_offset);
+            // no external relocation should remain for an in-range local branch
+            prop_assert!(s.relocs.is_empty());
+        }
+
+        /// Same-section CONDBR19/TSTBR14: patched word decodes to exact PC offset
+        /// (reference oracle on the imm19 / imm14 field).
+        #[test]
+        fn prop_branch_condbr19_tstbr14_round_trips(
+            reloc_words in 1u64..14u64,
+            target_words in 0u64..15u64,
+            reloc_type in prop_oneof![Just(280u32), Just(279u32)],
+        ) {
+            let reloc_offset = reloc_words * 4;
+            let target_offset = target_words * 4;
+            let pc_offset = target_offset as i64 - reloc_offset as i64;
+
+            // base word 0 → immediate field starts clean so patching is isolated
+            let mut w = writer_with_text_section(64, 0x00);
+            w.base.labels.insert("t".to_string(), (".text".to_string(), target_offset));
+            w.pending_branch_relocs.push(PendingReloc {
+                section: ".text".to_string(),
+                offset: reloc_offset,
+                reloc_type,
+                symbol: "t".to_string(),
+                addend: 0,
+            });
+            w.resolve_local_branches().unwrap();
+
+            let s = w.base.sections.get(".text").unwrap();
+            let word = u32::from_le_bytes(
+                s.data[reloc_offset as usize..reloc_offset as usize + 4]
+                    .try_into().unwrap(),
+            );
+            // CONDBR19: imm19 @ [23:5], 19 bits; TSTBR14: imm14 @ [18:5], 14 bits
+            let (mask, bits) = if reloc_type == 280 {
+                (0x7FFFFu32, 19u32)
+            } else {
+                (0x3FFFu32, 14u32)
+            };
+            let imm = (word >> 5) & mask;
+            let decoded = sign_extend(imm, bits) as i64 * 4;
+            prop_assert_eq!(decoded, pc_offset);
+            prop_assert!(s.relocs.is_empty());
+        }
+
+        /// NEGATIVE CONTRACT: a same-section branch whose PC-relative offset
+        /// exceeds the instruction's immediate range must NOT be silently
+        /// truncated into the instruction word. Per the AArch64 ELF ABI (and
+        /// GAS, which errors "branch out of range" at assembly time) this must
+        /// return Err or fall back to an external relocation — never silently
+        /// patch a word that decodes to the wrong target.
+        #[test]
+        fn prop_branch_out_of_range_must_not_silently_truncate(
+            // pc_offset == addend (target offset == reloc offset); CONDBR19
+            // range is ±1 MiB, so 2_000_000 is unambiguously out of range.
+            addend in 2_000_000i64..2_100_000,
+        ) {
+            let reloc_offset = 4u64;
+            let mut w = writer_with_text_section(64, 0x00);
+            w.base.labels.insert("t".to_string(), (".text".to_string(), reloc_offset));
+            w.pending_branch_relocs.push(PendingReloc {
+                section: ".text".to_string(),
+                offset: reloc_offset,
+                reloc_type: 280, // R_AARCH64_CONDBR19, range ±1 MiB
+                symbol: "t".to_string(),
+                addend,
+            });
+            let result = w.resolve_local_branches();
+
+            let s = w.base.sections.get(".text").unwrap();
+            let fell_back = !s.relocs.is_empty();
+            prop_assert!(
+                result.is_err() || fell_back,
+                "out-of-range CONDBR19 offset (addend={}) was silently truncated: \
+                 result={:?}, external_relocs={} (expected Err or external reloc)",
+                addend, result, fell_back,
+            );
+        }
+    }
 }
