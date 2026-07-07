@@ -3720,4 +3720,141 @@ mod tests {
             prop_assert!(encode_umull(&ops).is_err());
         }
     }
+
+    // ── encode_mneg ───────────────────────────────────────────────────────
+    // MNEG Xd, Xn, Xm is the architectural alias of MSUB Xd, Xn, Xm, XZR:
+    //   sf 0 0 11011 000 Rm 1 11111 Rn Rd
+    // o1 (bit 15) = 1 selects MSUB; Ra (bits 14:10) = 11111 (XZR).
+    fn mneg_ref(rd: u32, rn: u32, rm: u32, is_64: bool) -> u32 {
+        let sf = if is_64 { 1u32 } else { 0 };
+        let mut w = 0u32;
+        w |= sf << 31;            // [31]    size
+        w |= 0b00 << 29;          // [30:29] reserved
+        w |= 0b11011 << 24;       // [28:24] Data-processing (3 source)
+        w |= 0b000 << 21;         // [23:21] o0 = MADD/MSUB class
+        w |= (rm & 0x1F) << 16;   // [20:16] Rm
+        w |= 1u32 << 15;          // [15]    o1 = 1 (MSUB)
+        w |= 0b11111 << 10;       // [14:10] Ra = XZR = 31
+        w |= (rn & 0x1F) << 5;    // [9:5]   Rn
+        w |= rd & 0x1F;           // [4:0]   Rd
+        w
+    }
+
+    proptest! {
+        // 1. Every field lands where the ARMv8 spec dictates: full-word
+        //    equality vs an independently constructed reference, for both
+        //    32-bit (W) and 64-bit (X) destination widths.
+        #[test]
+        fn mneg_field_placement(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            is_w in any::<bool>(),
+        ) {
+            let rd_op = if is_w { Operand::Reg(format!("w{}", rd)) } else { xreg(rd) };
+            let ops = vec![rd_op, xreg(rn), xreg(rm)];
+            let w = expect_word(encode_mneg(&ops));
+            prop_assert_eq!(w, mneg_ref(rd, rn, rm, !is_w));
+            prop_assert_eq!((w >> 16) & 0x1F, rm);
+            prop_assert_eq!((w >> 5) & 0x1F, rn);
+            prop_assert_eq!(w & 0x1F, rd);
+        }
+
+        // 2. Each register perturbs ONLY its own 5-bit field (Rd -> 4:0,
+        //    Rn -> 9:5, Rm -> 20:16); no register bleeds into another field
+        //    or into the opcode bits.
+        #[test]
+        fn mneg_register_fields_isolated(
+            rd in 0u32..=31, rn in 0u32..=31, rm in 0u32..=31,
+            rd2 in 0u32..=31, rn2 in 0u32..=31, rm2 in 0u32..=31,
+        ) {
+            let base = expect_word(encode_mneg(&[xreg(rd), xreg(rn), xreg(rm)]));
+            // Rd -> bits 4:0
+            let w = expect_word(encode_mneg(&[xreg(rd2), xreg(rn), xreg(rm)]));
+            let diff = base ^ w;
+            prop_assert_eq!(diff & !0x0000001Fu32, 0);
+            prop_assert_eq!(diff & 0x1F, rd ^ rd2);
+            // Rn -> bits 9:5
+            let w = expect_word(encode_mneg(&[xreg(rd), xreg(rn2), xreg(rm)]));
+            let diff = base ^ w;
+            prop_assert_eq!(diff & !0x000003E0u32, 0);
+            prop_assert_eq!((diff >> 5) & 0x1F, rn ^ rn2);
+            // Rm -> bits 20:16
+            let w = expect_word(encode_mneg(&[xreg(rd), xreg(rn), xreg(rm2)]));
+            let diff = base ^ w;
+            prop_assert_eq!(diff & !0x001F0000u32, 0);
+            prop_assert_eq!((diff >> 16) & 0x1F, rm ^ rm2);
+        }
+
+        // 3. Constant opcode fields are invariant across every register combo.
+        //    Critically, o1 (bit 15) MUST be 1 (MSUB/negate) — never 0 (MADD) —
+        //    and Ra (bits 14:10) MUST be 11111 (XZR).
+        #[test]
+        fn mneg_constant_fields_invariant(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            is_w in any::<bool>(),
+        ) {
+            let rd_op = if is_w { Operand::Reg(format!("w{}", rd)) } else { xreg(rd) };
+            let ops = vec![rd_op, xreg(rn), xreg(rm)];
+            let w = expect_word(encode_mneg(&ops));
+            let reg_mask = 0x001F0000u32 | 0x000003E0u32 | 0x0000001Fu32; // Rm|Rn|Rd
+            // 64-bit constant base = 0x9B00FC00; 32-bit = 0x1B00FC00
+            let want = if is_w { 0x1B00FC00u32 } else { 0x9B00FC00u32 };
+            prop_assert_eq!(w & !reg_mask, want);
+            prop_assert_eq!((w >> 15) & 1, 1);            // o1 = 1 (MSUB, NOT MADD)
+            prop_assert_eq!((w >> 10) & 0x1F, 0b11111);   // Ra = XZR = 31
+            prop_assert_eq!((w >> 24) & 0x1F, 0b11011);   // 3-source opcode
+            prop_assert_eq!((w >> 21) & 0x7, 0b000);      // o0
+        }
+
+        // 4. Negative contract: MNEG requires exactly 3 register operands.
+        //    Too few operands, a non-register operand anywhere, and an
+        //    out-of-range register number (> 31) are all rejected with Err
+        //    (no silent truncation, no panic).
+        #[test]
+        fn mneg_rejects_invalid_operands(
+            n in 0u32..=2u32,                      // too few operands
+            bad in 32u32..=4096u32,                // out-of-range register
+            pos in 0u32..=2u32,                    // which operand is non-register
+        ) {
+            // Too few operands -> Err
+            let ops: Vec<Operand> = (0..n).map(|i| xreg(i % 31)).collect();
+            prop_assert!(encode_mneg(&ops).is_err());
+
+            // A non-register operand anywhere -> Err
+            let mut ops = vec![xreg(0), xreg(1), xreg(2)];
+            ops[pos as usize] = Operand::Imm(7);
+            prop_assert!(encode_mneg(&ops).is_err());
+
+            // Out-of-range register number -> Err (parse_reg_num caps at 31)
+            let ops = vec![Operand::Reg(format!("x{}", bad)), xreg(1), xreg(2)];
+            prop_assert!(encode_mneg(&ops).is_err());
+        }
+
+        // 5. Architectural alias: MNEG Xd, Xn, Xm == MSUB Xd, Xn, Xm, XZR.
+        //    Per the ARM ARM, MNEG is defined as MSUB with Ra = XZR, so the two
+        //    must produce bit-identical instruction words, both selecting MSUB
+        //    (o1 = bit 15 = 1), never MADD (o1 = 0).
+        #[test]
+        fn mneg_alias_equals_msub_with_xzr(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let mneg = expect_word(encode_mneg(&ops));
+            // encode_mneg matches the independently constructed reference word.
+            prop_assert_eq!(mneg, mneg_ref(rd, rn, rm, true));
+            let msub = expect_word(encode_msub(&[
+                xreg(rd), xreg(rn), xreg(rm), Operand::Reg("xzr".into()),
+            ]));
+            // MNEG and MSUB+XZR must encode to the same instruction word.
+            prop_assert_eq!(mneg, msub);
+            // Both must select MSUB (o1 = bit 15 = 1), not MADD (o1 = 0).
+            prop_assert_eq!((mneg >> 15) & 1, 1);
+            prop_assert_eq!((msub >> 15) & 1, 1);
+        }
+    }
 }

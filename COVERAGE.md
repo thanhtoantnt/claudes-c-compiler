@@ -156,3 +156,29 @@ is silently encoded as `smull x0, wzr, w2`. Not re-filed — see
 `pbt-out/bug_reports/encode_mul_sp_operand_silently_accepted_as_xzr.md`. (BUG-2 / mixed-width
 is *not* applicable: SMULL is by definition a mixed-width instruction — 32-bit sources, 64-bit
 destination — and `sf` is correctly hardcoded to 1.)
+
+## encode_mneg — data_processing.rs (MNEG Xd, Xn, Xm → MSUB Xd, Xn, Xm, XZR)
+
+**Result: PASS, no finding.** 5 proptest properties added to the existing
+`mod tests` block in `data_processing.rs`:
+
+1. `mneg_field_placement` — full-word equality vs an independently constructed
+   spec word (`sf 00 11011 000 Rm 1 11111 Rn Rd`), for both W and X destination
+   widths, plus register-field extraction (Rm=20:16, Rn=9:5, Rd=4:0).
+2. `mneg_register_fields_isolated` — perturbing each register changes only its
+   own 5-bit field; no register bleeds into another field or the opcode.
+3. `mneg_constant_fields_invariant` — across all register combos the constant
+   base is `0x9B00FC00` (64-bit) / `0x1B00FC00` (32-bit); explicitly pins
+   **o1 (bit 15) = 1** (MSUB, not MADD), Ra=11111 (XZR), opcode=11011, o0=000.
+4. `mneg_rejects_invalid_operands` — negative contract: <3 operands, a
+   non-register operand anywhere, or an out-of-range register (>31) → `Err`
+   (no silent truncation, no panic).
+5. `mneg_alias_equals_msub_with_xzr` — architectural alias differential:
+   `MNEG Xd,Xn,Xm` is bit-identical to `MSUB Xd,Xn,Xm,XZR`; both select MSUB
+   (o1=1). Confirms `encode_mneg` and `encode_msub` agree.
+
+`encode_mneg` is a faithful encoding of the ARMv8 MNEG/MSUB alias. No SP/XZR
+operand validation gap exists here (unlike MUL/SMULL) because all three operands
+flow through `get_reg`, which rejects non-register/out-of-range operands; the
+only effect of passing `sp`/`xzr` is the architecturally-valid encoding of
+register 31 = XZR.
