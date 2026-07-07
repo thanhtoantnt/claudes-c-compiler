@@ -108,3 +108,19 @@ No bugs found. `encode_neon_dup` correctly implements both the AArch64 DUP (gene
 
 Verification:
 - `cargo test --lib dup_pbt_tests`
+
+## PBT coverage: `encode_jal` (src/backend/riscv/assembler/encoder/base.rs)
+
+Module `pbt_encode_jal` (6 properties, all PASS, 256 cases each via proptest):
+
+- `jal_rd_imm_encodes_opcode_and_rd` — Reference oracle: `jal rd, offset` produces a J-format Word whose opcode bits[6:0] == OP_JAL (0x6F), rd bits[11:7] == register number, and which equals the raw `encode_j(OP_JAL, rd, imm)` exactly.
+- `jal_imm_decodes_roundtrip` — Strong decode oracle: for every representable even offset in the J-range [-2^20, 2^20-2], a reference decoder of the encoded word's bit-scattered immediate field `imm[20|10:1|11|19:12]` reproduces the original signed offset byte-for-byte.
+- `jal_imm_parity_invariant` — Algebraic oracle: `encode_j` never reads immediate bit 0, so `jal rd, n` and `jal rd, n & !1` yield identical words (J offsets are implicitly half-word aligned).
+- `jal_single_imm_implicit_ra` — Reference oracle: the one-operand form `jal offset` defaults rd to ra (x1) and encodes identically to the explicit `jal ra, offset`.
+- `jal_symbol_emits_jal_relocation` — Reference oracle: any non-immediate second operand (Symbol / Label / Reg-as-symbol) and the one-operand form defer the offset to link time — emitting WordWithReloc with RelocType::Jal, a zeroed offset field (`word == encode_j(OP_JAL, rd, 0)`), addend 0, and the symbol carried verbatim (rd=1 in the 1-op form).
+- `jal_rejects_invalid_operands` — Negative contract: unsupported operand shapes (Mem, MemSymbol, SymbolOffset, FenceArg, Csr, RoundingMode), empty operands, and unparseable registers (`x32`) are all rejected with non-empty errors; the specific "jal: invalid operand" / "invalid integer register" messages are asserted.
+
+No bugs found. `encode_jal` correctly handles both the two-operand `jal rd, offset` and one-operand `jal offset` (implicit rd=ra) forms, the J-type immediate bit-scatter, and the R_RISCV_JAL relocation path for deferred symbols/labels/registers.
+
+Verification:
+- `cargo test --lib pbt_encode_jal`

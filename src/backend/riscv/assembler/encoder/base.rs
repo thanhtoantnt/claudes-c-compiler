@@ -672,3 +672,223 @@ mod pbt_encode_shift_imm {
         }
     }
 }
+
+#[cfg(test)]
+mod pbt_encode_jal {
+    use super::*;
+    use proptest::prelude::*;
+
+    const OP_JAL_BITS: u32 = OP_JAL; // 0b1101111 == 0x6F
+
+    /// Strategy yielding (register_name, expected_5bit_number) pairs covering
+    /// both the `xN` form and the ABI alias names accepted by `reg_num`.
+    fn reg_strategy() -> impl Strategy<Value = (String, u32)> {
+        let pairs: Vec<(String, u32)> = (0u32..=31)
+            .flat_map(|n| {
+                let mut v: Vec<(String, u32)> = vec![(format!("x{}", n), n)];
+                let abi: Option<&'static str> = match n {
+                    0 => Some("zero"), 1 => Some("ra"), 2 => Some("sp"), 3 => Some("gp"),
+                    4 => Some("tp"), 5 => Some("t0"), 6 => Some("t1"), 7 => Some("t2"),
+                    8 => Some("s0"), 9 => Some("s1"), 10 => Some("a0"), 11 => Some("a1"),
+                    12 => Some("a2"), 13 => Some("a3"), 14 => Some("a4"), 15 => Some("a5"),
+                    16 => Some("a6"), 17 => Some("a7"), 18 => Some("s2"), 19 => Some("s3"),
+                    20 => Some("s4"), 21 => Some("s5"), 22 => Some("s6"), 23 => Some("s7"),
+                    24 => Some("s8"), 25 => Some("s9"), 26 => Some("s10"), 27 => Some("s11"),
+                    28 => Some("t3"), 29 => Some("t4"), 30 => Some("t5"), 31 => Some("t6"),
+                    _ => None,
+                };
+                if let Some(a) = abi {
+                    v.push((a.to_string(), n));
+                }
+                if n == 8 {
+                    v.push(("fp".to_string(), n));
+                }
+                v
+            })
+            .collect();
+        proptest::sample::select(pairs)
+    }
+
+    /// Reference decoder for the J-type immediate field. Given a full 32-bit
+    /// instruction word, reconstructs the signed 21-bit jump offset (in bytes).
+    /// This is the inverse of `encode_j`'s bit-scattering for the J-format.
+    fn decode_j_imm(w: u32) -> i32 {
+        let bit20 = (w >> 31) & 1;
+        let bits10_1 = (w >> 21) & 0x3FF;
+        let bit11 = (w >> 20) & 1;
+        let bits19_12 = (w >> 12) & 0xFF;
+        // Reassemble the 21-bit immediate (bit 0 is implicitly 0).
+        let imm21 = (bit20 << 20) | (bits19_12 << 12) | (bit11 << 11) | (bits10_1 << 1);
+        // Sign-extend from bit 20 of the 21-bit quantity.
+        ((imm21 << 11) as i32) >> 11
+    }
+
+    proptest! {
+        // Oracle: Reference — `jal rd, offset` with an immediate must produce
+        // a J-format word whose opcode (bits[6:0]) is JAL, whose rd field
+        // (bits[11:7]) equals the destination register number, and whose
+        // value is exactly the raw J-format encoder applied to the same args.
+        #[test]
+        fn jal_rd_imm_encodes_opcode_and_rd(
+            (rd_name, rd_num) in reg_strategy(),
+            imm in any::<i32>(),
+        ) {
+            let ops = [Operand::Reg(rd_name), Operand::Imm(imm as i64)];
+            let w = match encode_jal(&ops).expect("jal rd,imm must encode") {
+                EncodeResult::Word(w) => w,
+                other => panic!("expected Word, got {:?}", other),
+            };
+
+            prop_assert_eq!(w & 0x7F, OP_JAL_BITS, "opcode bits[6:0]");
+            prop_assert_eq!((w >> 7) & 0x1F, rd_num, "rd bits[11:7]");
+            // Cross-check against the raw J-format encoder used by the impl.
+            prop_assert_eq!(w, encode_j(OP_JAL, rd_num, imm));
+        }
+
+        // Oracle: Reference (round-trip decode) — for any offset that fits the
+        // J-format range and is a multiple of 2, decoding the encoded word's
+        // immediate field must reproduce the original offset byte-for-byte.
+        // This is the strongest correctness oracle for the bit-scatter layout
+        // imm[20|10:1|11|19:12].
+        #[test]
+        fn jal_imm_decodes_roundtrip(
+            rd_num in 0u32..=31,
+            imm_raw in (-0x100000i32)..=(0x0FFFFE), // [-2^20, 2^20-2]
+        ) {
+            let imm = imm_raw & !1; // force even (bit 0 is implicit)
+            let ops = [
+                Operand::Reg(format!("x{}", rd_num)),
+                Operand::Imm(imm as i64),
+            ];
+            let w = match encode_jal(&ops).expect("jal must encode") {
+                EncodeResult::Word(w) => w,
+                other => panic!("expected Word, got {:?}", other),
+            };
+
+            prop_assert_eq!(decode_j_imm(w), imm, "decoded immediate must match input");
+            prop_assert_eq!((w >> 7) & 0x1F, rd_num, "rd preserved");
+            prop_assert_eq!(w & 0x7F, OP_JAL_BITS, "opcode preserved");
+        }
+
+        // Oracle: Algebraic (parity invariance) — `encode_j` never reads
+        // immediate bit 0, so `jal rd, n` and `jal rd, n & !1` must produce
+        // identical words. This matches the RISC-V spec: J offsets are
+        // implicitly multiples of two (half-word aligned).
+        #[test]
+        fn jal_imm_parity_invariant(
+            (rd_name, rd_num) in reg_strategy(),
+            imm in any::<i64>(),
+        ) {
+            let w_odd = match encode_jal(&[Operand::Reg(rd_name.clone()), Operand::Imm(imm)]).expect("must encode") {
+                EncodeResult::Word(w) => w,
+                other => panic!("expected Word, got {:?}", other),
+            };
+            let w_even = match encode_jal(&[Operand::Reg(rd_name), Operand::Imm(imm & !1)]).expect("must encode") {
+                EncodeResult::Word(w) => w,
+                other => panic!("expected Word, got {:?}", other),
+            };
+            prop_assert_eq!(w_odd, w_even, "bit 0 of immediate must be ignored");
+            prop_assert_eq!(w_odd, encode_j(OP_JAL, rd_num, (imm & !1) as i32));
+        }
+
+        // Oracle: Reference — the one-operand form `jal offset` must default
+        // the destination to ra (x1) per the RISC-V pseudo-instruction rule,
+        // while still encoding the immediate identically to `jal ra, offset`.
+        #[test]
+        fn jal_single_imm_implicit_ra(
+            imm in any::<i32>(),
+        ) {
+            let w_implicit = match encode_jal(&[Operand::Imm(imm as i64)]).expect("jal imm must encode") {
+                EncodeResult::Word(w) => w,
+                other => panic!("expected Word, got {:?}", other),
+            };
+            let w_explicit = match encode_jal(&[Operand::Reg("ra".to_string()), Operand::Imm(imm as i64)])
+                .expect("jal ra,imm must encode") {
+                EncodeResult::Word(w) => w,
+                other => panic!("expected Word, got {:?}", other),
+            };
+            prop_assert_eq!((w_implicit >> 7) & 0x1F, 1u32, "implicit rd must be ra (x1)");
+            prop_assert_eq!(w_implicit, w_explicit, "jal off == jal ra, off");
+        }
+
+        // Oracle: Reference — any non-immediate second operand (Symbol, Label,
+        // or Reg-as-symbol) in `jal rd, X`, and the one-operand form `jal X`,
+        // must defer the offset to link time: emit WordWithReloc with
+        // RelocType::Jal, a zeroed offset field (word == encode_j(JAL, rd, 0)),
+        // a zero addend, and the symbol carried verbatim.
+        #[test]
+        fn jal_symbol_emits_jal_relocation(
+            (rd_name, rd_num) in reg_strategy(),
+            sym in "[a-zA-Z_][a-zA-Z0-9_]*",
+            kind in prop::sample::select(vec![0u8, 1, 2]), // Symbol / Label / Reg
+        ) {
+            let sym_operand = match kind {
+                0 => Operand::Symbol(sym.clone()),
+                1 => Operand::Label(sym.clone()),
+                _ => Operand::Reg(sym.clone()),
+            };
+
+            // Two-operand form: jal rd, sym
+            let (word, reloc) = match encode_jal(&[Operand::Reg(rd_name.clone()), sym_operand.clone()])
+                .expect("jal rd,sym must encode") {
+                EncodeResult::WordWithReloc { word, reloc } => (word, reloc),
+                other => panic!("expected WordWithReloc, got {:?}", other),
+            };
+            prop_assert_eq!(word, encode_j(OP_JAL, rd_num, 0), "offset field zeroed for reloc");
+            prop_assert_eq!(word & 0x7F, OP_JAL_BITS, "opcode");
+            prop_assert_eq!((word >> 7) & 0x1F, rd_num, "rd");
+            match reloc.reloc_type {
+                RelocType::Jal => {}
+                other => panic!("expected Jal, got {:?}", other),
+            }
+            prop_assert_eq!(reloc.addend, 0, "addend must be zero");
+            prop_assert_eq!(reloc.symbol, sym.clone(), "symbol carried verbatim");
+
+            // One-operand form: jal sym  -> implicit rd = ra (x1)
+            let (word1, reloc1) = match encode_jal(&[sym_operand]).expect("jal sym must encode") {
+                EncodeResult::WordWithReloc { word, reloc } => (word, reloc),
+                other => panic!("expected WordWithReloc, got {:?}", other),
+            };
+            prop_assert_eq!(word1, encode_j(OP_JAL, 1, 0), "1-op form zeroes offset, rd=1");
+            match reloc1.reloc_type {
+                RelocType::Jal => {}
+                other => panic!("expected Jal, got {:?}", other),
+            }
+            prop_assert_eq!(reloc1.addend, 0);
+            prop_assert_eq!(reloc1.symbol, sym);
+        }
+
+        // Oracle: Negative/error contract — jal requires (offset) or
+        // (rd, offset) where offset is Imm/Symbol/Label/Reg. Any operand shape
+        // that is not one of these, a missing operand, or an unparseable
+        // register must be rejected with a non-empty error.
+        #[test]
+        fn jal_rejects_invalid_operands(
+            bad in prop::sample::select(vec![
+                Operand::Mem { base: "sp".to_string(), offset: 0 },
+                Operand::MemSymbol { base: "sp".to_string(), symbol: "s".to_string(), modifier: "%lo".to_string() },
+                Operand::SymbolOffset("s".to_string(), 4),
+                Operand::FenceArg("iorw".to_string()),
+                Operand::Csr("cycle".to_string()),
+                Operand::RoundingMode("rne".to_string()),
+            ])
+        ) {
+            // One-operand form with an unsupported operand shape.
+            let err = encode_jal(&[bad.clone()]).expect_err("1-op unsupported operand must error");
+            prop_assert!(err.contains("jal: invalid operand"), "got: {}", err);
+
+            // Two-operand form with an unsupported second operand.
+            let ops = vec![Operand::Reg("a0".to_string()), bad];
+            let err = encode_jal(&ops).expect_err("2-op unsupported operand must error");
+            prop_assert!(err.contains("jal: invalid operand"), "got: {}", err);
+
+            // Empty operands (no operands at all).
+            prop_assert!(encode_jal(&[]).is_err(), "empty operands must error");
+
+            // Invalid register name as first operand.
+            let ops = vec![Operand::Reg("x32".to_string()), Operand::Imm(0)];
+            let err = encode_jal(&ops).expect_err("invalid register must error");
+            prop_assert!(err.contains("invalid integer register"), "got: {}", err);
+        }
+    }
+}
