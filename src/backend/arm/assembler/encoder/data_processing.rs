@@ -3956,4 +3956,78 @@ mod tests {
             prop_assert!(encode_smulh(&ops).is_err());
         }
     }
+
+    // ── UMULH (Unsigned multiply high) ─────────────────────────────────────
+    // Oracle: reference (literal-spec) encoding derived from the ARMv8 ARM.
+    // "UMULH Xd, Xn, Xm":  1 00 11011 110 Rm 0 11111 Rn Rd
+    // sf=1 fixed (64-bit only), op31=110 (bit 23 set selects unsigned),
+    // o0=0, Ra hardwired to XZR (11111). Differs from SMULH only in op31 bit 23.
+    fn umulh_ref(rd: u32, rn: u32, rm: u32) -> u32 {
+        (1u32 << 31) | (0b11011u32 << 24) | (0b110u32 << 21) | (rm << 16)
+            | (0b11111u32 << 10) | (rn << 5) | rd
+    }
+
+    proptest! {
+        // 1. Fixed fields: regardless of operands, UMULH pins sf=1, the 11011
+        //    data-processing (3 source) class opcode, op31=110 (the unsigned
+        //    multiply-high selector), o0=0, and Ra=XZR (11111), per the ARMv8
+        //    spec for "Unsigned multiply high".
+        #[test]
+        fn umulh_fixed_fields(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_umulh(&ops));
+            prop_assert_eq!((w >> 31) & 1, 1);               // sf always 1 (64-bit only)
+            prop_assert_eq!((w >> 29) & 0x3, 0b00);          // bits 30:29 = 00
+            prop_assert_eq!((w >> 24) & 0x1F, 0b11011);      // class opcode
+            prop_assert_eq!(op31_of(w), 0b110);              // op31=110 selects UMULH
+            prop_assert_eq!(o0_of(w), 0);                    // o0 = 0
+            prop_assert_eq!(ra_of(w), 0b11111);              // Ra hardwired to XZR
+        }
+
+        // 2. Register placement + reference match: Rd/Rn/Rm land in bits 4:0 /
+        //    9:5 / 20:16 exactly as supplied, and the whole word equals an
+        //    independent literal-spec reconstruction of the UMULH encoding.
+        #[test]
+        fn umulh_register_fields_match_reference(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_umulh(&ops));
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(w, umulh_ref(rd, rn, rm));
+        }
+
+        // 3. NEGATIVE CONTRACT (operand count): UMULH takes exactly three
+        //    register operands. Any subset of fewer than three must yield Err
+        //    (get_reg fails on the missing operand), never a truncated word.
+        #[test]
+        fn umulh_missing_operand_errors(
+            n in 0u32..=2u32,         // 0, 1, or 2 operands — never the required 3
+        ) {
+            let ops: Vec<Operand> = (0..n).map(xreg).collect();
+            prop_assert!(encode_umulh(&ops).is_err());
+        }
+
+        // 4. NEGATIVE CONTRACT (width): UMULH is defined ONLY in the 64-bit (X)
+        //    form — "UMULH Xd, Xn, Xm". 32-bit (W) operands are architecturally
+        //    UNDEF and must be rejected with Err, not silently re-encoded as a
+        //    64-bit instruction. (Mirrors the SMULH finding; see bug report.)
+        #[test]
+        fn umulh_rejects_32bit_w_registers(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let ops = vec![wreg(rd), wreg(rn), wreg(rm)];
+            prop_assert!(encode_umulh(&ops).is_err());
+        }
+    }
 }
