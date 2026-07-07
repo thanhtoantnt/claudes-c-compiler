@@ -51,3 +51,15 @@ Verification:
 
 Verification:
 - `cargo test backend::riscv::assembler::encoder::base::pbt_encode_lui --lib`
+
+## PBT coverage: `encode_shift_imm` (src/backend/riscv/assembler/encoder/base.rs)
+
+Module `pbt_encode_shift_imm` (5 properties, all PASS, 256 cases each via proptest):
+
+- `shift_imm_encodes_all_fields` — Reference oracle: every field of the I-format OP-IMM word (opcode/rd/funct3/rs1/imm[31:20]) is exactly determined by inputs.
+- `shift_amt_is_masked_to_six_bits` — shamt is masked to `& 0x3F`; identical word for a shamt and its low-6-bits value, including negative immediates.
+- `shift_imm_matches_encode_i_reference` — output equals `encode_i(OP_OP_IMM, rd, funct3, rs1, (funct6<<6)|(shamt&0x3F))`.
+- `real_shift_mnemonics_decode_to_canonical_fields` — slli/srli/srai produce canonical RISC-V words (funct6 in bits[31:26], shamt in bits[25:20]).
+- `shift_imm_rejects_invalid_operands` — Negative/error contract: missing operands, non-imm third operand, invalid register all rejected.
+
+No bugs found. `encode_shift_imm` is a correct, thin wrapper over `encode_i`.

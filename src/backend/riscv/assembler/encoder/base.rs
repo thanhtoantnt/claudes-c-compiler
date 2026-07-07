@@ -489,3 +489,186 @@ mod pbt_encode_lui {
         }
     }
 }
+
+#[cfg(test)]
+mod pbt_encode_shift_imm {
+    use super::*;
+    use proptest::prelude::*;
+
+    const OP_OP_IMM_BITS: u32 = OP_OP_IMM; // 0b0010011 == 0x13
+
+    /// Strategy yielding (register_name, expected_5bit_number) pairs covering
+    /// both the `xN` form and the ABI alias names accepted by `reg_num`.
+    fn reg_strategy() -> impl Strategy<Value = (String, u32)> {
+        let pairs: Vec<(String, u32)> = (0u32..=31)
+            .flat_map(|n| {
+                let mut v: Vec<(String, u32)> = vec![(format!("x{}", n), n)];
+                let abi: Option<&'static str> = match n {
+                    0 => Some("zero"), 1 => Some("ra"), 2 => Some("sp"), 3 => Some("gp"),
+                    4 => Some("tp"), 5 => Some("t0"), 6 => Some("t1"), 7 => Some("t2"),
+                    8 => Some("s0"), 9 => Some("s1"), 10 => Some("a0"), 11 => Some("a1"),
+                    12 => Some("a2"), 13 => Some("a3"), 14 => Some("a4"), 15 => Some("a5"),
+                    16 => Some("a6"), 17 => Some("a7"), 18 => Some("s2"), 19 => Some("s3"),
+                    20 => Some("s4"), 21 => Some("s5"), 22 => Some("s6"), 23 => Some("s7"),
+                    24 => Some("s8"), 25 => Some("s9"), 26 => Some("s10"), 27 => Some("s11"),
+                    28 => Some("t3"), 29 => Some("t4"), 30 => Some("t5"), 31 => Some("t6"),
+                    _ => None,
+                };
+                if let Some(a) = abi {
+                    v.push((a.to_string(), n));
+                }
+                if n == 8 {
+                    v.push(("fp".to_string(), n));
+                }
+                v
+            })
+            .collect();
+        proptest::sample::select(pairs)
+    }
+
+    proptest! {
+        // Oracle: Reference — encode_shift_imm builds an I-format OP-IMM word
+        // whose every field is exactly determined by its inputs:
+        //   bits[6:0]   = OP_OP_IMM (0x13)
+        //   bits[11:7]  = rd register number
+        //   bits[14:12] = funct3 argument
+        //   bits[19:15] = rs1 register number
+        //   bits[31:20] = (funct6 & 0x3F) << 6 | (shamt & 0x3F)
+        #[test]
+        fn shift_imm_encodes_all_fields(
+            (rd_name, rd_num) in reg_strategy(),
+            (rs1_name, rs1_num) in reg_strategy(),
+            funct3 in 0u32..8,
+            funct6 in 0u32..64,
+            shamt in 0i64..64,
+        ) {
+            let ops = [Operand::Reg(rd_name), Operand::Reg(rs1_name), Operand::Imm(shamt)];
+            let w = match encode_shift_imm(&ops, funct3, funct6).expect("valid operands must encode") {
+                EncodeResult::Word(w) => w,
+                other => panic!("expected Word, got {:?}", other),
+            };
+
+            prop_assert_eq!(w & 0x7F, OP_OP_IMM_BITS, "opcode bits[6:0]");
+            prop_assert_eq!((w >> 7) & 0x1F, rd_num, "rd bits[11:7]");
+            prop_assert_eq!((w >> 12) & 0x7, funct3, "funct3 bits[14:12]");
+            prop_assert_eq!((w >> 15) & 0x1F, rs1_num, "rs1 bits[19:15]");
+            let expected_imm_field = ((funct6 & 0x3F) << 6) | ((shamt as u32) & 0x3F);
+            prop_assert_eq!((w >> 20) & 0xFFF, expected_imm_field, "imm bits[31:20]");
+        }
+
+        // Oracle: Reference — the shift amount is masked to its low 6 bits
+        // (`shamt & 0x3F`), so a shamt and its low-6-bits value must produce
+        // the identical word. This also holds for negative immediates, which
+        // re-interpret to large u32 values before masking.
+        #[test]
+        fn shift_amt_is_masked_to_six_bits(
+            (rd_name, _rd) in reg_strategy(),
+            (rs1_name, _rs1) in reg_strategy(),
+            funct3 in 0u32..8,
+            funct6 in 0u32..64,
+            shamt in any::<i64>(),
+        ) {
+            let ops_full = [Operand::Reg(rd_name.clone()), Operand::Reg(rs1_name.clone()), Operand::Imm(shamt)];
+            let w_full = match encode_shift_imm(&ops_full, funct3, funct6).expect("must encode") {
+                EncodeResult::Word(w) => w,
+                other => panic!("expected Word, got {:?}", other),
+            };
+
+            let masked = (shamt as u32) & 0x3F;
+            let ops_masked = [Operand::Reg(rd_name), Operand::Reg(rs1_name), Operand::Imm(masked as i64)];
+            let w_masked = match encode_shift_imm(&ops_masked, funct3, funct6).expect("must encode") {
+                EncodeResult::Word(w) => w,
+                other => panic!("expected Word, got {:?}", other),
+            };
+
+            prop_assert_eq!(w_full, w_masked, "shamt must be masked to low 6 bits");
+        }
+
+        // Oracle: Reference — the output exactly equals the I-format encoder
+        // applied to the computed immediate, i.e. encode_shift_imm is a thin
+        // wrapper over encode_i with imm = (funct6<<6)|(shamt&0x3F).
+        #[test]
+        fn shift_imm_matches_encode_i_reference(
+            (rd_name, rd_num) in reg_strategy(),
+            (rs1_name, rs1_num) in reg_strategy(),
+            funct3 in 0u32..8,
+            funct6 in 0u32..64,
+            shamt in any::<i64>(),
+        ) {
+            let ops = [Operand::Reg(rd_name), Operand::Reg(rs1_name), Operand::Imm(shamt)];
+            let w = match encode_shift_imm(&ops, funct3, funct6).expect("must encode") {
+                EncodeResult::Word(w) => w,
+                other => panic!("expected Word, got {:?}", other),
+            };
+            let imm = (funct6 << 6) | ((shamt as u32) & 0x3F);
+            prop_assert_eq!(w, encode_i(OP_OP_IMM, rd_num, funct3, rs1_num, imm as i32));
+        }
+
+        // Oracle: Reference — the three real base-ISA shift-immediate mnemonics
+        // (slli/srli/srai) encoded through encode_shift_imm yield canonical
+        // RISC-V words: opcode 0x13, funct6 in bits[31:26], shamt in bits[25:20].
+        #[test]
+        fn real_shift_mnemonics_decode_to_canonical_fields(
+            shamt in 0i64..64,
+            rd_num in 0u32..32,
+            rs1_num in 0u32..32,
+        ) {
+            for (mnem, f3, f6) in [
+                ("slli", 0b001u32, 0b000000u32),
+                ("srli", 0b101u32, 0b000000u32),
+                ("srai", 0b101u32, 0b010000u32),
+            ] {
+                let ops = vec![
+                    Operand::Reg(format!("x{}", rd_num)),
+                    Operand::Reg(format!("x{}", rs1_num)),
+                    Operand::Imm(shamt),
+                ];
+                let w = match encode_shift_imm(&ops, f3, f6).expect("must encode") {
+                    EncodeResult::Word(w) => w,
+                    other => panic!("expected Word, got {:?}", other),
+                };
+                prop_assert_eq!(w & 0x7F, 0x13, "opcode for {}", mnem);
+                prop_assert_eq!((w >> 26) & 0x3F, f6, "funct6 for {}", mnem);
+                prop_assert_eq!((w >> 20) & 0x3F, shamt as u32, "shamt for {}", mnem);
+                prop_assert_eq!((w >> 12) & 0x7, f3, "funct3 for {}", mnem);
+            }
+        }
+
+        // Oracle: Negative/error contract — encode_shift_imm requires three
+        // operands with the third being an immediate; fewer operands, a
+        // non-immediate third operand, or an unparseable register must error.
+        #[test]
+        fn shift_imm_rejects_invalid_operands(
+            bad_third in prop::sample::select(vec![
+                Operand::Reg("a1".to_string()),
+                Operand::Label("foo".to_string()),
+                Operand::Symbol("bar".to_string()),
+                Operand::Mem { base: "sp".to_string(), offset: 0 },
+            ])
+        ) {
+            // Non-immediate third operand.
+            let ops = vec![Operand::Reg("a0".to_string()), Operand::Reg("a1".to_string()), bad_third.clone()];
+            let err = encode_shift_imm(&ops, 0b001, 0b000000)
+                .expect_err("non-imm 3rd operand must error");
+            prop_assert!(err.contains("expected immediate"), "got: {}", err);
+
+            // Missing third operand.
+            let ops = vec![Operand::Reg("a0".to_string()), Operand::Reg("a1".to_string())];
+            let err = encode_shift_imm(&ops, 0b001, 0b000000)
+                .expect_err("missing 3rd operand must error");
+            prop_assert!(err.contains("expected immediate"), "got: {}", err);
+
+            // Missing second operand.
+            prop_assert!(encode_shift_imm(&[Operand::Reg("a0".to_string())], 0b001, 0b000000).is_err());
+
+            // Empty operands.
+            prop_assert!(encode_shift_imm(&[], 0b001, 0b000000).is_err());
+
+            // Invalid register name as first operand.
+            let ops = vec![Operand::Reg("x32".to_string()), Operand::Reg("a1".to_string()), Operand::Imm(1)];
+            let err = encode_shift_imm(&ops, 0b001, 0b000000)
+                .expect_err("invalid register must error");
+            prop_assert!(err.contains("invalid integer register"), "got: {}", err);
+        }
+    }
+}
