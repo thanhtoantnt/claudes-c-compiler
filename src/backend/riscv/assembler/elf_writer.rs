@@ -1420,3 +1420,260 @@ impl ElfWriter {
         self.base.write_elf(output_path, &config, true)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ---- Independent reference decoders based on the RISC-V spec (NOT the
+    //      implementation under test). Used as oracles for round-trip checks.
+
+    /// Decode a B-type immediate from a 32-bit instruction word.
+    fn decode_btype_imm(word: u32) -> i32 {
+        let bit12 = ((word >> 31) & 1) as i32;
+        let bit11 = ((word >> 7) & 1) as i32;
+        let bits10_5 = ((word >> 25) & 0x3F) as i32;
+        let bits4_1 = ((word >> 8) & 0xF) as i32;
+        let imm = (bit12 << 12) | (bit11 << 11) | (bits10_5 << 5) | (bits4_1 << 1);
+        // sign-extend from bit 12
+        (imm << 19) >> 19
+    }
+
+    /// Decode a J-type immediate from a 32-bit instruction word.
+    fn decode_jtype_imm(word: u32) -> i32 {
+        let bit20 = ((word >> 31) & 1) as i32;
+        let bits10_1 = ((word >> 21) & 0x3FF) as i32;
+        let bit11 = ((word >> 20) & 1) as i32;
+        let bits19_12 = ((word >> 12) & 0xFF) as i32;
+        let imm = (bit20 << 20) | (bits10_1 << 1) | (bit11 << 11) | (bits19_12 << 12);
+        // sign-extend from bit 20
+        (imm << 11) >> 11
+    }
+
+    /// A placeholder instruction with the correct opcode for the reloc type.
+    /// The immediate bits are zero, so masking during patching preserves the
+    /// opcode/funct3/register fields.
+    fn placeholder_word(reloc_type: u32) -> u32 {
+        match reloc_type {
+            16 => 0x00000063, // beq x0, x0, 0  (BRANCH)
+            17 => 0x0000006f, // jal x0, 0      (JAL)
+            19 => 0x00000097, // auipc x1, 0
+            _ => 0x00000013,  // nop
+        }
+    }
+
+    /// Build a writer whose `.text` section is 256 bytes of NOPs, with the
+    /// instruction at `instr_off` overwritten by a type-appropriate placeholder,
+    /// a label pointing at `target_off`, and a single pending local reloc.
+    fn build_writer(
+        instr_off: u64,
+        target_off: u64,
+        addend: i64,
+        reloc_type: u32,
+        target_section: &str,
+        symbol: &str,
+    ) -> ElfWriter {
+        let mut w = ElfWriter::new();
+        w.base.ensure_text_section();
+        // 64 NOP words => 256 bytes, enough room for instr_off in [0, 252].
+        for _ in 0..64 {
+            w.base.emit_u32_le(0x00000013);
+        }
+        let placeholder = placeholder_word(reloc_type);
+        let text = w.base.sections.get_mut(".text").unwrap();
+        let io = instr_off as usize;
+        text.data[io..io + 4].copy_from_slice(&placeholder.to_le_bytes());
+
+        if target_section != ".text" {
+            w.base.ensure_section(
+                target_section,
+                SHT_PROGBITS,
+                SHF_ALLOC | SHF_WRITE,
+                1,
+            );
+        }
+        w.base
+            .labels
+            .insert(symbol.to_string(), (target_section.to_string(), target_off));
+        w.pending_branch_relocs.push(PendingReloc {
+            section: ".text".to_string(),
+            offset: instr_off,
+            reloc_type,
+            symbol: symbol.to_string(),
+            addend,
+            pcrel_hi_offset: None,
+        });
+        w
+    }
+
+    /// Oracle: a local same-section label resolves to an in-place patch and
+    /// emits NO external relocation.
+    fn assert_no_relocs(w: &ElfWriter) {
+        let text = w.base.sections.get(".text").unwrap();
+        assert_eq!(
+            text.relocs.len(),
+            0,
+            "expected no external relocs for an in-range same-section patch"
+        );
+    }
+
+    proptest! {
+        // Property 1: R_RISCV_BRANCH (B-type) round-trips.
+        // For any resolvable same-section target and even addend within the
+        // 13-bit signed range, resolve_local_branches patches the instruction
+        // word so that decoding its B-type immediate yields exactly the
+        // PC-relative offset target_offset - instr_offset + addend.
+        #[test]
+        fn prop_branch_btype_roundtrips(
+            instr_off in 0u64..63,
+            target_off_raw in 0u64..128,
+            addend_raw in -512i64..512,
+        ) {
+            let instr_off = instr_off * 4;          // 4-byte aligned
+            let target_off = target_off_raw * 2;      // branches target even offsets
+            let addend = addend_raw * 2;             // B-type imm bit 0 is always 0
+            let mut w = build_writer(instr_off, target_off, addend, 16, ".text", "target");
+            w.resolve_local_branches().unwrap();
+
+            let text = w.base.sections.get(".text").unwrap();
+            let io = instr_off as usize;
+            let word = u32::from_le_bytes([
+                text.data[io], text.data[io + 1], text.data[io + 2], text.data[io + 3],
+            ]);
+            let expected = (target_off as i64) - (instr_off as i64) + addend;
+            let decoded = decode_btype_imm(word) as i64;
+
+            prop_assert_eq!(decoded, expected);
+            // Sanity: a resolvable same-section patch adds no external reloc.
+            prop_assert_eq!(text.relocs.len(), 0);
+        }
+
+        // Property 2: R_RISCV_JAL (J-type) round-trips.
+        // Same as above but for 21-bit signed J-type immediates.
+        #[test]
+        fn prop_jal_jtype_roundtrips(
+            instr_off in 0u64..63,
+            target_off_raw in 0u64..128,
+            addend_raw in -512i64..512,
+        ) {
+            let instr_off = instr_off * 4;
+            let target_off = target_off_raw * 2;      // JAL targets even offsets
+            let addend = addend_raw * 2;
+            let mut w = build_writer(instr_off, target_off, addend, 17, ".text", "target");
+            w.resolve_local_branches().unwrap();
+
+            let text = w.base.sections.get(".text").unwrap();
+            let io = instr_off as usize;
+            let word = u32::from_le_bytes([
+                text.data[io], text.data[io + 1], text.data[io + 2], text.data[io + 3],
+            ]);
+            let expected = (target_off as i64) - (instr_off as i64) + addend;
+            let decoded = decode_jtype_imm(word) as i64;
+
+            prop_assert_eq!(decoded, expected);
+            prop_assert_eq!(text.relocs.len(), 0);
+        }
+
+        // Property 3: pcrel_lo12 relocs (types 24 and 25) are ALWAYS externalized.
+        // resolve_local_branches must emit them as ELF relocations and MUST NOT
+        // patch the instruction bytes (the linker pairs them with pcrel_hi20).
+        #[test]
+        fn prop_pcrel_lo_externalized(
+            reloc_type in prop::sample::select(vec![24u32, 25u32]),
+            instr_off in 0u64..63,
+            target_off in 0u64..256,
+            addend in -128i64..128,
+        ) {
+            let instr_off = instr_off * 4;
+            let placeholder = placeholder_word(reloc_type);
+            let mut w = build_writer(instr_off, target_off, addend, reloc_type, ".text", "target");
+            w.resolve_local_branches().unwrap();
+
+            let text = w.base.sections.get(".text").unwrap();
+            // Exactly one external reloc, matching all pending fields.
+            prop_assert_eq!(text.relocs.len(), 1);
+            let r = &text.relocs[0];
+            prop_assert_eq!(r.offset, instr_off);
+            prop_assert_eq!(r.reloc_type, reloc_type);
+            prop_assert_eq!(r.symbol_name.as_str(), "target");
+            prop_assert_eq!(r.addend, addend);
+            // Instruction bytes must be untouched.
+            let io = instr_off as usize;
+            let word = u32::from_le_bytes([
+                text.data[io], text.data[io + 1], text.data[io + 2], text.data[io + 3],
+            ]);
+            prop_assert_eq!(word, placeholder);
+        }
+
+        // Property 4: unresolvable targets fall back to an external relocation.
+        // Two sub-cases share this contract: (a) the symbol is missing from the
+        // label table, and (b) the label exists but lives in a different
+        // section. In both cases no in-place patch happens and exactly one
+        // matching reloc is emitted.
+        #[test]
+        fn prop_unresolvable_externalized(
+            missing in 0u8..2,            // 0 => cross-section, 1 => missing symbol
+            reloc_type in prop::sample::select(vec![16u32, 17u32]),
+            instr_off in 0u64..63,
+            target_off in 0u64..256,
+            addend in -64i64..64,
+        ) {
+            let instr_off = instr_off * 4;
+            let placeholder = placeholder_word(reloc_type);
+            let (target_section, symbol) = if missing == 0 {
+                (".data", "target") // resolvable but cross-section
+            } else {
+                (".text", "target") // symbol will be left absent
+            };
+            let mut w = build_writer(instr_off, target_off, addend, reloc_type, target_section, symbol);
+            if missing == 1 {
+                // remove the label to make the symbol genuinely unresolved
+                w.base.labels.remove(symbol);
+            }
+            w.resolve_local_branches().unwrap();
+
+            let text = w.base.sections.get(".text").unwrap();
+            prop_assert_eq!(text.relocs.len(), 1);
+            let r = &text.relocs[0];
+            prop_assert_eq!(r.offset, instr_off);
+            prop_assert_eq!(r.reloc_type, reloc_type);
+            prop_assert_eq!(r.symbol_name.as_str(), symbol);
+            prop_assert_eq!(r.addend, addend);
+
+            // No patch: instruction word unchanged.
+            let io = instr_off as usize;
+            let word = u32::from_le_bytes([
+                text.data[io], text.data[io + 1], text.data[io + 2], text.data[io + 3],
+            ]);
+            prop_assert_eq!(word, placeholder);
+        }
+
+        // Property 5: in-place patching is idempotent.
+        // resolve_local_branches iterates an immutable borrow of
+        // pending_branch_relocs, so a second pass re-patches already-patched
+        // bytes. Because the encoder clears imm bits with a mask before OR-ing,
+        // running twice must yield byte-identical section data and still no
+        // external relocs.
+        #[test]
+        fn prop_patch_idempotent(
+            instr_off in 0u64..63,
+            target_off_raw in 0u64..128,
+            addend_raw in -512i64..512,
+        ) {
+            let instr_off = instr_off * 4;
+            let target_off = target_off_raw * 2;
+            let addend = addend_raw * 2;
+            let mut w = build_writer(instr_off, target_off, addend, 16, ".text", "target");
+            w.resolve_local_branches().unwrap();
+            let after_first = w.base.sections.get(".text").unwrap().data.clone();
+            assert_no_relocs(&w);
+
+            w.resolve_local_branches().unwrap();
+            let after_second = w.base.sections.get(".text").unwrap().data.clone();
+
+            prop_assert_eq!(&after_first, &after_second);
+            prop_assert_eq!(after_second.len(), 256);
+        }
+    }
+}
