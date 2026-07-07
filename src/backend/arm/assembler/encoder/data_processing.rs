@@ -2472,4 +2472,105 @@ mod tests {
             prop_assert!(encode_adc(&imm_third, false).is_err());
         }
     }
+
+    // ── encode_sbc: ARMv8 Subtract-with-Carry ──
+    // Spec (ARMv8 ARM): SBC  <Xd>,<Xn>,<Xm> = sf 1 0 11010000 Rm 000000 Rn Rd
+    //                   SBCS <Xd>,<Xn>,<Xm> = sf 1 1 11010000 Rm 000000 Rn Rd
+    // bit31 sf, bit30 op=1 (subtract), bit29 S, bits28..21 == 0b11010000,
+    // bits20..16 Rm, bits15..10 reserved 0, bits9..5 Rn, bits4..0 Rd.
+
+    /// Independent reference oracle (hand-decoded constant, not field extraction).
+    #[test]
+    fn sbc_known_constant_encoding() {
+        // sbc x0, x1, x2  =>  sf=1 op=1 S=0 11010000 Rm=2 000000 Rn=1 Rd=0 = 0xDA020020
+        let ops = vec![xreg(0), xreg(1), xreg(2)];
+        let w = expect_word(encode_sbc(&ops, false));
+        assert_eq!(w, 0xDA02_0020);
+        // sbcs x0, x1, x2  =>  same with S=1
+        assert_eq!(expect_word(encode_sbc(&ops, true)), 0xDA02_0020 | (1u32 << 29));
+    }
+
+    proptest! {
+        // 1. Every fixed and variable field of SBC (64-bit, no flags) lands
+        //    exactly where the ARMv8 spec dictates; reserved bits stay 0.
+        #[test]
+        fn sbc_64bit_field_placement(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_sbc(&ops, false));
+            prop_assert_eq!(sf_of(w), 1);                   // 64-bit
+            prop_assert_eq!(op_of(w), 1);                   // subtract op bit
+            prop_assert_eq!(s_of(w), 0);                    // SBC, not SBCS
+            prop_assert_eq!(opcode5_of(w), 0b11010);        // top 5 of fixed opcode
+            prop_assert_eq!((w >> 21) & 0xFF, 0b1101_0000); // full opcode bits 28..21
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!((w >> 10) & 0x3F, 0);           // reserved bits 15..10 == 0
+        }
+
+        // 2. SBCS (set_flags=true) differs from SBC only in bit 29 (S).
+        #[test]
+        fn sbcs_flips_only_s_bit(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let sbc  = expect_word(encode_sbc(&ops, false));
+            let sbcs = expect_word(encode_sbc(&ops, true));
+            prop_assert_eq!(sbcs ^ sbc, 1u32 << 29);
+            prop_assert_eq!(s_of(sbcs), 1);
+            prop_assert_eq!(s_of(sbc), 0);
+        }
+
+        // 3. SBC is ADC with the subtract op bit (30) set — the two carry
+        //    instructions are structurally identical apart from op.
+        #[test]
+        fn sbc_is_adc_with_op_bit_set(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            set_flags in any::<bool>(),
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let sbc = expect_word(encode_sbc(&ops, set_flags));
+            let adc = expect_word(encode_adc(&ops, set_flags));
+            prop_assert_eq!(sbc ^ adc, 1u32 << 30);
+            prop_assert_eq!(op_of(sbc), 1);
+            prop_assert_eq!(op_of(adc), 0);
+        }
+
+        // 4. sf (bit 31) tracks register width: W -> 0, X -> 1.
+        #[test]
+        fn sbc_sf_tracks_register_width(
+            n in 0u32..=31,
+            is_w in any::<bool>(),
+        ) {
+            let r = |w: bool| -> Operand {
+                if w { Operand::Reg(format!("w{}", n)) } else { xreg(n) }
+            };
+            let ops = vec![r(is_w), r(is_w), r(is_w)];
+            let w = expect_word(encode_sbc(&ops, false));
+            prop_assert_eq!(sf_of(w), if is_w { 0 } else { 1 });
+        }
+
+        // 5. NEGATIVE CONTRACT: SBC requires exactly three register operands.
+        //    Too few operands, or an immediate where a register is required,
+        //    MUST be rejected with Err — never silently encoded.
+        #[test]
+        fn sbc_rejects_bad_operand_arities(
+            rd in 0u32..=31, rn in 0u32..=31, bad_imm in 0i64..=0xFFF,
+        ) {
+            // too few operands (< 3)
+            let two = vec![xreg(rd), xreg(rn)];
+            prop_assert!(encode_sbc(&two, false).is_err());
+            // third operand is an immediate, not a register
+            let imm_third = vec![xreg(rd), xreg(rn), Operand::Imm(bad_imm)];
+            prop_assert!(encode_sbc(&imm_third, false).is_err());
+        }
+    }
 }

@@ -23,3 +23,21 @@ immediate truncation, shift clamping, missing range validation) do not apply.
 - The 17 failures in the broader `data_processing` module are pre-existing
   rejection/range tests for *other* encoders (movz/movn/movk/neg/mvn/logical/shift)
   and are unrelated to `encode_adc`.
+
+## encode_sbc (data_processing.rs) — 2026-07-08
+Added 5 proptest properties + 1 deterministic reference-oracle test for
+`encode_sbc` (ARMv8 Subtract-with-Carry). All pass (256 cases each).
+
+- `sbc_known_constant_encoding`: independent oracle `sbc x0,x1,x2 == 0xDA020020`,
+  `sbcs == 0xDA020020|(1<<29)`.
+- `sbc_64bit_field_placement`: every fixed (sf, op, S, opcode bits 28..21,
+  reserved bits 15..10) and variable (Rm/Rn/Rd) field matches the ARMv8 spec.
+- `sbcs_flips_only_s_bit`: SBC vs SBCS differ only in bit 29.
+- `sbc_is_adc_with_op_bit_set`: SBC ^ ADC == (1<<30) — the two carry
+  instructions are structurally identical apart from the subtract op bit.
+- `sbc_sf_tracks_register_width`: sf (bit 31) tracks W vs X register bank.
+- `sbc_rejects_bad_operand_arities`: negative contract — <3 operands or an
+  immediate in the 3rd slot returns Err (never silently encoded).
+
+No finding: `encode_sbc` correctly emits `sf 1 S 11010000 Rm 000000 Rn Rd`,
+reserved bits are 0, and arity errors are rejected via `get_reg`.
