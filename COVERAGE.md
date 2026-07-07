@@ -35,3 +35,47 @@ and Rn too, and sibling encoders (`encode_madd`/`encode_div`/`encode_logical` re
 - **Evidence:** `mul x0,x1,sp -> Ok(Word(2602531872))`, Rm field = 31 (XZR)
 - **Suggested fix:** reject SP/WSP (and mixed widths) in `encode_mul` before encoding, or
   add a `get_reg_no_sp` helper used by all XZR-only data-processing encoders.
+
+---
+
+# PBT Coverage — `encode_madd`
+
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_madd`
+**Result:** 5/5 properties pass. **1 functional finding** (silent mixed-width operand acceptance) — see BUG-2.
+
+## What the function does
+Encodes ARMv8-A `MADD <Rd>,<Rn>,<Rm>,<Ra>` as
+`sf 0 0 11011 000 Rm o0 Ra Rn Rd` with `o0 = 0`:
+```
+word = (sf << 31) | (0b0011011000 << 21) | (rm << 16) | (ra << 10) | (rn << 5) | rd
+```
+The `o0` bit (bit 15) is 0 for MADD and 1 for MSUB; `sf` is taken from operand 0 (Rd).
+
+## Properties verified
+1. `madd_field_placement` — spec-exact placement of every fixed field (bits 30:21 = `0b0011011000`,
+   `o0 = 0`) and every register field (Rd/Rn/Rm/Ra) for both widths, Ra=31 (xzr) allowed.
+2. `madd_msub_differ_only_in_o0` — `encode_madd ⊕ encode_msub == 1<<15` for all inputs
+   (differential oracle against the sibling MSUB encoder).
+3. `madd_width_only_flips_sf_bit` — X↔W swap of identical numbers changes only bit 31 (invariant).
+4. `madd_rejects_too_few_operands` — `<4` operands → `Err` (negative contract).
+5. `madd_ra_xzr_equals_mul` — `MADD Rd,Rn,Rm,XZR` is bit-identical to `encode_mul` (algebraic /
+   reference oracle for the `MUL` alias).
+
+## Bugs Found
+
+### BUG-2 (Medium): `encode_madd` silently accepts mixed-width operands (sf taken from Rd only)
+The encoder derives `sf` (bit 31) exclusively from operand 0 and never validates that all four
+operands share the same width. `madd x0, w1, x2, x3` is accepted with `Ok(Word(0x9b028060)`)
+whose `sf = 1` (64-bit) even though `Rn = w1` is a 32-bit register — an UNPREDICTABLE/
+unallocated combination in AArch64. Same shape affects any data-processing encoder that calls
+`get_reg(.., 0)` for width and ignores the `_` width of later operands (`encode_madd`,
+`encode_msub`, `encode_mul`, `encode_div`, …). Confirmed by the characterization test
+`madd_silently_accepts_mixed_width_operands`.
+
+- **Repro:** `cargo test --lib madd_silently_accepts_mixed_width_operands -- --nocapture`
+- **Evidence:** `madd x0,w1,x2,x3 -> Ok(Word(2600602656))`, `sf = 1, rn field = 1 (from w1)`
+- **Suggested fix:** after resolving all four registers, assert their `is_64` flags agree and
+  return `Err` on mismatch (a `get_reg_consistent` helper shared across this encoder family).
+
+> Note: the SP→XZR silent aliasing documented in BUG-1 also applies to `encode_madd`'s operands
+> (same `get_reg` root cause); it is not re-listed here.

@@ -3155,6 +3155,125 @@ mod tests {
         }
     }
 
+    // ── encode_madd ──────────────────────────────────────────────────────────
+    // MADD encoding (ARMv8-A):  sf 0 0 11011 000 Rm o0 Ra Rn Rd
+    //   bit 31    = sf  (0=W, 1=X)
+    //   bits 30:21 = 0b0011011000  (fixed opcode)
+    //   bits 20:16 = Rm
+    //   bit 15     = o0 (0 = MADD, 1 = MSUB)
+    //   bits 14:10 = Ra   bits 9:5 = Rn   bits 4:0 = Rd
+    fn ra_of(w: u32) -> u32       { (w >> 10) & 0x1F }      // bits 14:10
+    fn o0_of(w: u32) -> u32       { (w >> 15) & 1 }         // bit 15
+    fn opcode10_of(w: u32) -> u32 { (w >> 21) & 0x3FF }     // bits 30:21
+
+    proptest! {
+        // 1. FIELD PLACEMENT: every fixed field and every register field lands
+        //    exactly where the ARMv8 MADD spec dictates, for both widths and
+        //    with Ra=31 (xzr) allowed since that is the MUL alias.
+        #[test]
+        fn madd_field_placement(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            ra in 0u32..=31,
+            is_w in any::<bool>(),
+        ) {
+            let pf = |n: u32| if is_w { format!("w{}", n) } else { format!("x{}", n) };
+            let ops = vec![Operand::Reg(pf(rd)), Operand::Reg(pf(rn)),
+                           Operand::Reg(pf(rm)), Operand::Reg(pf(ra))];
+            let w = expect_word(encode_madd(&ops));
+            prop_assert_eq!(sf_of(w), if is_w { 0 } else { 1 });
+            prop_assert_eq!(opcode10_of(w), 0b0011011000); // bits 30:21 fixed
+            prop_assert_eq!(o0_of(w), 0);                  // MADD: o0 == 0
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(ra_of(w), ra);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 2. DIFFERENTIAL: MADD and MSUB differ ONLY in the o0 bit (bit 15).
+        //    XOR of the two words must equal exactly (1 << 15) for every input.
+        #[test]
+        fn madd_msub_differ_only_in_o0(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            ra in 0u32..=31,
+            is_w in any::<bool>(),
+        ) {
+            let pf = |n: u32| if is_w { format!("w{}", n) } else { format!("x{}", n) };
+            let ops = vec![Operand::Reg(pf(rd)), Operand::Reg(pf(rn)),
+                           Operand::Reg(pf(rm)), Operand::Reg(pf(ra))];
+            let mw = expect_word(encode_madd(&ops));
+            let sw = expect_word(encode_msub(&ops));
+            prop_assert_eq!(mw ^ sw, 1u32 << 15);
+        }
+
+        // 3. WIDTH INVARIANCE: sf (bit 31) is the only bit that changes when
+        //    swapping X<->W for identical register numbers.
+        #[test]
+        fn madd_width_only_flips_sf_bit(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            ra in 0u32..=31,
+        ) {
+            let pf = |p: &str, n: u32| format!("{}{}", p, n);
+            let xw = expect_word(encode_madd(&[
+                Operand::Reg(pf("x", rd)), Operand::Reg(pf("x", rn)),
+                Operand::Reg(pf("x", rm)), Operand::Reg(pf("x", ra))]));
+            let ww = expect_word(encode_madd(&[
+                Operand::Reg(pf("w", rd)), Operand::Reg(pf("w", rn)),
+                Operand::Reg(pf("w", rm)), Operand::Reg(pf("w", ra))]));
+            prop_assert_eq!(xw ^ ww, 1u32 << 31);
+        }
+
+        // 4. NEGATIVE CONTRACT: MADD needs exactly 4 register operands; any
+        //    count < 4 must be rejected rather than emitting a garbage word.
+        #[test]
+        fn madd_rejects_too_few_operands(n in 0u32..=3u32) {
+            let ops: Vec<Operand> = (0..n).map(xreg).collect();
+            prop_assert!(encode_madd(&ops).is_err());
+        }
+
+        // 5. ALGEBRAIC (reference oracle): the ARMv8 aliasing rule
+        //    "MUL Rd,Rn,Rm == MADD Rd,Rn,Rm,XZR" requires that encoding MADD
+        //    with Ra=31 (xzr) yield the identical word to MUL, per width.
+        #[test]
+        fn madd_ra_xzr_equals_mul(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            is_w in any::<bool>(),
+        ) {
+            let pf = |n: u32| if is_w { format!("w{}", n) } else { format!("x{}", n) };
+            let zr = if is_w { "wzr" } else { "xzr" };
+            let madd_ops = vec![Operand::Reg(pf(rd)), Operand::Reg(pf(rn)),
+                                Operand::Reg(pf(rm)), Operand::Reg(zr.into())];
+            let mul_ops = vec![Operand::Reg(pf(rd)), Operand::Reg(pf(rn)), Operand::Reg(pf(rm))];
+            prop_assert_eq!(expect_word(encode_madd(&madd_ops)),
+                            expect_word(encode_mul(&mul_ops)));
+        }
+    }
+
+    // CHARACTERIZATION (functional finding, see COVERAGE.md): the encoder
+    // derives the sf bit ONLY from operand 0 (Rd) and never validates that all
+    // four operands share the same width. `madd x0, w1, x2, x3` is silently
+    // encoded as a 64-bit (sf=1) MADD even though Rn is a 32-bit register.
+    // AArch64 requires a consistent width across all operands.
+    #[test]
+    fn madd_silently_accepts_mixed_width_operands() {
+        let ops = vec![Operand::Reg("x0".into()), Operand::Reg("w1".into()),
+                       Operand::Reg("x2".into()), Operand::Reg("x3".into())];
+        let r = encode_madd(&ops);
+        println!("madd x0,w1,x2,x3 -> {:?}", r);
+        // Documents current behavior: accepted with sf=1 (64-bit) from Rd only.
+        if let Ok(EncodeResult::Word(w)) = r {
+            println!("  sf = {}, rn field = {} (from w1, a 32-bit reg)", sf_of(w), rn_of(w));
+            assert_eq!(sf_of(w), 1, "sf taken from Rd (x0), ignoring w1");
+        }
+    }
+
     // CHARACTERIZATION (temporary, for bug report): ARMv8 MADD/MUL permits
     // only X0-X30 or XZR in every operand; SP is UNPREDICTABLE/UNDEFINED.
     // The shared `get_reg` helper maps "sp"->31, so `mul x0,x1,sp` should be
