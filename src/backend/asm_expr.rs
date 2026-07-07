@@ -329,6 +329,7 @@ pub fn parse_integer_expr(s: &str) -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_simple_integers() {
@@ -404,6 +405,41 @@ mod tests {
         // Character literals in expressions
         assert_eq!(parse_integer_expr("'A' + 1").unwrap(), 66);
         assert_eq!(parse_integer_expr("'!' | 0x80").unwrap(), 0xA1);
+    }
+
+    proptest! {
+        #[test]
+        fn prop_decimal_hex_binary_literals_match_value(value in 0i64..=1_000_000) {
+            prop_assert_eq!(parse_integer_expr(&value.to_string()).unwrap(), value);
+            prop_assert_eq!(parse_integer_expr(&format!("0x{:X}", value)).unwrap(), value);
+            prop_assert_eq!(parse_integer_expr(&format!("0b{:b}", value)).unwrap(), value);
+        }
+
+        #[test]
+        fn prop_octal_literals_match_value(value in 0i64..=0o777777) {
+            prop_assert_eq!(parse_integer_expr(&format!("0{:o}", value)).unwrap(), value);
+        }
+
+        #[test]
+        fn prop_arithmetic_precedence_matches_rust(a in -10_000i64..=10_000, b in -1_000i64..=1_000, c in -1_000i64..=1_000, d in -10_000i64..=10_000) {
+            let expr = format!(" \t{} + {} * {} - {}\n", a, b, c, d);
+            prop_assert_eq!(parse_integer_expr(&expr).unwrap(), a + b * c - d);
+        }
+
+        #[test]
+        fn prop_parentheses_override_precedence(a in -1_000i64..=1_000, b in -1_000i64..=1_000, c in -1_000i64..=1_000) {
+            let expr = format!("({} + {}) * {}", a, b, c);
+            prop_assert_eq!(parse_integer_expr(&expr).unwrap(), (a + b) * c);
+        }
+
+        #[test]
+        fn prop_bitwise_and_shift_match_rust(a in 0i64..=0xffff, b in 0i64..=0xffff, c in 0i64..=0xffff, shift in 0i64..=15) {
+            let bitwise_expr = format!("({} | {}) & {}", a, b, c);
+            prop_assert_eq!(parse_integer_expr(&bitwise_expr).unwrap(), (a | b) & c);
+
+            let shift_expr = format!("{} << {} >> {}", a, shift, shift);
+            prop_assert_eq!(parse_integer_expr(&shift_expr).unwrap(), ((a << shift) as u64 >> shift) as i64);
+        }
     }
 
 }
