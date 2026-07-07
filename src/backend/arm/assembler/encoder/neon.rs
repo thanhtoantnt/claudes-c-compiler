@@ -2682,3 +2682,211 @@ mod shift_imm_pbt_tests {
         }
     }
 }
+
+// ── encode_neon_logical (ORR/AND/EOR vector) ───────────────────────────
+//
+// ARMv8 three-same logical encoding:
+//   0 Q U 01110 size 1 Rm 000111 Rn Rd
+//   31 30 29 28:24 23:22 21 20:16 15:11(+bit10) 9:5 4:0
+//
+// The implementation writes `0b000111 << 10`, which is the 5-bit opcode
+// 0b00011 at bits[15:11] OR'd with the fixed `1` at bit[10].
+#[cfg(test)]
+mod neon_logical_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Field extractors.
+    fn q_of(w: u32) -> u32        { (w >> 30) & 1 }
+    fn u_of(w: u32) -> u32        { (w >> 29) & 1 }
+    fn class_of(w: u32) -> u32    { (w >> 24) & 0x1F } // bits 28:24
+    fn size_of(w: u32) -> u32     { (w >> 22) & 0x3 }
+    fn bit21_of(w: u32) -> u32    { (w >> 21) & 1 }
+    fn rm_of(w: u32) -> u32       { (w >> 16) & 0x1F }
+    fn opcode_of(w: u32) -> u32   { (w >> 11) & 0x1F } // bits 15:11
+    fn bit10_of(w: u32) -> u32    { (w >> 10) & 1 }
+    fn rn_of(w: u32) -> u32       { (w >> 5) & 0x1F }
+    fn rd_of(w: u32) -> u32       { w & 0x1F }
+
+    fn vreg_arr(n: u32, arr: &str) -> Operand {
+        Operand::RegArrangement { reg: format!("v{}", n), arrangement: arr.to_string() }
+    }
+
+    fn ops(rd: u32, arr: &str, rn: u32, rm: u32) -> Vec<Operand> {
+        vec![vreg_arr(rd, arr), vreg_arr(rn, arr), vreg_arr(rm, arr)]
+    }
+
+    fn encode(operands: &[Operand], opc: u32) -> Result<u32, String> {
+        match encode_neon_logical(operands, opc) {
+            Ok(EncodeResult::Word(w)) => Ok(w),
+            Ok(other) => Err(format!("expected Word, got {:?}", other)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Reference oracle: reconstruct the ARMv8 word from its fields.
+    fn ref_word(q: u32, u_bit: u32, size: u32, rm: u32, rn: u32, rd: u32) -> u32 {
+        (q << 30) | (u_bit << 29) | (0b01110 << 24) | (size << 22) | (1 << 21)
+            | (rm << 16) | (0b00011 << 11) | (1 << 10) | (rn << 5) | rd
+    }
+
+    /// opc -> (U bit, size field) per the ARMv8 logical table.
+    /// NOTE: opc=0b11 (ANDS) is marked "not valid for NEON, fall back" in the
+    /// source and emits the *same* U/size as EOR (opc=0b10). This aliasing is a
+    /// known quirk; we assert it explicitly rather than treat it as a bug.
+    fn opc_to_u_size(opc: u32) -> Option<(u32, u32)> {
+        match opc {
+            0b00 => Some((0, 0b00)), // AND
+            0b01 => Some((0, 0b10)), // ORR
+            0b10 => Some((1, 0b00)), // EOR
+            0b11 => Some((1, 0b00)), // ANDS -> aliased to EOR
+            _ => None,
+        }
+    }
+
+    const ARRANGEMENTS: &[&str] = &["8b", "16b"];
+    const OPCS: &[u32] = &[0b00, 0b01, 0b10, 0b11];
+
+    proptest! {
+        // 1. Differential oracle: the encoder's word must equal an independent
+        //    reconstruction from (Q, U, size, Rm, Rn, Rd) for every valid input.
+        #[test]
+        fn prop_matches_reference_encoding(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            arr_idx in 0usize..ARRANGEMENTS.len(),
+            opc_idx in 0usize..OPCS.len(),
+        ) {
+            let arr = ARRANGEMENTS[arr_idx];
+            let opc = OPCS[opc_idx];
+            let w = encode(&ops(rd, arr, rn, rm), opc).expect("valid logical ops");
+            let q = if arr == "16b" { 1 } else { 0 };
+            let (u_bit, size) = opc_to_u_size(opc).unwrap();
+            prop_assert_eq!(w, ref_word(q, u_bit, size, rm, rn, rd));
+        }
+
+        // 2. Every register field survives into its own 5-bit slice, untouched,
+        //    across the full v0..v31 range.
+        #[test]
+        fn prop_register_fields_preserved(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            arr_idx in 0usize..ARRANGEMENTS.len(),
+            opc_idx in 0usize..OPCS.len(),
+        ) {
+            let arr = ARRANGEMENTS[arr_idx];
+            let opc = OPCS[opc_idx];
+            let w = encode(&ops(rd, arr, rn, rm), opc).expect("valid logical ops");
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rm_of(w), rm);
+        }
+
+        // 3. Q is set *only* for the .16b arrangement. Every other arrangement
+        //    (including non-byte ones like .4s) collapses to Q=0; the encoder
+        //    performs no arrangement validation, so we characterize that.
+        #[test]
+        fn prop_q_bit_only_for_16b(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            opc_idx in 0usize..OPCS.len(),
+        ) {
+            let opc = OPCS[opc_idx];
+            for &arr in &["8b", "16b", "4s", "2d", "4h"] {
+                let w = encode(&ops(rd, arr, rn, rm), opc).expect("valid logical ops");
+                let want = if arr == "16b" { 1 } else { 0 };
+                prop_assert_eq!(q_of(w), want, "arr={}", arr);
+            }
+        }
+
+        // 4. U bit and size field are a pure function of `opc` (Q/regs irrelevant).
+        #[test]
+        fn prop_u_and_size_per_opc(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            arr_idx in 0usize..ARRANGEMENTS.len(),
+        ) {
+            let arr = ARRANGEMENTS[arr_idx];
+            for &opc in OPCS {
+                let w = encode(&ops(rd, arr, rn, rm), opc).expect("valid logical ops");
+                let (want_u, want_size) = opc_to_u_size(opc).unwrap();
+                prop_assert_eq!(u_of(w), want_u, "opc={:b}", opc);
+                prop_assert_eq!(size_of(w), want_size, "opc={:b}", opc);
+            }
+            // opc=0b11 must alias opc=0b10 (the documented fall-back quirk).
+            let w11 = encode(&ops(rd, arr, rn, rm), 0b11).expect("valid");
+            let w10 = encode(&ops(rd, arr, rn, rm), 0b10).expect("valid");
+            prop_assert_eq!(w11, w10);
+        }
+
+        // 5. The fixed opcode/class fields are invariant for every input.
+        #[test]
+        fn prop_fixed_opcode_fields_constant(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            arr_idx in 0usize..ARRANGEMENTS.len(),
+            opc_idx in 0usize..OPCS.len(),
+        ) {
+            let arr = ARRANGEMENTS[arr_idx];
+            let opc = OPCS[opc_idx];
+            let w = encode(&ops(rd, arr, rn, rm), opc).expect("valid logical ops");
+            prop_assert_eq!(w >> 31, 0u32,        // bit 31 reserved = 0
+                "bit31 must be 0");
+            prop_assert_eq!(class_of(w), 0b01110, // bits 28:24
+                "class must be 01110");
+            prop_assert_eq!(bit21_of(w), 1,       // bit 21 fixed = 1
+                "bit21 must be 1");
+            prop_assert_eq!(opcode_of(w), 0b00011,// bits 15:11 logical opcode
+                "opcode must be 00011");
+            prop_assert_eq!(bit10_of(w), 1,       // bit 10 fixed = 1
+                "bit10 must be 1");
+        }
+
+        // 6. Only operand 0's arrangement feeds Q; operands 1 and 2 are parsed
+        //    for their register number only — their arrangements are discarded.
+        #[test]
+        fn prop_source_arrangements_ignored(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            opc_idx in 0usize..OPCS.len(),
+        ) {
+            let opc = OPCS[opc_idx];
+            let base = vec![
+                vreg_arr(rd, "16b"),
+                vreg_arr(rn, "16b"),
+                vreg_arr(rm, "16b"),
+            ];
+            let w0 = encode(&base, opc).expect("valid base");
+            // Mutate operand 1 / 2 arrangements: word must be identical.
+            let mut mixed = base.clone();
+            mixed[1] = vreg_arr(rn, "4s");
+            mixed[2] = vreg_arr(rm, "2d");
+            prop_assert_eq!(encode(&mixed, opc).expect("valid mixed"), w0);
+        }
+
+        // 7. Error contract: missing operands and out-of-range opc must Err.
+        #[test]
+        fn prop_error_contracts(opc in any::<u32>()) {
+            // Fewer than 3 operands -> Err for every valid opc.
+            for &valid_opc in OPCS {
+                let one = vec![vreg_arr(0, "16b")];
+                let two = vec![vreg_arr(0, "16b"), vreg_arr(1, "16b")];
+                prop_assert!(encode_neon_logical(&one, valid_opc).is_err(),
+                    "1 operand should error for opc={:b}", valid_opc);
+                prop_assert!(encode_neon_logical(&two, valid_opc).is_err(),
+                    "2 operands should error for opc={:b}", valid_opc);
+            }
+            // opc outside {0,1,2,3} -> Err, regardless of valid operands.
+            prop_assume!(opc >= 4);
+            let ok_ops = ops(0, "16b", 1, 2);
+            prop_assert!(encode_neon_logical(&ok_ops, opc).is_err(),
+                "opc={} (>=4) should error", opc);
+        }
+    }
+}
