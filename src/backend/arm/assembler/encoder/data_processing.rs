@@ -1412,4 +1412,105 @@ mod tests {
             prop_assert!(encode_movk(&ops).is_err());
         }
     }
+
+    // ── MOVN (wide immediate, NOT) ────────────────────────────────────────
+    // ARMv8 MOVN: sf 00 100101 hw imm16 Rd. opc=00 distinguishes MOVN from
+    // MOVZ (opc=10) and MOVK (opc=11). The extractors opc_of/opcode6_of/
+    // hw_of/imm16_of/rd_of/sf_of from the MOVZ section above are reused.
+
+    proptest! {
+        // 1. MOVN Xd/Wd, #imm with an in-range (0..=0xFFFF) immediate: every fixed
+        //    and variable field lands exactly where the ARMv8 spec dictates, and
+        //    opc is 00 (MOVN), distinct from MOVZ's 10 and MOVK's 11.
+        #[test]
+        fn movn_field_placement(
+            rd in 0u32..=30,
+            imm in 0i64..=0xFFFF,
+            is_64 in any::<bool>(),
+        ) {
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let ops = vec![rd_op, Operand::Imm(imm)];
+            let w = expect_word(encode_movn(&ops));
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(opc_of(w), 0b00);          // MOVN opc
+            prop_assert_eq!(opcode6_of(w), 0b100101);  // fixed wide-immediate op
+            prop_assert_eq!(hw_of(w), 0);              // no shift
+            prop_assert_eq!(imm16_of(w), imm as u32);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 2. The opc field (bits 30:29) is always 00 and is independent of
+        //    register width, shift, and immediate magnitude — it must never read
+        //    as MOVZ (10) or MOVK (11).
+        #[test]
+        fn movn_opc_is_always_00(
+            rd in 0u32..=30,
+            imm in 0i64..=0xFFFF,
+            hw in 0u32..=3,
+        ) {
+            let amount = hw * 16;
+            let ops = vec![xreg(rd), Operand::Imm(imm),
+                           Operand::Shift { kind: "lsl".into(), amount }];
+            let w = expect_word(encode_movn(&ops));
+            prop_assert_eq!(opc_of(w), 0b00);
+            prop_assert_eq!(opcode6_of(w), 0b100101);
+        }
+
+        // 3. `lsl #N` selects hw = N/16 for valid multiples of 16 (0/16/32/48).
+        #[test]
+        fn movn_hw_tracks_lsl_shift_amount(
+            rd in 0u32..=30,
+            imm in 0i64..=0xFFFF,
+            hw in 0u32..=3, // 64-bit MOVN permits hw 0..3
+        ) {
+            let amount = hw * 16;
+            let ops = vec![xreg(rd), Operand::Imm(imm),
+                           Operand::Shift { kind: "lsl".into(), amount }];
+            let w = expect_word(encode_movn(&ops));
+            prop_assert_eq!(hw_of(w), hw);
+            prop_assert_eq!(imm16_of(w), imm as u32);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 4. NEGATIVE CONTRACT: ARMv8 MOVN imm16 is a 16-bit *unsigned* field.
+        //    An immediate outside [0, 0xFFFF] cannot be represented in a single
+        //    MOVN and MUST be rejected by the assembler (as GAS/LLVM do), not
+        //    silently truncated to its low 16 bits.
+        #[test]
+        fn movn_rejects_out_of_range_immediate(
+            rd in 0u32..=30,
+            imm in 0x10000i64..=0xFFFFFFFF,
+        ) {
+            let ops = vec![xreg(rd), Operand::Imm(imm)];
+            prop_assert!(encode_movn(&ops).is_err());
+        }
+
+        // 5. NEGATIVE CONTRACT: MOVN only permits `lsl #{0,16,32,48}`. Any
+        //    other shift amount (or a non-lsl shift kind) is UNDEFINED and must
+        //    be rejected rather than normalized via integer division.
+        #[test]
+        fn movn_rejects_non_multiple_of_16_shift(
+            rd in 0u32..=30,
+            hw in 0u32..=3,
+            rem in 1u32..=15,
+        ) {
+            let amount = hw * 16 + rem; // not a multiple of 16
+            let ops = vec![xreg(rd), Operand::Imm(1),
+                           Operand::Shift { kind: "lsl".into(), amount }];
+            prop_assert!(encode_movn(&ops).is_err());
+        }
+
+        // 6. NEGATIVE CONTRACT: for 32-bit MOVN (Wd), only hw in {0,1} is valid;
+        //    lsl #32 / lsl #48 are UNDEFINED for W registers and must be Err.
+        #[test]
+        fn movn_w_reg_rejects_32_or_48_shift(
+            rd in 0u32..=30,
+            bad_amount in 32u32..=48u32,
+        ) {
+            prop_assume!(bad_amount == 32 || bad_amount == 48);
+            let ops = vec![Operand::Reg(format!("w{}", rd)), Operand::Imm(1),
+                           Operand::Shift { kind: "lsl".into(), amount: bad_amount }];
+            prop_assert!(encode_movn(&ops).is_err());
+        }
+    }
 }
