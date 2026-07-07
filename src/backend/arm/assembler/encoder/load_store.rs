@@ -2770,3 +2770,201 @@ mod prop_encode_ldxr_stxr_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_ldaxr_stlxr_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: reference-encoding / field-placement (ARMv8-A Architecture
+    // Reference Manual, §C4.1.49 “LDAXR” and §C4.1.116 “STLXR”).
+    //
+    // LDAXR Rt, [Xn]:  size 001000 0 1 0 11111 1 11111 Rn Rt
+    //   ⇒ size[31:30] | 001000[29:24] | 0[23] | L=1[22] | 0[21]
+    //     | Rs=11111[20:16] | o0=1[15] | Rt2=11111[14:10] | Rn[9:5] | Rt[4:0]
+    //
+    // STLXR Ws, Rt, [Xn]: size 001000 0 0 0 Rs 1 11111 Rn Rt
+    //   ⇒ size[31:30] | 001000[29:24] | 0[23] | L=0[22] | 0[21]
+    //     | Rs=Ws[20:16] | o0=1[15] | Rt2=11111[14:10] | Rn[9:5] | Rt[4:0]
+    //
+    // o0=1 distinguishes LDAXR/STLXR (acquire/release) from LDXR/STXR (o0=0).
+    // Both forms address ONLY [Xn] — no immediate offset, no pre/post-index.
+    //
+    // Hand-derived golden encodings, cross-validated against `llvm-mc-18
+    // --assemble --show-encoding --triple=aarch64` (bytes shown LE → word):
+    //   ldaxr  x0, [x1] = [20 fc 5f c8] = 0xC85FFC20  (size=11, L=1, o0=1)
+    //   ldaxr  w0, [x1] = [20 fc 5f 88] = 0x885FFC20  (size=10)
+    //   ldaxrb w0, [x1] = [20 fc 5f 08] = 0x085FFC20  (size=00)
+    //   ldaxrh w0, [x1] = [20 fc 5f 48] = 0x485FFC20  (size=01)
+    //   stlxr  w0, x1, [x2] = [41 fc 00 c8] = 0xC800FC41 (Rs=0, Rt=1, Rn=2)
+    //   stlxr  w5, x7, [x9] = [27 fd 05 c8] = 0xC805FD27
+
+    const GOLDEN_LDAXR_X0_X1: u32 = 0xC85FFC20;
+    const GOLDEN_LDAXR_W0_X1: u32 = 0x885FFC20;
+    const GOLDEN_LDAXRB_W0_X1: u32 = 0x085FFC20;
+    const GOLDEN_LDAXRH_W0_X1: u32 = 0x485FFC20;
+    const GOLDEN_STLXR_W0_X1_X2: u32 = 0xC800FC41;
+
+    fn mem(base: &str) -> Operand {
+        Operand::Mem { base: base.to_string(), offset: 0 }
+    }
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    prop_compose! {
+        fn arb_reg_num()(n in 0u32..=30u32) -> u32 { n }
+    }
+
+    proptest! {
+        // Property 1 — field layout vs golden (load AND store), and the
+        // load/store differential. The full word must equal the hand-derived
+        // golden offset additively by every register field; load ^ store then
+        // differs ONLY in bit 22 (the L bit), proving no other field leaked.
+        #[test]
+        fn prop_layout_vs_golden_and_l_bit(
+            ws in arb_reg_num(),
+            rt in arb_reg_num(),
+            rn in arb_reg_num(),
+        ) {
+            // LDAXR xRt, [xRn]
+            let load_ops = vec![Operand::Reg(format!("x{}", rt)), mem(&format!("x{}", rn))];
+            let lw = word(encode_ldaxr_stlxr(&load_ops, true, None));
+            let load_exp = (GOLDEN_LDAXR_X0_X1 as i64
+                + (rt as i64)
+                + (((rn as i64) - 1) << 5)) as u32;
+            prop_assert_eq!(lw, load_exp);
+
+            // STLXR wWs, xRt, [xRn]
+            let store_ops = vec![
+                Operand::Reg(format!("w{}", ws)),
+                Operand::Reg(format!("x{}", rt)),
+                mem(&format!("x{}", rn)),
+            ];
+            let sw = word(encode_ldaxr_stlxr(&store_ops, false, None));
+            let store_exp = (GOLDEN_STLXR_W0_X1_X2 as i64
+                + ((ws as i64) << 16)
+                + ((rt as i64) - 1)
+                + (((rn as i64) - 2) << 5)) as u32;
+            prop_assert_eq!(sw, store_exp);
+
+            // L bit [22]: load=1, store=0 → XOR is exactly 0x0040_0000.
+            // Build a matched pair sharing Rt/Rn to make the XOR meaningful;
+            // for the load, Rs is reserved=11111, for the store Rs=Ws, so mask
+            // the Rs field out of the XOR.
+            let matched_load = word(encode_ldaxr_stlxr(
+                &[Operand::Reg(format!("x{}", rt)), mem(&format!("x{}", rn))], true, None));
+            let matched_store = word(encode_ldaxr_stlxr(
+                &[Operand::Reg("w31".to_string()), Operand::Reg(format!("x{}", rt)),
+                  mem(&format!("x{}", rn))], false, None));
+            let diff = (matched_load ^ matched_store) & !0x001F_0000; // ignore Rs[20:16]
+            prop_assert_eq!(diff, 0x0040_0000u32, "load/store must differ only in L bit 22");
+        }
+
+        // Property 2 — size field [31:30]: auto-detected from Rt width
+        // (xN→11, wN→10) and overridden verbatim by forced_size; all four
+        // allocated sizes match the llvm-mc goldens exactly.
+        #[test]
+        fn prop_size_field_auto_and_forced(is64 in any::<bool>(), forced in 0u32..4u32) {
+            let prefix = if is64 { 'x' } else { 'w' };
+            let ops = vec![Operand::Reg(format!("{}0", prefix)), mem("x1")];
+
+            // auto-detect + golden cross-check
+            let auto = word(encode_ldaxr_stlxr(&ops, true, None));
+            prop_assert_eq!((auto >> 30) & 0b11, if is64 { 0b11u32 } else { 0b10 });
+            if is64 { prop_assert_eq!(auto, GOLDEN_LDAXR_X0_X1); }
+            else    { prop_assert_eq!(auto, GOLDEN_LDAXR_W0_X1); }
+
+            // forced override lands verbatim in [31:30]; body unchanged
+            let f = word(encode_ldaxr_stlxr(&ops, true, Some(forced)));
+            prop_assert_eq!((f >> 30) & 0b11, forced & 0b11);
+            prop_assert_eq!(f & !0xC000_0000, auto & !0xC000_0000);
+
+            // byte/halfword goldens (forced size with w0 target)
+            let w_ops = vec![Operand::Reg("w0".to_string()), mem("x1")];
+            prop_assert_eq!(word(encode_ldaxr_stlxr(&w_ops, true, Some(0b00))), GOLDEN_LDAXRB_W0_X1);
+            prop_assert_eq!(word(encode_ldaxr_stlxr(&w_ops, true, Some(0b01))), GOLDEN_LDAXRH_W0_X1);
+        }
+
+        // Property 3 — fixed control bits independent of operands:
+        //   o0 bit [15] = 1 (acquire/release: distinguishes from LDXR/STXR)
+        //   reserved Rs[20:16] = 11111 and Rt2[14:10] = 11111 (single-reg form)
+        //   for the store, Rs[20:16] carries Ws verbatim.
+        #[test]
+        fn prop_fixed_bits_o0_and_reserved(
+            ws in arb_reg_num(),
+            rt in arb_reg_num(),
+            rn in arb_reg_num(),
+        ) {
+            let load_ops = vec![Operand::Reg(format!("x{}", rt)), mem(&format!("x{}", rn))];
+            let lw = word(encode_ldaxr_stlxr(&load_ops, true, None));
+            prop_assert_eq!((lw >> 15) & 1, 1u32, "o0[15] must be 1 (acquire)");
+            prop_assert_eq!((lw >> 16) & 0x1F, 0x1Fu32, "Rs[20:16] reserved = 11111");
+            prop_assert_eq!((lw >> 10) & 0x1F, 0x1Fu32, "Rt2[14:10] reserved = 11111");
+            prop_assert_eq!((lw >> 21) & 1, 0u32, "o2[21]=0 single-register form");
+
+            let store_ops = vec![
+                Operand::Reg(format!("w{}", ws)),
+                Operand::Reg(format!("x{}", rt)),
+                mem(&format!("x{}", rn)),
+            ];
+            let sw = word(encode_ldaxr_stlxr(&store_ops, false, None));
+            prop_assert_eq!((sw >> 15) & 1, 1u32, "o0[15] must be 1 (release)");
+            prop_assert_eq!((sw >> 10) & 0x1F, 0x1Fu32, "Rt2[14:10] reserved = 11111");
+            prop_assert_eq!((sw >> 21) & 1, 0u32, "o2[21]=0 single-register form");
+            prop_assert_eq!((sw >> 16) & 0x1F, ws, "Rs[20:16] carries Ws");
+        }
+
+        // Property 4 — NEGATIVE CONTRACT: malformed operands are rejected.
+        // Load needs (Reg, [Mem]); store needs (Reg, Reg, [Mem]). Wrong
+        // operand types or too-few operands must return Err.
+        #[test]
+        fn prop_malformed_operands_rejected(kind in 0u8..6u8) {
+            let r = match kind {
+                0 => encode_ldaxr_stlxr(&[Operand::Reg("x0".to_string())], true, None),
+                1 => encode_ldaxr_stlxr(&[Operand::Reg("x0".to_string()), Operand::Imm(5)], true, None),
+                2 => encode_ldaxr_stlxr(&[Operand::Reg("x0".to_string()),
+                                           Operand::Symbol("s".to_string())], true, None),
+                3 => encode_ldaxr_stlxr(&[Operand::Reg("w0".to_string()),
+                                           Operand::Reg("x1".to_string())], false, None),
+                4 => encode_ldaxr_stlxr(&[Operand::Reg("w0".to_string()),
+                                           Operand::Reg("x1".to_string()),
+                                           Operand::Imm(5)], false, None),
+                _ => encode_ldaxr_stlxr(&[Operand::Reg("w0".to_string())], false, None),
+            };
+            prop_assert!(r.is_err(), "expected Err for malformed operands (kind {}), got {:?}", kind, r);
+        }
+
+        // Property 5 — NEGATIVE CONTRACT (EXPECTED TO FAIL: silent offset drop).
+        // Per the ARM ARM and `llvm-mc-18` ("index must be absent or #0"),
+        // LDAXR/STLXR address ONLY [Xn]: there is no immediate-offset, pre-,
+        // or post-index encoding. A Mem operand with a non-zero offset is
+        // therefore not representable and MUST be rejected. The implementation
+        // instead binds `Operand::Mem { base, .. }` and silently discards the
+        // offset, emitting the [Xn] (offset 0) encoding — a silent acceptance
+        // of an invalid instruction.
+        #[test]
+        fn prop_nonzero_offset_rejected(off in 1i64..=4096i64, is_load in any::<bool>()) {
+            let ops = if is_load {
+                vec![Operand::Reg("x0".to_string()),
+                     Operand::Mem { base: "x1".to_string(), offset: off }]
+            } else {
+                vec![Operand::Reg("w0".to_string()),
+                     Operand::Reg("x1".to_string()),
+                     Operand::Mem { base: "x2".to_string(), offset: off }]
+            };
+            let r = encode_ldaxr_stlxr(&ops, is_load, None);
+            prop_assert!(
+                r.is_err(),
+                "offset {} on LDAXR/STLXR is not encodable (only [Xn] is legal) \
+                 and must be rejected, but the encoder silently produced {:?}",
+                off, r,
+            );
+        }
+    }
+}
