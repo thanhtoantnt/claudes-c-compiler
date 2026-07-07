@@ -2810,4 +2810,147 @@ mod tests {
             prop_assert!(encode_bics(&ops).is_err());
         }
     }
+
+    // ── encode_orn (ORN = ORR with N=1, i.e. OR NOT) ───────────────────────
+    // Oracle: reference (ARMv8 ARM §C4.1.115) + differential vs encode_logical.
+    // Scalar (shifted register): sf opc 01010 shift N Rm imm6 Rn Rd
+    //   ORN = opc=01 (bits 30:29), N=1 (bit 21). Distinct from ORR (01,0),
+    //   EOR (10,0), EON (10,1), AND (00,0), BIC (00,1), BICS (11,1).
+    // NEON vector: 0 Q 0 01110 11 1 Rm 000111 Rn Rd (size/op = 11 distinguishes
+    //   ORN from ORR=00, AND=00, BIC=01, EOR=10, EON=10, BIC variants).
+    // Reuses sf_of/opc_of/opcode5_of/n21_of/shift_type_of/shift_amt_of/rm_of/
+    // rn_of/rd_of/expect_word/xreg and b31_of/q_of/b29_of/op5_28_of/op2_23_of/
+    // fixed6_of/neonreg from above.
+
+    proptest! {
+        // 1. REGISTER-FORM FIELD PLACEMENT: ORN Xd, Xn, Xm (no shift), both widths.
+        //    Every fixed and variable field lands per the ARMv8 spec: opc=01
+        //    (bits 30:29, same family as ORR), fixed op 01010 (bits 28:24), N=1
+        //    (bit 21, distinguishing ORN from ORR), zero shift, and Rm/Rn/Rd placed.
+        #[test]
+        fn orn_register_form_field_placement(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            is_64 in any::<bool>(),
+        ) {
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rn_op = if is_64 { xreg(rn) } else { Operand::Reg(format!("w{}", rn)) };
+            let rm_op = if is_64 { xreg(rm) } else { Operand::Reg(format!("w{}", rm)) };
+            let ops = vec![rd_op, rn_op, rm_op];
+            let w = expect_word(encode_orn(&ops));
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(opc_of(w), 0b01);          // ORR-family (ORN)
+            prop_assert_eq!(opcode5_of(w), 0b01010);   // logical shifted register
+            prop_assert_eq!(n21_of(w), 1);             // N=1 marks the NOT variant
+            prop_assert_eq!(shift_type_of(w), 0);
+            prop_assert_eq!(shift_amt_of(w), 0);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 2. REGISTER-FORM SHIFT MAPPING: the four shift kinds map to the 2-bit
+        //    shift field (lsl=00,lsr=01,asr=10,ror=11) and, for X registers,
+        //    imm6 (0..=63) is placed verbatim. The N=1 signature is preserved
+        //    regardless of the shift operand (so ORN never degrades to ORR).
+        #[test]
+        fn orn_register_form_shift_mapping(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            sk in 0u32..=3u32, amount in 0u32..=63u32,
+        ) {
+            let (kind, want) = match sk {
+                0 => ("lsl", 0u32), 1 => ("lsr", 1u32),
+                2 => ("asr", 2u32), _ => ("ror", 3u32),
+            };
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm),
+                           Operand::Shift { kind: kind.into(), amount }];
+            let w = expect_word(encode_orn(&ops));
+            prop_assert_eq!(opc_of(w), 0b01);
+            prop_assert_eq!(opcode5_of(w), 0b01010);
+            prop_assert_eq!(n21_of(w), 1);
+            prop_assert_eq!(shift_type_of(w), want);
+            prop_assert_eq!(shift_amt_of(w), amount); // 0..63 verbatim (X register)
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 3. DIFFERENTIAL ORACLE: ORN is defined as ORR with the second operand
+        //    inverted, i.e. the ONLY encoding difference between ORN and ORR is
+        //    bit 21 (N): ORN sets N=1, ORR leaves N=0. Therefore encode_orn and
+        //    encode_logical(opc=01 == ORR) must produce words that differ in
+        //    EXACTLY that one bit, for both widths and every shift, and both
+        //    must succeed together. This is the defining equivalence of the alias.
+        #[test]
+        fn orn_differs_from_orr_only_in_n_bit(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            is_64 in any::<bool>(),
+            shifted in any::<bool>(), sk in 0u32..=3u32, amount in 0u32..=63u32,
+        ) {
+            let mk = |n: u32| if is_64 { xreg(n) } else { Operand::Reg(format!("w{}", n)) };
+            let ops = if shifted {
+                let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+                vec![mk(rd), mk(rn), mk(rm),
+                     Operand::Shift { kind: kind.into(), amount }]
+            } else {
+                vec![mk(rd), mk(rn), mk(rm)]
+            };
+            let orn = encode_orn(&ops);
+            let orr = encode_logical(&ops, 0b01); // opc=01 => ORR
+            prop_assert!(orn.is_ok());
+            prop_assert!(orr.is_ok());
+            let ow = expect_word(orn);
+            let rw = expect_word(orr);
+            prop_assert_eq!(ow ^ rw, 1u32 << 21); // differ in exactly bit 21
+        }
+
+        // 4. NEON VECTOR FORM: ORN Vd.T, Vn.T, Vm.T (T in {8b, 16b}). The Q bit
+        //    (bit 30) selects 128-bit (16b) vs 64-bit (8b); bits 31 and 29 are 0;
+        //    the fixed NEON logical opcode 01110 sits at bits 28:24 with size/op
+        //    11 at bits 23:22 (distinguishing ORN from the other logical vector
+        //    ops), N=1 at bit 21, fixed 000111 at bits 15:10, and the three
+        //    vector registers are placed in Rm/Rn/Rd.
+        #[test]
+        fn orn_neon_vector_form_fields(
+            rd in 0u32..=31, rn in 0u32..=31, rm in 0u32..=31,
+            big in any::<bool>(),
+        ) {
+            let arr = if big { "16b" } else { "8b" };
+            let ops = vec![neonreg(rd, arr), neonreg(rn, arr), neonreg(rm, arr)];
+            let w = expect_word(encode_orn(&ops));
+            prop_assert_eq!(b31_of(w), 0);
+            prop_assert_eq!(q_of(w), if big { 1 } else { 0 });
+            prop_assert_eq!(b29_of(w), 0);
+            prop_assert_eq!(op5_28_of(w), 0b01110);
+            prop_assert_eq!(op2_23_of(w), 0b11); // ORN size/op (vs ORR=00, BIC=01, EOR=10)
+            prop_assert_eq!(n21_of(w), 1);
+            prop_assert_eq!(fixed6_of(w), 0b000111);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 5. NEGATIVE CONTRACTS:
+        //    (a) fewer than 3 operands must be rejected (ORN is not an alias
+        //        that supplies an implicit operand here).
+        //    (b) For sf=0 (W register) the imm6 shift must be 0..=31 (ARMv8 ARM
+        //        §C4.1.115); 32..=63 is UNPREDICTABLE and MUST be rejected, not
+        //        silently masked into the imm6 field via `& 0x3F`.
+        #[test]
+        fn orn_negative_contracts(
+            n in 0u32..=2u32,
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            amount in 32u32..=63u32, sk in 0u32..=3u32,
+        ) {
+            // (a) too few operands -> Err
+            let ops: Vec<Operand> = (0..n).map(xreg).collect();
+            prop_assert!(encode_orn(&ops).is_err());
+            // (b) W-register shift above 31 -> Err
+            let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+            let ops = vec![Operand::Reg(format!("w{}", rd)),
+                           Operand::Reg(format!("w{}", rn)),
+                           Operand::Reg(format!("w{}", rm)),
+                           Operand::Shift { kind: kind.into(), amount }];
+            prop_assert!(encode_orn(&ops).is_err());
+        }
+    }
 }
