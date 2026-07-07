@@ -3381,4 +3381,124 @@ mod tests {
                 "encode_msub with {} operands should error", n);
         }
     }
+
+    // ── DIV (SDIV/UDIV) field extractors ──────────────────────────────────
+    // ARMv8 data-processing (2 source): sf 0 0 11010110 Rm 00001 o1 Rn Rd
+    fn d_sf(w: u32) -> u32      { (w >> 31) & 1 }
+    fn d_op30(w: u32) -> u32    { (w >> 30) & 1 }    // reserved, must be 0
+    fn d_s(w: u32) -> u32       { (w >> 29) & 1 }    // S, must be 0
+    fn d_opcode8(w: u32) -> u32 { (w >> 21) & 0xFF } // bits 28:21 == 0b11010110
+    fn d_rm(w: u32) -> u32      { (w >> 16) & 0x1F }
+    fn d_opcode6(w: u32) -> u32 { (w >> 10) & 0x3F } // 000011=SDIV, 000010=UDIV
+    fn d_o1(w: u32) -> u32      { (w >> 10) & 1 }
+    fn d_rn(w: u32) -> u32      { (w >> 5) & 0x1F }
+    fn d_rd(w: u32) -> u32      { w & 0x1F }
+
+    proptest! {
+        // 1. SDIV field placement: every fixed field (sf=1, reserved bit 30=0,
+        //    S=0, opcode bits 28:21=11010110, opcode6=000011, o1=1) and every
+        //    register field (Rm/Rn/Rd) lands exactly per the ARMv8 ARM.
+        #[test]
+        fn div_sdiv_field_placement(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_div(&ops, false)); // SDIV (signed)
+            prop_assert_eq!(d_sf(w), 1);
+            prop_assert_eq!(d_op30(w), 0);              // reserved bit, must be 0
+            prop_assert_eq!(d_s(w), 0);                 // S=0
+            prop_assert_eq!(d_opcode8(w), 0b11010110);  // bits 28:21
+            prop_assert_eq!(d_rm(w), rm);
+            prop_assert_eq!(d_opcode6(w), 0b000011);    // SDIV opcode
+            prop_assert_eq!(d_o1(w), 1);
+            prop_assert_eq!(d_rn(w), rn);
+            prop_assert_eq!(d_rd(w), rd);
+        }
+
+        // 2. UDIV field placement: identical to SDIV except opcode6=000010 and
+        //    o1=0 (the only bits distinguishing UDIV from SDIV).
+        #[test]
+        fn div_udiv_field_placement(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_div(&ops, true)); // UDIV (unsigned)
+            prop_assert_eq!(d_sf(w), 1);
+            prop_assert_eq!(d_op30(w), 0);
+            prop_assert_eq!(d_s(w), 0);
+            prop_assert_eq!(d_opcode8(w), 0b11010110);
+            prop_assert_eq!(d_rm(w), rm);
+            prop_assert_eq!(d_opcode6(w), 0b000010);    // UDIV opcode
+            prop_assert_eq!(d_o1(w), 0);
+            prop_assert_eq!(d_rn(w), rn);
+            prop_assert_eq!(d_rd(w), rd);
+        }
+
+        // 3. sf (bit 31) tracks the destination register width: W -> 0, X -> 1.
+        //    (All three operands kept at the same width to avoid the separate
+        //    mixed-width finding documented elsewhere.)
+        #[test]
+        fn div_sf_tracks_register_width(
+            n in 0u32..=30,
+            is_w in any::<bool>(),
+        ) {
+            let rd = if is_w { Operand::Reg(format!("w{}", n)) } else { xreg(n) };
+            let rn = if is_w { Operand::Reg("w0".into()) } else { xreg(0) };
+            let rm = if is_w { Operand::Reg("w1".into()) } else { xreg(1) };
+            let ops = vec![rd, rn, rm];
+            let w = expect_word(encode_div(&ops, false));
+            prop_assert_eq!(d_sf(w), if is_w { 0 } else { 1 });
+        }
+
+        // 4. Differential: for identical operands, SDIV and UDIV encodings
+        //    differ in EXACTLY one bit — o1 (bit 10). Algebraic relationship
+        //    between the two halves of encode_div (sibling-encoder oracle).
+        #[test]
+        fn div_sdiv_udiv_differ_only_in_o1(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let s = expect_word(encode_div(&ops, false)); // SDIV
+            let u = expect_word(encode_div(&ops, true));  // UDIV
+            prop_assert_eq!(s ^ u, 1u32 << 10);           // only bit 10 differs
+            prop_assert_ne!(s, u);
+            prop_assert_eq!(d_o1(s), 1);
+            prop_assert_eq!(d_o1(u), 0);
+        }
+
+        // 5. Register-field isolation: Rm occupies only bits 20:16, Rn only
+        //    bits 9:5, Rd only bits 4:0 — varying one register never bleeds
+        //    into another field (no aliasing / truncation between fields).
+        #[test]
+        fn div_register_fields_isolated(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            rd2 in 0u32..=30, rn2 in 0u32..=30, rm2 in 0u32..=30,
+        ) {
+            prop_assume!(rm != rm2);
+            prop_assume!(rn != rn2);
+            prop_assume!(rd != rd2);
+            let base = expect_word(encode_div(&[xreg(rd), xreg(rn), xreg(rm)], false));
+            // Rm changes only bits 20:16
+            let w_rm = expect_word(encode_div(&[xreg(rd), xreg(rn), xreg(rm2)], false));
+            let diff = base ^ w_rm;
+            prop_assert_eq!(diff & !0x001F0000, 0);
+            prop_assert_eq!((diff >> 16) & 0x1F, rm ^ rm2);
+            // Rn changes only bits 9:5
+            let w_rn = expect_word(encode_div(&[xreg(rd), xreg(rn2), xreg(rm)], false));
+            let diff = base ^ w_rn;
+            prop_assert_eq!(diff & !0x000003E0, 0);
+            prop_assert_eq!((diff >> 5) & 0x1F, rn ^ rn2);
+            // Rd changes only bits 4:0
+            let w_rd = expect_word(encode_div(&[xreg(rd2), xreg(rn), xreg(rm)], false));
+            let diff = base ^ w_rd;
+            prop_assert_eq!(diff & !0x0000001F, 0);
+            prop_assert_eq!(diff & 0x1F, rd ^ rd2);
+        }
+    }
 }

@@ -79,3 +79,38 @@ unallocated combination in AArch64. Same shape affects any data-processing encod
 
 > Note: the SP→XZR silent aliasing documented in BUG-1 also applies to `encode_madd`'s operands
 > (same `get_reg` root cause); it is not re-listed here.
+
+---
+
+# PBT Coverage — `encode_div`
+
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_div`
+**Result:** 5/5 properties pass. No *new* findings; two pre-existing findings (below) apply.
+
+## What the function does
+Encodes ARMv8-A `SDIV`/`UDIV <Rd>,<Rn>,<Rm>` as a data-processing (2 source) instruction:
+```
+word = (sf << 31) | (0b0011010110 << 21) | (rm << 16)
+      | (0b00001 << 11) | (o1 << 10) | (rn << 5) | rd
+```
+i.e. `sf 0 S=0 11010110 Rm 00001 o1 Rn Rd`, where `o1=1` → SDIV (`opcode6=000011`),
+`o1=0` → UDIV (`opcode6=000010`). `sf` is taken from operand 0 (Rd) only.
+(Manually verified against the ARM ARM: `sdiv x0,x1,x2` → `0x9AC20C20`, `udiv x0,x1,x2` → `0x9AC20820`.)
+
+## Properties verified
+1. `div_sdiv_field_placement` — spec-exact placement of every fixed field (sf=1, reserved bit30=0,
+   S=0, opcode bits 28:21=`11010110`, `opcode6=000011`, `o1=1`) and every register field (reference).
+2. `div_udiv_field_placement` — same as #1 for UDIV (`opcode6=000010`, `o1=0`) (reference).
+3. `div_sf_tracks_register_width` — `sf` (bit 31) reflects X vs. W (reference).
+4. `div_sdiv_udiv_differ_only_in_o1` — for identical operands `SDIV ⊕ UDIV == 1<<10` exactly
+   (differential / algebraic oracle between the two halves of `encode_div`).
+5. `div_register_fields_isolated` — Rm affects only bits 20:16, Rn only bits 9:5, Rd only bits 4:0
+   (no inter-field aliasing/truncation).
+
+## Bugs Found
+None new. The two findings already documented for the sibling encoders also apply to `encode_div`
+(both stem from the shared `get_reg`→`parse_reg_num`/sf-from-Rd-only path) and are **not** re-filed:
+- **BUG-1** — SP/WSP in any operand is silently aliased to XZR (field 31), e.g. `sdiv x0,x1,sp`
+  encodes as `sdiv x0,x1,xzr` with no error. See `pbt-out/bug_reports/encode_mul_sp_operand_silently_accepted_as_xzr.md`.
+- **BUG-2** — mixed-width operands (e.g. `sdiv x0,w1,x2`) are silently accepted; `sf` is derived
+  solely from Rd. See the `encode_madd` BUG-2 note above.
