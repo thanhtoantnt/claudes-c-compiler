@@ -2048,3 +2048,198 @@ mod prop_encode_ldtr_sized_tests {
         assert_eq!(word(encode_ldtr_sized(&ops_b, true, 0b00)), GOLDEN_LDTRB_W0_X1_0);
     }
 }
+
+#[cfg(test)]
+mod prop_encode_ldrsw_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: reference-encoding / field-placement (ARMv8-A Architecture
+    // Reference Manual, §C4.1.65 LDRSW variants).
+    //
+    // LDRSW (unsigned offset): `ldrsw <Xt>, [<Xn|SP>{, #<pimm>}]`
+    //   10 111 0 01 10 imm12[21:10] Rn[9:5] Rt[4:0]
+    //   pimm = imm12 * 4, imm12 ∈ [0, 4095] → pimm ∈ {0,4,…,16380}.
+    //
+    // LDURSW (unscaled): `ldursw <Xt>, [<Xn|SP>{, #<simm>}]
+    //   10 111 0 00 10 0 imm9[20:12] 00 Rn Rt   (imm9 signed, ∈ [-256,255])
+    //
+    // LDRSW pre-index:  `… 0 imm9 11 Rn Rt`   ([11:10]=11)
+    // LDRSW post-index: `… 0 imm9 01 Rn Rt`   ([11:10]=01)
+    //
+    // Hand-derived golden encodings (independently cross-checked bit-by-bit
+    // against the ARM ARM bit pattern — NOT this crate's own formula):
+    //
+    //   ldrsw x0, [x1]        = 0xB9800020   (unsigned; opc=10; [25:24]=01)
+    //   ldrsw x0, [x1, #8]!   = 0xB8808C20   (pre-index; imm9=8; [11:10]=11)
+    //   ldrsw x0, [x1], #8    = 0xB8808420   (post-index; imm9=8; [11:10]=01)
+    //   ldursw x0, [x1]       = 0xB8800020   (unscaled; [25:24]=00)
+
+    const GOLDEN_LDRSW_X0_X1_0: u32 = 0xB9800020;
+    const GOLDEN_LDRSW_X0_X1_4: u32 = 0xB9800420; // imm12=1
+    const GOLDEN_PRE_X0_X1_8: u32 = 0xB8808C20;
+    const GOLDEN_POST_X0_X1_8: u32 = 0xB8808420;
+    const GOLDEN_LDURSW_X0_X1_0: u32 = 0xB8800020;
+
+    fn gp_xreg(num: u32) -> Operand {
+        Operand::Reg(format!("x{}", num))
+    }
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    prop_compose! {
+        fn arb_reg_num()(n in 0u32..=30u32) -> u32 { n }
+    }
+
+    proptest! {
+        // Property 1 — unsigned-offset field layout vs golden.
+        // For `ldrsw xRt,[xRn,#(imm12*4)]` the word equals the golden
+        // `ldrsw x0,[x1,#0]` offset additively by Rt[4:0], Rn[9:5], imm12[21:10].
+        #[test]
+        fn prop_unsigned_offset_layout(
+            rt in arb_reg_num(),
+            rn in arb_reg_num(),
+            imm12 in 0u32..4096u32,
+        ) {
+            let offset = (imm12 as i64) * 4; // 4-byte aligned, fits unsigned form
+            let ops = vec![gp_xreg(rt), Operand::Mem { base: format!("x{}", rn), offset }];
+            let w = word(encode_ldrsw(&ops));
+            let expected = (GOLDEN_LDRSW_X0_X1_0 as i64
+                + (rt as i64)
+                + (((rn as i64) - 1) << 5)
+                + ((imm12 as i64) << 10)) as u32;
+            prop_assert_eq!(w, expected);
+            // opc=10 at [23:22], V=0 at [26], [25:24]=01 distinguishes unsigned
+            prop_assert_eq!((w >> 22) & 0b11, 0b10);
+            prop_assert_eq!((w >> 24) & 0b11, 0b01);
+            // anchor a second golden explicitly
+            if rt == 0 && rn == 1 && imm12 == 1 {
+                prop_assert_eq!(w, GOLDEN_LDRSW_X0_X1_4);
+            }
+        }
+
+        // Property 2 — field placement: Rt occupies [4:0], Rn occupies [9:5]
+        // across ALL four memory forms (unsigned / pre / post / reg-offset).
+        #[test]
+        fn prop_rt_rn_field_placement_all_forms(
+            rt in arb_reg_num(),
+            rn in arb_reg_num(),
+            rm in arb_reg_num(),
+            form in 0u8..4u8,
+        ) {
+            let ops = match form {
+                0 => vec![gp_xreg(rt), Operand::Mem { base: format!("x{}", rn), offset: 0 }],
+                1 => vec![gp_xreg(rt), Operand::MemPreIndex { base: format!("x{}", rn), offset: 0 }],
+                2 => vec![gp_xreg(rt), Operand::MemPostIndex { base: format!("x{}", rn), offset: 0 }],
+                _ => vec![gp_xreg(rt), Operand::MemRegOffset {
+                    base: format!("x{}", rn),
+                    index: format!("x{}", rm),
+                    extend: None, shift: None,
+                }],
+            };
+            let w = word(encode_ldrsw(&ops));
+            prop_assert_eq!(w & 0x1F, rt);             // Rt [4:0]
+            prop_assert_eq!((w >> 5) & 0x1F, rn);      // Rn [9:5]
+        }
+
+        // Property 3 — pre/post-index: imm9 sign-extends round-trip, and the
+        // index-marker [11:10] is 11 (pre) vs 01 (post); also the two goldens.
+        #[test]
+        fn prop_pre_post_index_imm9_and_marker(
+            rt in arb_reg_num(),
+            rn in arb_reg_num(),
+            imm9 in -256i32..=255i32,
+        ) {
+            // pre-index
+            {
+                let ops = vec![gp_xreg(rt),
+                    Operand::MemPreIndex { base: format!("x{}", rn), offset: imm9 as i64 }];
+                let w = word(encode_ldrsw(&ops));
+                let field = ((w >> 12) & 0x1FF) as i32;
+                let sx = if field & 0x100 != 0 { field | (!0x1FF) } else { field };
+                prop_assert_eq!(sx, imm9);                      // imm9 round-trips
+                prop_assert_eq!((w >> 10) & 0b11, 0b11);        // pre marker
+            }
+            // post-index
+            {
+                let ops = vec![gp_xreg(rt),
+                    Operand::MemPostIndex { base: format!("x{}", rn), offset: imm9 as i64 }];
+                let w = word(encode_ldrsw(&ops));
+                let field = ((w >> 12) & 0x1FF) as i32;
+                let sx = if field & 0x100 != 0 { field | (!0x1FF) } else { field };
+                prop_assert_eq!(sx, imm9);
+                prop_assert_eq!((w >> 10) & 0b11, 0b01);        // post marker
+            }
+            // goldens at the canonical point
+            if rt == 0 && rn == 1 && imm9 == 8 {
+                let pre = word(encode_ldrsw(&[gp_xreg(0),
+                    Operand::MemPreIndex { base: "x1".to_string(), offset: 8 }]));
+                let post = word(encode_ldrsw(&[gp_xreg(0),
+                    Operand::MemPostIndex { base: "x1".to_string(), offset: 8 }]));
+                prop_assert_eq!(pre, GOLDEN_PRE_X0_X1_8);
+                prop_assert_eq!(post, GOLDEN_POST_X0_X1_8);
+            }
+        }
+
+        // Property 4 — register-offset field placement.
+        // Encoding: 10 111 0 00 10 1 Rm[20:16] option[15:13] S[12] 10 Rn Rt.
+        // option: lsl/uxtx=011, sxtw=110, uxtw=010, sxtx=111; S=1 iff shift==2.
+        #[test]
+        fn prop_reg_offset_fields(
+            rt in arb_reg_num(),
+            rn in arb_reg_num(),
+            rm in arb_reg_num(),
+            ext in 0u8..4u8, // 0=lsl 1=sxtw 2=uxtw 3=sxtx
+            sh in (0u8..=2u8).prop_map(|s| if s == 0 { None } else { Some(s) }),
+        ) {
+            let ext_name = match ext { 0 => "lsl", 1 => "sxtw", 2 => "uxtw", _ => "sxtx" };
+            let exp_opt = match ext { 0 => 0b011u32, 1 => 0b110, 2 => 0b010, _ => 0b111 };
+            let exp_s = if sh == Some(2) { 1u32 } else { 0u32 };
+            let ops = vec![gp_xreg(rt), Operand::MemRegOffset {
+                base: format!("x{}", rn),
+                index: format!("x{}", rm),
+                extend: Some(ext_name.to_string()),
+                shift: sh,
+            }];
+            // shift=1 is unsupported by the encoder → skip (out of contract)
+            if sh == Some(1) {
+                prop_assert!(encode_ldrsw(&ops).is_err());
+                return Ok(());
+            }
+            let w = word(encode_ldrsw(&ops));
+            prop_assert_eq!((w >> 16) & 0x1F, rm);         // Rm [20:16]
+            prop_assert_eq!((w >> 13) & 0b111, exp_opt);   // option [15:13]
+            prop_assert_eq!((w >> 12) & 1, exp_s);         // S [12]
+            prop_assert_eq!((w >> 21) & 1, 1);             // bit21=1 (reg form)
+            prop_assert_eq!((w >> 10) & 0b11, 0b10);       // fixed [11:10]=10
+        }
+
+        // Property 5 — NEGATIVE CONTRACT (silent-truncation guard).
+        // For the [base,#imm] form the encodable range is the UNION of the
+        // unsigned-offset field (pimm = imm12*4 ∈ {0..16380}) and the unscaled
+        // imm9 ([-256,255]). An offset strictly outside [-256, 16380], OR a
+        // positive offset > 255 that is not a multiple of 4, CANNOT be
+        // represented by EITHER encoding. The ARM ARM mandates the assembler
+        // REJECT such offsets ("immediate out of range"); GNU `as` errors on
+        // `ldrsw x0,[x1,#20000]`. The encoder MUST return Err rather than
+        // silently truncating the immediate via `& 0x1FF`.
+        #[test]
+        fn prop_out_of_range_mem_offset_rejected(off in 16384i64..=1_000_000i64) {
+            let ops = vec![gp_xreg(0), Operand::Mem { base: "x1".to_string(), offset: off }];
+            let r = encode_ldrsw(&ops);
+            prop_assert!(
+                r.is_err(),
+                "offset {} is outside the LDRSW encodable range [-256, 16380] \
+                 and must be rejected, but the encoder returned {:?} \
+                 (silent truncation via `& 0x1FF`)",
+                off, r
+            );
+        }
+    }
+}
