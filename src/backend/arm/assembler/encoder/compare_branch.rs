@@ -975,3 +975,182 @@ mod prop_encode_cond_branch_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_cbz_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ---- Opcode constants for the CBZ / CBNZ instruction class (ARM ARM C5.6.21/22) ----
+    // CBZ/CBNZ = sf 011010 op imm19 Rt.
+    //   [31]    sf   — 1 = 64-bit (X), 0 = 32-bit (W)
+    //   [30:25] 011010 — fixed opcode
+    //   [24]    op   — 0 = CBZ, 1 = CBNZ
+    //   [23:5]  imm19 — linker-filled branch offset (encoder must leave zero)
+    //   [4:0]   Rt   — register
+    const OPCODE: u32 = 0b011010u32 << 25; // == 0x3400_0000
+    const OPCODE_MASK: u32 = 0x7E00_0000;  // bits [30:25]
+    const OP_BIT: u32 = 1u32 << 24;        // bit [24]
+    const SF_BIT: u32 = 1u32 << 31;        // bit [31]
+    const IMM19_MASK: u32 = 0x00FF_FFE0;   // bits [23:5] (linker-filled, must be zero)
+    const RT_MASK: u32 = 0x1F;             // bits [4:0]
+
+    fn word_of(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::WordWithReloc { word, .. }) => word,
+            other => panic!("expected WordWithReloc, got {:?}", other),
+        }
+    }
+
+    fn reloc_of(r: Result<EncodeResult, String>) -> Relocation {
+        match r {
+            Ok(EncodeResult::WordWithReloc { reloc, .. }) => reloc,
+            other => panic!("expected WordWithReloc, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand], is_nz: bool) -> u32 {
+        word_of(encode_cbz(ops, is_nz))
+    }
+
+    prop_compose! {
+        fn arb_reg()(n in 0u32..=31u32, is_64 in any::<bool>()) -> (String, u32) {
+            let name = if is_64 { format!("x{}", n) } else { format!("w{}", n) };
+            (name, n)
+        }
+    }
+
+    /// Mirrors `get_symbol`'s forwarding table: every operand kind it accepts
+    /// and the (symbol, addend) the encoder must forward into the relocation.
+    fn accepted_operand_and_expected(
+        sym: String,
+        off: i64,
+        kind_idx: usize,
+    ) -> (Operand, String, i64) {
+        let cases: Vec<(Operand, String, i64)> = vec![
+            (Operand::Symbol(sym.clone()), sym.clone(), 0),
+            (Operand::Label(sym.clone()), sym.clone(), 0),
+            (Operand::SymbolOffset(sym.clone(), off), sym.clone(), off),
+            (Operand::Modifier { kind: "lo12".into(), symbol: sym.clone() }, sym.clone(), 0),
+            (Operand::ModifierOffset {
+                kind: "lo12".into(), symbol: sym.clone(), offset: off,
+            }, sym.clone(), off),
+            // The parser misclassifies symbol names colliding with register /
+            // condition / barrier names; `get_symbol` accepts them as symbols.
+            (Operand::Reg(sym.clone()), sym.clone(), 0),
+            (Operand::Cond(sym.clone()), sym.clone(), 0),
+            (Operand::Barrier(sym.clone()), sym.clone(), 0),
+        ];
+        cases[kind_idx].clone()
+    }
+
+    prop_compose! {
+        fn arb_accepted_symbol()(
+            s in "[a-z][a-z0-9_]{0,7}",
+            off in -8192i64..=8192i64,
+            kind_idx in 0usize..8usize,
+        ) -> (Operand, String, i64) {
+            accepted_operand_and_expected(s, off, kind_idx)
+        }
+    }
+
+    proptest! {
+        // Property A — full structural / field-placement oracle.
+        // The encoded word is fully determined: opcode 011010 in [30:25],
+        // the imm19 branch-offset field [23:5] is left zero for the linker,
+        // sf occupies [31], op occupies [24], and Rt occupies [4:0].
+        #[test]
+        fn prop_opcode_structure_and_fields(
+            (rt_name, rt_num) in arb_reg(),
+            (sym_op, _sym, _off) in arb_accepted_symbol(),
+            is_nz in any::<bool>(),
+        ) {
+            let ops = vec![Operand::Reg(rt_name.clone()), sym_op];
+            let word = enc(&ops, is_nz);
+
+            // Fixed opcode bits.
+            prop_assert_eq!(word & OPCODE_MASK, OPCODE);
+            // Linker-reserved imm19 field must be zero in the encoder output.
+            prop_assert_eq!(word & IMM19_MASK, 0u32);
+            // sf bit [31] tracks the register width.
+            let expected_sf = if rt_name.starts_with('x') { 1u32 } else { 0u32 };
+            prop_assert_eq!((word >> 31) & 1, expected_sf);
+            // op bit [24]: CBNZ => 1, CBZ => 0.
+            prop_assert_eq!((word >> 24) & 1, if is_nz { 1 } else { 0 });
+            // Rt field [4:0].
+            prop_assert_eq!(word & RT_MASK, rt_num);
+            // Reconstruct the whole word from its fields — nothing else is set.
+            prop_assert_eq!(word, (expected_sf << 31) | OPCODE | ((is_nz as u32) << 24) | rt_num);
+        }
+
+        // Property B — differential: CBZ and CBNZ differ ONLY in bit 24 (op).
+        #[test]
+        fn prop_cbz_xor_cbnz_is_bit24(
+            (rt_name, _) in arb_reg(),
+            sym in "[a-z][a-z0-9_]{0,7}",
+        ) {
+            let ops = vec![Operand::Reg(rt_name), Operand::Symbol(sym)];
+            prop_assert_eq!(enc(&ops, false) ^ enc(&ops, true), OP_BIT);
+        }
+
+        // Property C — differential: 64- vs 32-bit register differ ONLY in
+        // bit 31 (sf). Same register number, same opcode, same target.
+        #[test]
+        fn prop_sf_bit_is_bit31(
+            n in 0u32..=30u32,
+            sym in "[a-z][a-z0-9_]{0,7}",
+            is_nz in any::<bool>(),
+        ) {
+            let ops64 = vec![Operand::Reg(format!("x{}", n)), Operand::Symbol(sym.clone())];
+            let ops32 = vec![Operand::Reg(format!("w{}", n)), Operand::Symbol(sym)];
+            prop_assert_eq!(enc(&ops64, is_nz) ^ enc(&ops32, is_nz), SF_BIT);
+        }
+
+        // Property D — relocation contract across every operand kind that
+        // `get_symbol` accepts: the result always carries a CondBr19
+        // relocation whose symbol & addend exactly mirror the input operand.
+        #[test]
+        fn prop_reloc_is_condbr19_with_symbol(
+            (rt_name, _) in arb_reg(),
+            (sym_op, exp_sym, exp_off) in arb_accepted_symbol(),
+            is_nz in any::<bool>(),
+        ) {
+            let ops = vec![Operand::Reg(rt_name), sym_op];
+            let reloc = reloc_of(encode_cbz(&ops, is_nz));
+            prop_assert!(matches!(reloc.reloc_type, RelocType::CondBr19));
+            prop_assert_eq!(reloc.symbol, exp_sym);
+            prop_assert_eq!(reloc.addend, exp_off);
+        }
+
+        // Property E — negative contract. Operand forms that `get_reg` /
+        // `get_symbol` do NOT accept — and operand lists that are too short —
+        // must make encode_cbz return Err. No silent encoding of an invalid
+        // register or branch target, and no panic on missing operands.
+        #[test]
+        fn prop_rejects_invalid_operands(
+            case in 0usize..14usize,
+        ) {
+            // A valid symbol for the target slot when we want to exercise an
+            // invalid register (and vice-versa).
+            let good_sym = Operand::Symbol("tgt".into());
+            let good_reg = Operand::Reg("x0".into());
+            let result = match case {
+                0  => encode_cbz(&[], false),                                   // no operands
+                1  => encode_cbz(&[good_reg.clone()], false),                   // only register, no target
+                2  => encode_cbz(&[Operand::Imm(0)], false),                    // Imm as register
+                3  => encode_cbz(&[Operand::Symbol("r".into())], false),        // Symbol as register, no target
+                4  => encode_cbz(&[Operand::Mem { base: "x0".into(), offset: 0 }], false),
+                5  => encode_cbz(&[Operand::Reg("xyz".into()), good_sym.clone()], false), // malformed register name (valid target present)
+                6  => encode_cbz(&[good_reg.clone(), Operand::Imm(7)], false),  // Imm as target
+                7  => encode_cbz(&[good_reg.clone(), Operand::Expr("a+b".into())], false),
+                8  => encode_cbz(&[good_reg.clone(), Operand::Mem { base: "x0".into(), offset: 0 }], false),
+                9  => encode_cbz(&[good_reg.clone(), Operand::Shift { kind: "lsl".into(), amount: 2 }], false),
+                10 => encode_cbz(&[good_reg.clone(), Operand::Extend { kind: "sxtw".into(), amount: 0 }], false),
+                11 => encode_cbz(&[good_reg.clone(), Operand::RegArrangement { reg: "v0".into(), arrangement: "16b".into() }], false),
+                12 => encode_cbz(&[good_reg.clone(), Operand::RegList(vec![good_reg.clone()])], false),
+                _  => encode_cbz(&[good_reg.clone(), Operand::MemPreIndex { base: "x0".into(), offset: 8 }], false),
+            };
+            prop_assert!(result.is_err(), "encode_cbz should reject case {} (got {:?})", case, result);
+        }
+    }
+}
