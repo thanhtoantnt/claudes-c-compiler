@@ -83,3 +83,20 @@ Property suite in `mod ext_pbt_tests` — 6 properties, all PASS (proptest defau
 - **prop_error_contracts** — <4 operands or a non-Imm 4th operand return Err.
 
 No bugs found. Notable observation (not a defect, recorded): the function does not validate the byte-index range (ARM allows 0-15) nor the arrangement string; any index is silently truncated to 4 bits and any non-`16b` string maps to Q=0. The `prop_imm4_field_masks` property pins this current behavior.
+
+## `encode_neon_shift_imm` (src/backend/arm/assembler/encoder/neon.rs)
+
+Property suite in `mod shift_imm_pbt_tests` — 7 properties, all PASS (2048 cases each).
+
+- **prop_fixed_fields** — for every valid shift, bit31==0, bits[28:23]==0b011110, bits[15:10]==0b000001, and U (bit29)==1.
+- **prop_reg_fields_preserved** — Rd (4:0) and Rn (9:5) round-trip the source register numbers.
+- **prop_q_bit_per_arrangement** — Q (bit30) is 1 for wide forms (16b/8h/4s/2d), else 0.
+- **prop_immh_immb_oracle** — differential oracle: encoded immh:immb (bits[22:16]) == `2*elem_bits - shift`, and the shift is fully reconstructable from the word.
+- **prop_is_unsigned_ignored** — documents a design gap: the `_is_unsigned` parameter is ignored; `is_unsigned=true` and `false` produce identical words and U is hardcoded to 1, so the function cannot emit an SSHR (U=0) encoding.
+- **prop_error_contracts** — <3 operands, unsupported arrangements (1d/1q/2h/3s/empty), and a non-Imm 3rd operand all return Err.
+- **prop_shift_zero_accepted_but_unallocated** — characterization: shift==0 is silently accepted (no range check) and yields immh==0, which is UNALLOCATED in ARMv8.
+
+### Findings / latent gaps (not crashes; current behavior pinned by tests)
+
+1. **`_is_unsigned` is dead** — the only caller-facing knob is ignored; USHR vs SSHR cannot be selected. Likely the caller should branch U on this flag (compare `encode_neon_ushr` which hardcodes U=1 vs `encode_neon_sshr` which hardcodes U=0).
+2. **No shift-range validation** — shift=0 (and shifts in `(elem_bits, 2*elem_bits]`) are accepted, producing reserved/UNALLOCATED encodings (immh=0, or a wrong element-size immh). Shifts beyond `2*elem_bits` would **panic** in debug builds via unsigned-integer underflow in `16 - shift as u32` (before masking), so the function is not panic-safe for arbitrary `i64` immediates.

@@ -2510,3 +2510,175 @@ mod ext_pbt_tests {
         }
     }
 }
+
+// ── PBT for encode_neon_shift_imm (USHR-family immediate shift) ──────────
+//
+// Oracle: USHR (vector, immediate) is encoded as
+//     0 Q 1 0 11110 immh:immb 000001 Rn Rd
+// where  immh:immb = (2 * element_bits) - shift   (for a valid shift in 1..=element_bits).
+// element_bits is derived from the arrangement: 8b/16b->8, 4h/8h->16, 2s/4s->32, 2d->64.
+//
+// Notable behaviors under test:
+//   * the `_is_unsigned` parameter is IGNORED — the U bit (29) is always 1.
+//   * shift is NOT range-checked (shift=0 yields immh=0, which is UNALLOCATED in ARMv8).
+#[cfg(test)]
+mod shift_imm_pbt_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // (arrangement, element_bits, valid-mask-width-for-immh:immb)
+    const ARRAYS: &[(&str, u32)] = &[
+        ("8b", 8),
+        ("16b", 8),
+        ("4h", 16),
+        ("8h", 16),
+        ("2s", 32),
+        ("4s", 32),
+        ("2d", 64),
+    ];
+
+    fn expected_q(arr: &str) -> u32 {
+        match arr {
+            "16b" | "8h" | "4s" | "2d" => 1,
+            _ => 0,
+        }
+    }
+
+    fn shift_ops(rd: u32, arr: &str, rn: u32, shift: i64) -> Vec<Operand> {
+        vec![
+            Operand::RegArrangement { reg: format!("v{}", rd), arrangement: arr.to_string() },
+            Operand::RegArrangement { reg: format!("v{}", rn), arrangement: arr.to_string() },
+            Operand::Imm(shift),
+        ]
+    }
+
+    fn encode_word(ops: &[Operand], is_unsigned: bool) -> Result<u32, String> {
+        match encode_neon_shift_imm(ops, is_unsigned) {
+            Ok(EncodeResult::Word(w)) => Ok(w),
+            Ok(other) => Err(format!("unexpected non-Word result: {:?}", other)),
+            Err(e) => Err(e),
+        }
+    }
+
+    proptest! {
+        // 1. Constant ISA fields for every valid encoding.
+        //    bit31=0, bits[28:23]=0b011110, bits[15:10]=0b000001, U(bit29)=1.
+        #[test]
+        fn prop_fixed_fields(rd in 0u32..32u32, rn in 0u32..32u32, s in 1u32..64u32) {
+            for &(arr, elem_bits) in ARRAYS {
+                let shift = ((s - 1) % elem_bits) + 1; // valid shift in [1, elem_bits]
+                let w = encode_word(&shift_ops(rd, arr, rn, shift as i64), true)
+                    .expect("valid shift must encode");
+                prop_assert_eq!((w >> 31) & 1, 0u32, "bit31 {}", arr);
+                prop_assert_eq!((w >> 23) & 0x3F, 0b011110u32, "opcode[28:23] {}", arr);
+                prop_assert_eq!((w >> 10) & 0x3F, 0b000001u32, "fixed[15:10] {}", arr);
+                prop_assert_eq!((w >> 29) & 1, 1u32, "U bit must always be 1 ({})", arr);
+            }
+        }
+
+        // 2. Rd (bits[4:0]) and Rn (bits[9:5]) always equal the source register numbers.
+        #[test]
+        fn prop_reg_fields_preserved(rd in 0u32..32u32, rn in 0u32..32u32, s in 1u32..64u32) {
+            for &(arr, elem_bits) in ARRAYS {
+                let shift = ((s - 1) % elem_bits) + 1;
+                let w = encode_word(&shift_ops(rd, arr, rn, shift as i64), true)
+                    .expect("valid shift must encode");
+                prop_assert_eq!(w & 0x1F, rd, "Rd {}", arr);
+                prop_assert_eq!((w >> 5) & 0x1F, rn, "Rn {}", arr);
+            }
+        }
+
+        // 3. Q bit (30) tracks the wide/narrow arrangement.
+        #[test]
+        fn prop_q_bit_per_arrangement(rd in 0u32..32u32, s in 1u32..64u32) {
+            for &(arr, elem_bits) in ARRAYS {
+                let shift = ((s - 1) % elem_bits) + 1;
+                let w = encode_word(&shift_ops(rd, arr, 0, shift as i64), true)
+                    .expect("valid shift must encode");
+                prop_assert_eq!((w >> 30) & 1, expected_q(arr), "Q for {}", arr);
+            }
+        }
+
+        // 4. immh:immb oracle + round-trip (differential oracle).
+        //    encoded immh:immb (bits[22:16]) == 2*elem_bits - shift,
+        //    and the shift is fully reconstructable from the word.
+        #[test]
+        fn prop_immh_immb_oracle(rd in 0u32..32u32, s in 1u32..64u32) {
+            for &(arr, elem_bits) in ARRAYS {
+                let shift = ((s - 1) % elem_bits) + 1;
+                let w = encode_word(&shift_ops(rd, arr, 0, shift as i64), true)
+                    .expect("valid shift must encode");
+                let field = (w >> 16) & 0x7F;
+                let expected = 2 * elem_bits - shift; // = elem_bits*2 - shift
+                prop_assert_eq!(field, expected, "immh:immb for {} shift {}", arr, shift);
+                // Round-trip: shift recovered from the encoding equals the input.
+                let recovered = 2 * elem_bits - field;
+                prop_assert_eq!(recovered, shift, "shift round-trip for {}", arr);
+            }
+        }
+
+        // 5. The `_is_unsigned` parameter is ignored: both signs produce identical words.
+        #[test]
+        fn prop_is_unsigned_ignored(rd in 0u32..32u32, rn in 0u32..32u32, s in 1u32..64u32) {
+            for &(arr, elem_bits) in ARRAYS {
+                let shift = ((s - 1) % elem_bits) + 1;
+                let ops = shift_ops(rd, arr, rn, shift as i64);
+                let w_u = encode_word(&ops, true).expect("unsigned encodes");
+                let w_s = encode_word(&ops, false).expect("signed path encodes");
+                prop_assert_eq!(w_u, w_s, "is_unsigned must not change encoding for {}", arr);
+                // And both hardcode U=1 (i.e. neither produces an SSHR U=0 encoding).
+                prop_assert_eq!((w_u >> 29) & 1, 1u32, "U hardcoded to 1 ({})", arr);
+            }
+        }
+
+        // 6. Error contracts.
+        #[test]
+        fn prop_error_contracts(rd in 0u32..32u32) {
+            // (a) fewer than 3 operands -> Err for every arity 0..=2.
+            for n in 0..=2usize {
+                let mut ops: Vec<Operand> = vec![
+                    Operand::RegArrangement { reg: format!("v{}", rd), arrangement: "8b".to_string() },
+                    Operand::RegArrangement { reg: format!("v{}", rd), arrangement: "8b".to_string() },
+                    Operand::Imm(1),
+                ];
+                ops.truncate(n);
+                prop_assert!(
+                    encode_neon_shift_imm(&ops, true).is_err(),
+                    "{} operands must error", n
+                );
+            }
+
+            // (b) arrangements not accepted by the shift-imm match arm -> Err.
+            //     "4h" is intentionally absent: it is a valid narrow halfword form.
+            for &bad in &["1d", "1q", "2h", "3s", ""] {
+                let ops = shift_ops(rd, bad, rd, 4);
+                prop_assert!(
+                    encode_neon_shift_imm(&ops, true).is_err(),
+                    "arrangement {:?} must be rejected", bad
+                );
+            }
+
+            // (c) third operand not an immediate -> Err.
+            let bad_imm = vec![
+                Operand::RegArrangement { reg: format!("v{}", rd), arrangement: "8b".to_string() },
+                Operand::RegArrangement { reg: format!("v{}", rd), arrangement: "8b".to_string() },
+                Operand::Reg(format!("v{}", rd)),
+            ];
+            prop_assert!(encode_neon_shift_imm(&bad_imm, true).is_err(), "non-Imm shift must error");
+        }
+
+        // 7. Characterization of the missing shift-range check.
+        //    shift == 0 is UNALLOCATED in ARMv8 (immh:immb would need immh != 0),
+        //    yet the encoder silently returns Ok with immh == 0. This documents that gap.
+        #[test]
+        fn prop_shift_zero_accepted_but_unallocated(rd in 0u32..32u32) {
+            for &(arr, _elem_bits) in ARRAYS {
+                let res = encode_word(&shift_ops(rd, arr, 0, 0), true);
+                prop_assert!(res.is_ok(), "shift=0 is accepted (no range check) for {}", arr);
+                let w = res.unwrap();
+                let immh = (w >> 19) & 0xF; // top 4 bits of immh:immb
+                prop_assert_eq!(immh, 0u32, "shift=0 yields immh=0 (UNALLOCATED) for {}", arr);
+            }
+        }
+    }
+}
