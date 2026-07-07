@@ -10,3 +10,6 @@ pub(crate) mod symbol_table;
 pub(crate) mod temp_files;
 pub(crate) mod type_builder;
 pub(crate) mod types;
+
+#[cfg(test)]
+mod long_double_pbt;

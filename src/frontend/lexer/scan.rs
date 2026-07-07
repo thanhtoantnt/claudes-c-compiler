@@ -1186,3 +1186,95 @@ fn hex_digit_val(c: u8) -> u8 {
         _ => 0,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::frontend::lexer::Lexer;
+    use crate::frontend::lexer::token::{Token, TokenKind};
+    use proptest::prelude::*;
+
+    fn lex_kinds(source: &str) -> Vec<TokenKind> {
+        Lexer::new(source, 0).tokenize().into_iter().map(|t| t.kind).collect()
+    }
+
+    fn join_with_separators(fragments: &[&str], separators: &[&str]) -> String {
+        let mut source = String::new();
+        for (i, frag) in fragments.iter().enumerate() {
+            source.push_str(frag);
+            if i + 1 < fragments.len() {
+                source.push_str(separators.get(i).copied().unwrap_or(" "));
+            }
+        }
+        source
+    }
+
+    fn lex_single_token_kind(word: &str, gnu_extensions: bool) -> TokenKind {
+        let mut lexer = Lexer::new(word, 0);
+        lexer.set_gnu_extensions(gnu_extensions);
+        lexer.tokenize().into_iter().next().unwrap().kind
+    }
+
+    fn expected_keyword_kind(word: &str, gnu_extensions: bool) -> TokenKind {
+        match (word, gnu_extensions) {
+            ("typeof", true) => TokenKind::Typeof,
+            ("asm", true) => TokenKind::Asm,
+            ("__typeof__", _) | ("__typeof", _) => TokenKind::Typeof,
+            ("__asm__", _) | ("__asm", _) => TokenKind::Asm,
+            (other, false) => TokenKind::Identifier(other.to_string()),
+            _ => unreachable!("unexpected input for GNU keyword expectation"),
+        }
+    }
+
+    fn has_single_trailing_eof_and_monotonic_in_bounds_spans(source: &str, tokens: Vec<Token>) -> bool {
+        if tokens.is_empty() || tokens.last().map(|t| !t.is_eof()).unwrap_or(true) {
+            return false;
+        }
+        if tokens.iter().filter(|t| t.is_eof()).count() != 1 {
+            return false;
+        }
+
+        let source_len = source.len() as u32;
+        let mut prev_end = 0u32;
+        for token in tokens {
+            let span = token.span;
+            if span.start > span.end || span.end > source_len {
+                return false;
+            }
+            if span.start < prev_end {
+                return false;
+            }
+            prev_end = span.end;
+        }
+        true
+    }
+
+    // Oracle: algebraic.metamorphic   [generated from property IR — edit before running]
+    // Target: frontend::lexer::Lexer::tokenize
+    proptest! {
+        #[test]
+        fn tokenize_metamorphic(fragments in prop::collection::vec(prop_oneof![Just("foo"), Just("bar"), Just("_x"), Just("$d"), Just("int"), Just("return"), Just("42"), Just("0x1f"), Just("3.14"), Just("+"), Just("-"), Just("*"), Just("="), Just("=="), Just("&&"), Just("..."), Just("->"), Just("("), Just(")"), Just(";")], 1..=12), separators in prop::collection::vec(prop_oneof![Just(" "), Just("\t"), Just("\n"), Just("/*c*/"), Just("//c\n"), Just("\n# 1 \"marker.c\"\n")], 0..=11)) {
+            let inserted = join_with_separators(&fragments, &separators);
+            let baseline = fragments.join(" ");
+            prop_assert_eq!(lex_kinds(&inserted), lex_kinds(&baseline));
+        }
+    }
+
+    // Oracle: reference   [generated from property IR — edit before running]
+    // Target: frontend::lexer::Lexer::set_gnu_extensions
+    proptest! {
+        #[test]
+        fn set_gnu_extensions_reference(word in prop_oneof![Just("typeof"), Just("asm"), Just("__typeof__"), Just("__asm__")], gnu_extensions in any::<bool>()) {
+            prop_assert_eq!(lex_single_token_kind(word, gnu_extensions), expected_keyword_kind(word, gnu_extensions));
+        }
+    }
+
+    // Oracle: algebraic.invariant   [generated from property IR — edit before running]
+    // Target: frontend::lexer::Lexer::tokenize
+    proptest! {
+        #[test]
+        fn tokenize_invariant(source_fragments in prop::collection::vec(prop_oneof![Just("foo"), Just("$bar"), Just("int"), Just("return"), Just("42"), Just("0x2a"), Just("3.0"), Just("\"s\""), Just("'c'"), Just("+"), Just("-"), Just("*"), Just("/"), Just("%"), Just("="), Just("=="), Just("&&"), Just("||"), Just("..."), Just("->"), Just("("), Just(")"), Just("{"), Just("}"), Just(";"), Just(" "), Just("\t"), Just("\n"), Just("/*c*/"), Just("//c\n"), Just("\n# 7 \"marker.c\"\n")], 0..=64)) {
+            let source = source_fragments.concat();
+            prop_assert!(has_single_trailing_eof_and_monotonic_in_bounds_spans(&source, Lexer::new(&source, 0).tokenize()));
+        }
+    }
+}

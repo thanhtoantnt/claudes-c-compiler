@@ -33,3 +33,6 @@ gcc_assembler = []
 # Allow GCC passthrough for -m16 mode (16-bit real-mode boot code).
 # When enabled and GCC is used, a prominent warning is printed.
 gcc_m16 = []
+
+[dev-dependencies]
+proptest = "1"
