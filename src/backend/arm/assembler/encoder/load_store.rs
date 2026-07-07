@@ -2636,3 +2636,137 @@ mod prop_encode_prfm_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_ldxr_stxr_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Oracle ───────────────────────────────────────────────────────────
+    // ORACLE: reference / field-placement (ARMv8-A ARM, §C6.2.93 "LDXR",
+    // §C6.2.138 "STXR"). `size` is a 2-bit field; only 00/01/10/11 are
+    // allocated (B/H/32/64). The single-register forms have architecturally
+    // reserved fields that MUST be 11111.
+    //
+    // Hand-derived golden encodings (independent of this crate's formula):
+    //   ldxr  x0, [x1]     = 0xC85F7C20   size=11 [29:21]=001000010 Rs=11111 o0=0 Rt2=11111
+    //   stxr  w0, x0, [x1]  = 0xC8007C20   size=11 [29:21]=001000000 Rs=0    o0=0 Rt2=11111
+    //
+    // Field layout (both):
+    //   size[31:30] | 001000[29:24] | L/o2[23:21] | Rs[20:16] | o0[15]
+    //   | Rt2[14:10] | Rn[9:5] | Rt[4:0]
+
+    const GOLDEN_LDXR_X0_X1: u32 = 0xC85F7C20;
+    const GOLDEN_STXR_W0_X0_X1: u32 = 0xC8007C20;
+    // bits that vary between legal encodings of each mnemonic
+    const LDXR_VAR_MASK: u32 = 0x3FF;           // Rt[4:0] | Rn[9:5]
+    const STXR_VAR_MASK: u32 = 0x001F_07FF;     // Rt[4:0] | Rn[9:5] | Rs[20:16]
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn mem(base: &str) -> Operand {
+        Operand::Mem { base: base.to_string(), offset: 0 }
+    }
+
+    prop_compose! {
+        fn arb_regnum()(n in 0u32..=31u32) -> u32 { n }
+    }
+
+    proptest! {
+        // Property 1 — LDXR golden + field placement.
+        // The constant bits (everything except Rt/Rn) must equal the golden's
+        // constant bits; Rt lands in [4:0], Rn in [9:5]; the reserved Rs[20:16]
+        // and Rt2[14:10] stay pinned to 11111; size=11 for an X register.
+        #[test]
+        fn prop_ldxr_golden_and_fields(rt in arb_regnum(), rn in arb_regnum()) {
+            let ops = vec![Operand::Reg(format!("x{}", rt)), mem(&format!("x{}", rn))];
+            let w = word(encode_ldxr_stxr(&ops, true, None));
+            prop_assert_eq!(w & !LDXR_VAR_MASK, GOLDEN_LDXR_X0_X1 & !LDXR_VAR_MASK);
+            prop_assert_eq!(w & 0x1F, rt);                 // Rt[4:0]
+            prop_assert_eq!((w >> 5) & 0x1F, rn);          // Rn[9:5]
+            prop_assert_eq!((w >> 16) & 0x1F, 0x1F);       // Rs reserved = 11111
+            prop_assert_eq!((w >> 10) & 0x1F, 0x1F);       // Rt2 reserved = 11111
+            prop_assert_eq!((w >> 30) & 0b11, 0b11);       // size (64-bit)
+        }
+
+        // Property 2 — STXR golden + Rs status field + reserved Rt2.
+        // Rs (status) lands in [20:16], Rt in [4:0], Rn in [9:5]; Rt2[14:10]
+        // stays pinned to 11111; all other bits match the golden.
+        #[test]
+        fn prop_stxr_golden_and_fields(
+            ws in arb_regnum(), rt in arb_regnum(), rn in arb_regnum(),
+        ) {
+            let ops = vec![
+                Operand::Reg(format!("w{}", ws)),
+                Operand::Reg(format!("x{}", rt)),
+                mem(&format!("x{}", rn)),
+            ];
+            let w = word(encode_ldxr_stxr(&ops, false, None));
+            prop_assert_eq!(w & !STXR_VAR_MASK, GOLDEN_STXR_W0_X0_X1 & !STXR_VAR_MASK);
+            prop_assert_eq!((w >> 16) & 0x1F, ws);       // Rs status field
+            prop_assert_eq!(w & 0x1F, rt);               // Rt
+            prop_assert_eq!((w >> 5) & 0x1F, rn);        // Rn
+            prop_assert_eq!((w >> 10) & 0x1F, 0x1F);     // Rt2 reserved
+            prop_assert_eq!((w >> 30) & 0b11, 0b11);     // size
+        }
+
+        // Property 3 — size[31:30] tracks forced_size, and when None
+        // auto-derives from Rt width (X→11, W→10).
+        #[test]
+        fn prop_size_field_auto_and_override(s in 0u32..4u32, rt_num in arb_regnum()) {
+            for (name, auto_want) in [
+                (format!("x{}", rt_num), 0b11u32),
+                (format!("w{}", rt_num), 0b10u32),
+            ] {
+                let ops = vec![Operand::Reg(name.clone()), mem("x1")];
+                // forced_size overrides register width
+                let forced = word(encode_ldxr_stxr(&ops, true, Some(s)));
+                prop_assert_eq!((forced >> 30) & 0b11, s);
+                // auto-detect from width
+                let auto = word(encode_ldxr_stxr(&ops, true, None));
+                prop_assert_eq!((auto >> 30) & 0b11, auto_want);
+            }
+        }
+
+        // Property 4 — load/store discriminator.
+        // LDXR sets the L bit [22]=1, STXR clears it [22]=0; both keep the
+        // single-register o2 bit [21]=0 (the pair forms LDXP/STXP set [21]=1).
+        #[test]
+        fn prop_load_store_discriminator(rn in arb_regnum()) {
+            let load_ops = vec![Operand::Reg("x0".to_string()), mem(&format!("x{}", rn))];
+            let store_ops = vec![
+                Operand::Reg("w0".to_string()),
+                Operand::Reg("x0".to_string()),
+                mem(&format!("x{}", rn)),
+            ];
+            let lw = word(encode_ldxr_stxr(&load_ops, true, None));
+            let sw = word(encode_ldxr_stxr(&store_ops, false, None));
+            prop_assert_eq!((lw >> 22) & 1, 1u32, "LDXR must set L bit [22]");
+            prop_assert_eq!((sw >> 22) & 1, 0u32, "STXR must clear L bit [22]");
+            prop_assert_eq!((lw >> 21) & 1, 0u32, "single-reg form: o2 [21]=0");
+            prop_assert_eq!((sw >> 21) & 1, 0u32, "single-reg form: o2 [21]=0");
+        }
+
+        // Property 5 — NEGATIVE CONTRACT.
+        // `size` is a 2-bit field (ARM ARM: only 00/01/10/11 are allocated for
+        // LDXR/STXR). forced_size ≥ 4 is unallocated and MUST be rejected rather
+        // than silently truncated into the size field, which would alias a
+        // different, valid instruction (e.g. size=4 wraps to size=0 = byte form).
+        #[test]
+        fn prop_forced_size_out_of_range_rejected(s in 4u32..=255u32) {
+            let ops = vec![Operand::Reg("x0".to_string()), mem("x1")];
+            let r = encode_ldxr_stxr(&ops, true, Some(s));
+            prop_assert!(
+                r.is_err(),
+                "forced_size={} is outside the 2-bit size range (0..=3) and must \
+                 return Err, but got {:?} (size<<30 silently wrapped)",
+                s, r,
+            );
+        }
+    }
+}
