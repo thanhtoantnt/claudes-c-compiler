@@ -432,6 +432,109 @@ pub fn negate_const(val: IrConst) -> Option<IrConst> {
 
 /// Bitwise NOT of a constant value (unary `~`).
 /// Sub-int types are promoted to i32 per C integer promotion rules.
+#[cfg(test)]
+mod negate_const_pbt {
+    use super::negate_const;
+    use crate::ir::reexports::IrConst;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn i128_i64_i32_negation_matches_wrapping_neg(choice in 0u8..3, value in any::<i128>()) {
+            let constant = match choice {
+                0 => IrConst::I128(value),
+                1 => IrConst::I64(value as i64),
+                _ => IrConst::I32(value as i32),
+            };
+
+            let negated = negate_const(constant).expect("integer constants are negatable");
+
+            match negated {
+                IrConst::I128(actual) => prop_assert_eq!(actual, value.wrapping_neg()),
+                IrConst::I64(actual) => prop_assert_eq!(actual, (value as i64).wrapping_neg()),
+                IrConst::I32(actual) => prop_assert_eq!(actual, (value as i32).wrapping_neg()),
+                other => prop_assert!(false, "unexpected negated integer variant: {:?}", other),
+            }
+        }
+
+        #[test]
+        fn integer_negation_is_an_involution_with_wrapping(choice in 0u8..3, value in any::<i128>()) {
+            let constant = match choice {
+                0 => IrConst::I128(value),
+                1 => IrConst::I64(value as i64),
+                _ => IrConst::I32(value as i32),
+            };
+
+            let once = negate_const(constant).expect("integer constants are negatable");
+            let twice = negate_const(once).expect("negated integer constants are negatable");
+
+            match twice {
+                IrConst::I128(actual) => prop_assert_eq!(actual, value),
+                IrConst::I64(actual) => prop_assert_eq!(actual, value as i64),
+                IrConst::I32(actual) => prop_assert_eq!(actual, value as i32),
+                other => prop_assert!(false, "unexpected double-negated integer variant: {:?}", other),
+            }
+        }
+
+        #[test]
+        fn sub_int_negation_promotes_to_i32(choice in 0u8..2, value in any::<i16>()) {
+            let constant = if choice == 0 {
+                IrConst::I8(value as i8)
+            } else {
+                IrConst::I16(value)
+            };
+
+            let negated = negate_const(constant).expect("sub-int constants are negatable");
+
+            match negated {
+                IrConst::I32(actual) => {
+                    let expected = if choice == 0 {
+                        (value as i8 as i32).wrapping_neg()
+                    } else {
+                        (value as i32).wrapping_neg()
+                    };
+                    prop_assert_eq!(actual, expected);
+                }
+                other => prop_assert!(false, "sub-int negation should promote to I32, got {:?}", other),
+            }
+        }
+
+        #[test]
+        fn float_negation_matches_native_bit_pattern(choice in 0u8..2, bits in any::<u64>()) {
+            let constant = if choice == 0 {
+                IrConst::F32(f32::from_bits(bits as u32))
+            } else {
+                IrConst::F64(f64::from_bits(bits))
+            };
+
+            let negated = negate_const(constant).expect("float constants are negatable");
+
+            match negated {
+                IrConst::F32(actual) => prop_assert_eq!(actual.to_bits(), (-f32::from_bits(bits as u32)).to_bits()),
+                IrConst::F64(actual) => prop_assert_eq!(actual.to_bits(), (-f64::from_bits(bits)).to_bits()),
+                other => prop_assert!(false, "unexpected negated float variant: {:?}", other),
+            }
+        }
+
+        #[test]
+        fn long_double_negation_flips_only_f128_sign_bit(value in any::<f64>(), bytes in any::<[u8; 16]>()) {
+            let negated = negate_const(IrConst::LongDouble(value, bytes)).expect("long double constants are negatable");
+
+            match negated {
+                IrConst::LongDouble(actual_value, actual_bytes) => {
+                    let mut expected_bytes = bytes;
+                    expected_bytes[15] ^= 0x80;
+                    prop_assert_eq!(actual_value.to_bits(), (-value).to_bits());
+                    prop_assert_eq!(actual_bytes, expected_bytes);
+                }
+                other => prop_assert!(false, "unexpected negated long double variant: {:?}", other),
+            }
+        }
+    }
+}
+
+/// Bitwise NOT of a constant value (unary `~`).
+/// Sub-int types are promoted to i32 per C integer promotion rules.
 pub fn bitnot_const(val: IrConst) -> Option<IrConst> {
     match val {
         IrConst::I128(v) => Some(IrConst::I128(!v)),
@@ -599,4 +702,63 @@ pub fn truncate_and_extend_bits(bits: u64, target_width: usize, target_signed: b
     };
 
     (result, target_signed)
+}
+
+#[cfg(test)]
+mod truncate_and_extend_bits_pbt {
+    use super::truncate_and_extend_bits;
+    use proptest::prelude::*;
+
+    fn sign_extend_masked(bits: u64, width: usize) -> u64 {
+        if width == 0 || width >= 64 {
+            bits
+        } else {
+            let mask = (1u64 << width) - 1;
+            let truncated = bits & mask;
+            let sign_bit = 1u64 << (width - 1);
+            if truncated & sign_bit != 0 {
+                truncated | !mask
+            } else {
+                truncated
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn zero_width_is_a_noop(bits in any::<u64>(), signed in any::<bool>()) {
+            let (result, result_signed) = truncate_and_extend_bits(bits, 0, signed);
+            prop_assert_eq!(result, bits);
+            prop_assert_eq!(result_signed, signed);
+        }
+
+        #[test]
+        fn widths_at_least_64_are_a_noop(bits in any::<u64>(), width in 64usize..256usize, signed in any::<bool>()) {
+            let (result, result_signed) = truncate_and_extend_bits(bits, width, signed);
+            prop_assert_eq!(result, bits);
+            prop_assert_eq!(result_signed, signed);
+        }
+
+        #[test]
+        fn unsigned_results_match_low_bits(bits in any::<u64>(), width in 1usize..64usize) {
+            let (result, result_signed) = truncate_and_extend_bits(bits, width, false);
+            let mask = (1u64 << width) - 1;
+            prop_assert_eq!(result, bits & mask);
+            prop_assert!(!result_signed);
+        }
+
+        #[test]
+        fn signed_results_match_twos_complement_sign_extension(bits in any::<u64>(), width in 1usize..64usize) {
+            let (result, result_signed) = truncate_and_extend_bits(bits, width, true);
+            prop_assert_eq!(result, sign_extend_masked(bits, width));
+            prop_assert!(result_signed);
+        }
+
+        #[test]
+        fn applying_the_helper_twice_is_idempotent(bits in any::<u64>(), width in 0usize..256usize, signed in any::<bool>()) {
+            let once = truncate_and_extend_bits(bits, width, signed);
+            let twice = truncate_and_extend_bits(once.0, width, signed);
+            prop_assert_eq!(twice, once);
+        }
+    }
 }
