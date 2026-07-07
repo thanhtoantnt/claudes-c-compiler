@@ -964,3 +964,131 @@ pub(crate) fn encode_stop(mnemonic: &str, operands: &[Operand]) -> Result<Encode
         | (rs << 16) | (opc << 12) | (rn << 5) | rt;
     Ok(EncodeResult::Word(word))
 }
+
+#[cfg(test)]
+mod prop_ldr_str_auto_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Oracle: encode_ldr_str_auto auto-detects `size` from the Rt register prefix
+    // (w/s -> 0b10, x/d -> 0b11, q -> 0b00) and always passes is_signed=false.
+    // For Mem/Pre/Post-index forms the word layout is:
+    //   size[31:30] | 111[29:27] | v[26] | opc[23:22] | imm[21:10] | Rn[9:5] | Rt[4:0]
+    // so opc_load XOR opc_store is always 0b01<<22 because is_signed is hard-wired false.
+
+    /// Register classes auto-detection covers: GP (x,w) and FP/SIMD (d,s,q).
+    const REG_CLASSES: &[char] = &['x', 'w', 'd', 's', 'q'];
+
+    fn expected_size(prefix: char) -> u32 {
+        match prefix {
+            'w' | 's' => 0b10,
+            'x' | 'd' => 0b11,
+            'q' => 0b00,
+            _ => unreachable!("unexpected reg prefix {}", prefix),
+        }
+    }
+
+    /// V (vector) bit [26]: 1 for FP/SIMD registers, 0 for GP.
+    fn expected_v(prefix: char) -> u32 {
+        match prefix {
+            'd' | 's' | 'q' => 1,
+            _ => 0,
+        }
+    }
+
+    fn word_of(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    prop_compose! {
+        fn arb_reg()(idx in 0usize..REG_CLASSES.len(), num in 0u32..=30u32) -> (String, u32, char) {
+            let prefix = REG_CLASSES[idx];
+            (format!("{}{}", prefix, num), num, prefix)
+        }
+    }
+
+    proptest! {
+        // Property A — size field [31:30] matches the register-width class of Rt.
+        // Uses Mem{base, #0}: offset 0 is always aligned and < 4096, so the unsigned
+        // offset form is taken and size lands in bits [31:30].
+        #[test]
+        fn prop_size_field_matches_reg_class(
+            (rt_name, _, prefix) in arb_reg(),
+            (base_name, _, _) in arb_reg(),
+        ) {
+            let ops = vec![
+                Operand::Reg(rt_name.clone()),
+                Operand::Mem { base: base_name.clone(), offset: 0 },
+            ];
+            let w = word_of(encode_ldr_str_auto(&ops, true));
+            prop_assert_eq!((w >> 30) & 0b11, expected_size(prefix));
+        }
+
+        // Property B — differential: for every memory-operand form, swapping
+        // is_load only ever flips the opc field [23:22], and specifically only
+        // bit 22 (load opc=0b01 vs store opc=0b00 for GP; 0b11 vs 0b10 for Q).
+        // Both XOR to 0b01, so load ^ store == 0x0040_0000 with no other bits set.
+        #[test]
+        fn prop_load_xor_store_is_opc_bit22(
+            (rt_name, _, _) in arb_reg(),
+            (base_name, _, _) in arb_reg(),
+            form in 0u8..3, // 0 = Mem, 1 = pre-index, 2 = post-index
+        ) {
+            let mem_op = match form {
+                0 => Operand::Mem { base: base_name.clone(), offset: 0 },
+                1 => Operand::MemPreIndex { base: base_name.clone(), offset: 0 },
+                _ => Operand::MemPostIndex { base: base_name.clone(), offset: 0 },
+            };
+            let ops = vec![Operand::Reg(rt_name.clone()), mem_op];
+            let load = word_of(encode_ldr_str_auto(&ops, true));
+            let store = word_of(encode_ldr_str_auto(&ops, false));
+            prop_assert_eq!(load ^ store, 0x0040_0000u32);
+        }
+
+        // Property C — field placement: Rt occupies [4:0] and Rn occupies [9:5]
+        // of the encoded word, for arbitrary register numbers.
+        #[test]
+        fn prop_rt_and_rn_field_placement(
+            (rt_name, rt_num, _) in arb_reg(),
+            (base_name, base_num, _) in arb_reg(),
+        ) {
+            let ops = vec![
+                Operand::Reg(rt_name.clone()),
+                Operand::Mem { base: base_name.clone(), offset: 0 },
+            ];
+            let w = word_of(encode_ldr_str_auto(&ops, true));
+            prop_assert_eq!(w & 0x1F, rt_num);            // Rt [4:0]
+            prop_assert_eq!((w >> 5) & 0x1F, base_num);    // Rn [9:5]
+        }
+
+        // Property D — V (vector) bit [26]: set iff Rt is an FP/SIMD register.
+        #[test]
+        fn prop_v_bit_tracks_fp_register(
+            (rt_name, _, prefix) in arb_reg(),
+            (base_name, _, _) in arb_reg(),
+        ) {
+            let ops = vec![
+                Operand::Reg(rt_name.clone()),
+                Operand::Mem { base: base_name.clone(), offset: 0 },
+            ];
+            let w = word_of(encode_ldr_str_auto(&ops, true));
+            prop_assert_eq!((w >> 26) & 1, expected_v(prefix));
+        }
+
+        // Property E — negative/error contract: a non-Reg first operand is rejected.
+        #[test]
+        fn prop_non_reg_first_operand_errors(kind in 0u8..3) {
+            let non_reg = match kind {
+                0 => Operand::Imm(5),
+                1 => Operand::Symbol("foo".to_string()),
+                _ => Operand::Mem { base: "x0".to_string(), offset: 0 },
+            };
+            let ops = vec![non_reg];
+            let r = encode_ldr_str_auto(&ops, true);
+            prop_assert!(r.is_err(), "expected error, got {:?}", r);
+        }
+    }
+}

@@ -152,3 +152,18 @@ Properties covered:
 Verification:
 - `cargo test --lib prop_encode_ubfx_tests`
 - Stress run: `PROPTEST_CASES=3000 cargo test --lib prop_encode_ubfx_tests` — 5 passed, 0 failed.
+
+## PBT coverage: `encode_ldr_str_auto` (src/backend/arm/assembler/encoder/load_store.rs)
+
+Module `prop_ldr_str_auto_tests` (5 properties, all PASS, 256 cases each via proptest):
+
+- `prop_size_field_matches_reg_class` — Reference oracle: the auto-detected `size` lands in bits [31:30] of the unsigned-offset word and matches the Rt register prefix class — `w`/`s`→`0b10`, `x`/`d`→`0b11`, `q`→`0b00` — for the `Mem{base, #0}` form.
+- `prop_load_xor_store_is_opc_bit22` — Differential oracle: for every memory form (Mem / pre-index / post-index) at offset 0, the load and store words differ *only* in the opc field such that `word_load ^ word_store == 0x0040_0000` (load opc=0b01 vs store 0b00 for GP; 0b11 vs 0b10 for Q) — a consequence of `is_signed` being hard-wired `false` by the auto wrapper.
+- `prop_rt_and_rn_field_placement` — Field-preservation invariant: `Rt` occupies bits [4:0] and `Rn` bits [9:5] for arbitrary register numbers (0–30).
+- `prop_v_bit_tracks_fp_register` — Invariant: the V (vector) bit [26] is set iff Rt is an FP/SIMD register (`d`/`s`/`q`), and cleared for GP registers (`x`/`w`).
+- `prop_non_reg_first_operand_errors` — Negative/error contract: a non-`Reg` first operand (`Imm`, `Symbol`, or `Mem`) is rejected with `Err`.
+
+No bugs found. `encode_ldr_str_auto` correctly auto-detects the load/store `size` from the Rt register class and delegates to `encode_ldr_str` with `is_signed=false` and the Q-register 128-bit flag.
+
+Verification:
+- `cargo test --lib prop_ldr_str_auto_tests`
