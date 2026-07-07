@@ -318,6 +318,47 @@ mod tests {
         ]
     }
 
+    fn arb_non_shift_op() -> impl Strategy<Value = BinOp> {
+        prop_oneof![
+            Just(BinOp::Add),
+            Just(BinOp::BitAnd),
+            Just(BinOp::BitOr),
+            Just(BinOp::BitXor),
+        ]
+    }
+
+    fn expected_eval_binop_with_types(
+        op: &BinOp,
+        lhs: &IrConst,
+        rhs: &IrConst,
+        lhs_size: usize,
+        lhs_unsigned: bool,
+        rhs_size: usize,
+        rhs_unsigned: bool,
+    ) -> Option<IrConst> {
+        let is_shift = matches!(op, BinOp::Shl | BinOp::Shr);
+
+        let (is_32bit, is_unsigned) = if is_shift {
+            (lhs_size <= 4, lhs_unsigned)
+        } else {
+            let result_size = lhs_size.max(rhs_size);
+            let is_unsigned = if lhs_size == rhs_size {
+                lhs_unsigned || rhs_unsigned
+            } else if lhs_size > rhs_size {
+                lhs_unsigned
+            } else {
+                rhs_unsigned
+            };
+            (result_size <= 4, is_unsigned)
+        };
+
+        const_arith::eval_const_binop(op, lhs, rhs, is_32bit, is_unsigned, lhs_unsigned, rhs_unsigned)
+    }
+
+    fn eval_result_repr(result: Option<IrConst>) -> String {
+        format!("{result:?}")
+    }
+
     proptest! {
         #[test]
         fn integer_consts_use_signed_numeric_value_as_bits(val in arb_integer_const()) {
@@ -348,7 +389,111 @@ mod tests {
         ]) {
             prop_assert!(irconst_to_bits(&val).1);
         }
+
+        #[test]
+        fn shift_ops_follow_lhs_type_selection(
+            op in prop_oneof![Just(BinOp::Shl), Just(BinOp::Shr)],
+            lhs in prop_oneof![
+                Just(IrConst::I64(0x8000_0000)),
+                Just(IrConst::I64(-1)),
+                any::<i64>().prop_map(IrConst::I64),
+            ],
+            rhs in prop_oneof![
+                Just(IrConst::I32(0)),
+                Just(IrConst::I32(1)),
+                Just(IrConst::I64(1)),
+                Just(IrConst::I64(31)),
+            ],
+            lhs_size in prop_oneof![Just(4usize), Just(8usize)],
+            lhs_unsigned in any::<bool>(),
+            rhs_size in prop_oneof![Just(4usize), Just(8usize)],
+            rhs_unsigned in any::<bool>(),
+        ) {
+            prop_assert_eq!(
+                eval_result_repr(eval_binop_with_types(&op, &lhs, &rhs, lhs_size, lhs_unsigned, rhs_size, rhs_unsigned)),
+                eval_result_repr(expected_eval_binop_with_types(&op, &lhs, &rhs, lhs_size, lhs_unsigned, rhs_size, rhs_unsigned))
+            );
+        }
+
+        #[test]
+        fn non_shift_ops_follow_wider_operand_when_lhs_is_wider(
+            op in arb_non_shift_op(),
+            lhs in prop_oneof![
+                Just(IrConst::I64(0)),
+                Just(IrConst::I64(-1)),
+                Just(IrConst::I64(0x7fff_ffff)),
+                Just(IrConst::I64(0x8000_0000)),
+            ],
+            rhs in prop_oneof![
+                Just(IrConst::I64(0)),
+                Just(IrConst::I64(-1)),
+                Just(IrConst::I64(0x7fff_ffff)),
+                Just(IrConst::I64(0x8000_0000)),
+            ],
+            lhs_unsigned in any::<bool>(),
+            rhs_unsigned in any::<bool>(),
+        ) {
+            let lhs_size = 8;
+            let rhs_size = 4;
+            prop_assert_eq!(
+                eval_result_repr(eval_binop_with_types(&op, &lhs, &rhs, lhs_size, lhs_unsigned, rhs_size, rhs_unsigned)),
+                eval_result_repr(expected_eval_binop_with_types(&op, &lhs, &rhs, lhs_size, lhs_unsigned, rhs_size, rhs_unsigned))
+            );
+        }
+
+        #[test]
+        fn non_shift_ops_follow_wider_operand_when_rhs_is_wider(
+            op in arb_non_shift_op(),
+            lhs in prop_oneof![
+                Just(IrConst::I64(0)),
+                Just(IrConst::I64(-1)),
+                Just(IrConst::I64(0x7fff_ffff)),
+                Just(IrConst::I64(0x8000_0000)),
+            ],
+            rhs in prop_oneof![
+                Just(IrConst::I64(0)),
+                Just(IrConst::I64(-1)),
+                Just(IrConst::I64(0x7fff_ffff)),
+                Just(IrConst::I64(0x8000_0000)),
+            ],
+            lhs_unsigned in any::<bool>(),
+            rhs_unsigned in any::<bool>(),
+        ) {
+            let lhs_size = 4;
+            let rhs_size = 8;
+            prop_assert_eq!(
+                eval_result_repr(eval_binop_with_types(&op, &lhs, &rhs, lhs_size, lhs_unsigned, rhs_size, rhs_unsigned)),
+                eval_result_repr(expected_eval_binop_with_types(&op, &lhs, &rhs, lhs_size, lhs_unsigned, rhs_size, rhs_unsigned))
+            );
+        }
+
+        #[test]
+        fn non_shift_ops_use_or_of_signedness_when_sizes_match(
+            op in arb_non_shift_op(),
+            lhs in prop_oneof![
+                Just(IrConst::I64(0)),
+                Just(IrConst::I64(-1)),
+                Just(IrConst::I64(0x7fff_ffff)),
+                Just(IrConst::I64(0x8000_0000)),
+            ],
+            rhs in prop_oneof![
+                Just(IrConst::I64(0)),
+                Just(IrConst::I64(-1)),
+                Just(IrConst::I64(0x7fff_ffff)),
+                Just(IrConst::I64(0x8000_0000)),
+            ],
+            lhs_size in prop_oneof![Just(4usize), Just(8usize)],
+            lhs_unsigned in any::<bool>(),
+            rhs_unsigned in any::<bool>(),
+        ) {
+            let rhs_size = lhs_size;
+            prop_assert_eq!(
+                eval_result_repr(eval_binop_with_types(&op, &lhs, &rhs, lhs_size, lhs_unsigned, rhs_size, rhs_unsigned)),
+                eval_result_repr(expected_eval_binop_with_types(&op, &lhs, &rhs, lhs_size, lhs_unsigned, rhs_size, rhs_unsigned))
+            );
+        }
     }
+
 }
 
 /// Evaluate a binary operation on constant operands with given type parameters.
