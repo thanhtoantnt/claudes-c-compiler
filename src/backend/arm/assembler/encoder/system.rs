@@ -611,3 +611,94 @@ pub(crate) fn encode_dc(operands: &[Operand], raw_operands: &str) -> Result<Enco
 
     Err(format!("unsupported dc variant: {}", raw_operands))
 }
+
+// ── Property-based tests for encode_svc ───────────────────────────────────
+// Oracle: the AArch64 SVC encoding is
+//     SVC #imm16  ->  1101 0100 000 | imm16[20:5] | 00001
+//                  = 0xD4_0000_01 | (imm16 << 5)
+// i.e. bits[31:21] fixed (opcode), bits[4:0] fixed = 0b00001 (SVC's LL field),
+// and bits[20:5] carry the 16-bit immediate. The input immediate is masked to
+// 16 bits before placement, so values outside [0, 0xFFFF] are folded by their
+// low 16 bits (two's-complement for negatives).
+#[cfg(test)]
+mod proptest_svc {
+    use super::encode_svc;
+    use crate::backend::arm::assembler::encoder::EncodeResult;
+    use crate::backend::arm::assembler::parser::Operand;
+    use proptest::prelude::*;
+
+    /// Helper: encode a single `#imm` SVC operand and unwrap the resulting word.
+    fn encode_word(imm: i64) -> u32 {
+        match encode_svc(&[Operand::Imm(imm)]).expect("Imm operand must encode") {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected EncodeResult::Word, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        // 1. The opcode field bits[31:21] and the SVC LL field bits[4:0]=00001
+        //    are constant for every input immediate.
+        #[test]
+        fn svc_opcode_and_ll_fields_invariant(imm in -1_000_000i64..1_000_000) {
+            let word = encode_word(imm);
+            // Mask bits[31:21] (0xFFE0_0000) and bits[4:0] (0x1F).
+            prop_assert_eq!(word & 0xFFE0_001F, 0xD400_0001u32);
+        }
+
+        // 2. The 16-bit immediate round-trips out of bits[20:5].
+        #[test]
+        fn svc_imm16_roundtrips(imm in 0u32..=0xFFFF) {
+            let word = encode_word(imm as i64);
+            prop_assert_eq!((word >> 5) & 0xFFFF, imm);
+        }
+
+        // 3. Exact-word oracle over the full i64 range: the low 16 bits of the
+        //    (two's-complement) immediate are placed at bits[20:5] and nothing
+        //    else is altered. Holds for negatives, i64::MIN/MAX, etc.
+        #[test]
+        fn svc_low16_bits_placed_regardless_of_sign(imm in any::<i64>()) {
+            let word = encode_word(imm);
+            let low16 = (imm & 0xFFFF) as u32; // i64 & mask is in [0, 0xFFFF]
+            let expected = 0xD400_0001u32 | (low16 << 5);
+            prop_assert_eq!(word, expected);
+        }
+
+        // 4. Injectivity within the 16-bit immediate range: distinct imm16
+        //    values yield distinct encoded words.
+        #[test]
+        fn svc_distinct_imm16_give_distinct_words(a in 0u32..=0xFFFF, b in 0u32..=0xFFFF) {
+            prop_assume!(a != b);
+            let wa = encode_word(a as i64);
+            let wb = encode_word(b as i64);
+            prop_assert_ne!(wa, wb);
+        }
+
+        // 5. Error contract: a missing operand, or any non-Imm first operand,
+        //    is rejected. The function only accepts Operand::Imm at index 0.
+        #[test]
+        fn svc_rejects_non_imm_first_operand(kind in 0u8..3) {
+            let operands: Vec<Operand> = match kind {
+                0 => vec![],
+                1 => vec![Operand::Reg("x0".to_string())],
+                _ => vec![Operand::Symbol("foo".to_string())],
+            };
+            prop_assert!(
+                encode_svc(&operands).is_err(),
+                "expected Err for operands: {:?}",
+                operands
+            );
+        }
+    }
+
+    // Deterministic companion: an Imm operand always succeeds (covers MIN/MAX).
+    #[test]
+    fn svc_imm_always_succeeds() {
+        for imm in [i64::MIN, -1i64, 0, 1, 0xFFFF, 0x1_0000, i64::MAX] {
+            assert!(
+                matches!(encode_svc(&[Operand::Imm(imm)]), Ok(EncodeResult::Word(_))),
+                "imm {} should encode to Word",
+                imm
+            );
+        }
+    }
+}
