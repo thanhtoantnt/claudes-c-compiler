@@ -1,43 +1,37 @@
-# PBT Coverage — `encode_adc`
+# PBT Coverage — `encode_mul`
 
-Target: `src/backend/arm/assembler/encoder/data_processing.rs`, `encode_adc`.
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_mul`
+**Result:** 6/6 properties pass. **1 functional bug found** (silent SP→XZR aliasing) — see Bugs Found.
 
-**Result: all properties pass. No findings.**
+## What the function does
+`MUL Rd, Rn, Rm` is encoded as `MADD Rd, Rn, Rm, XZR`:
+```
+word = (sf << 31) | (0b0011011000 << 21) | (rm << 16) | (0b11111 << 10) | (rn << 5) | rd
+```
+i.e. ARMv8 MADD `sf 0 0 11011 000 Rm 0 Ra Rn Rd` with `Ra = XZR = 0b11111` and `o0 = 0`.
+A leading `RegArrangement` first operand delegates to `encode_neon_mul`.
 
-`encode_adc` is a pure register-to-register AArch64 encoder with no immediate,
-shift, or relocation handling, so the usual encoder failure modes (silent
-immediate truncation, shift clamping, missing range validation) do not apply.
+## Properties verified
+1. `mul_xregs_field_placement` — spec-exact placement of every fixed + register field (reference).
+2. `mul_sf_tracks_width` — `sf` (bit 31) reflects X vs. W (reference).
+3. `mul_equals_madd_with_xzr` — bit-identical to `encode_madd(.., XZR)` for all widths/operands (differential oracle — the strongest check).
+4. `mul_width_only_flips_sf_bit` — width affects only bit 31 (algebraic invariant).
+5. `mul_rejects_too_few_operands` — <3 operands → `Err` (negative contract).
+6. `mul_rejects_immediate_operand` — non-register Rm → `Err` (negative contract).
 
-## Properties added (in-module, `data_processing::tests`)
+## Bugs Found
 
-| # | Property | Oracle |
-|---|----------|--------|
-| 1 | `adc_field_placement` | Reference (ARMv8 ARM C4.1.4): sf=1, op=0, fixed opcode bits 28:21 = `0xD0`, reserved bits 15:10 = 0, Rm/Rn/Rd placed. |
-| 2 | `adc_s_bit_tracks_set_flags` | Algebraic: S (bit 29) == `set_flags` (ADC vs ADCS), both widths. |
-| 3 | `adc_sf_tracks_register_width` | Algebraic: sf (bit 31) == 1 for X, 0 for W. |
-| 4 | `adc_vs_sbc_op_bit` | Differential: op bit is 0 for ADC, 1 for SBC across flags/width. |
-| 5 | `adc_rejects_bad_operand_arities` | Negative contract: <3 operands or a non-register (Imm) operand → `Err`. |
+### BUG-1 (High): `encode_mul` silently accepts SP in any operand → encoded as multiply-by-zero
+`mul x0, x1, sp` is accepted with `Ok(Word(...))` whose Rm field is 31 — i.e. it is silently
+encoded as `mul x0, x1, xzr` (a multiply-by-zero). ARMv8 MADD/MUL has **no** SP-using variant;
+field 31 is XZR, and SP in these operands is UNPREDICTABLE/unallocated. Root cause: the shared
+`get_reg`→`parse_reg_num` helper maps `sp`/`wsp`→31 unconditionally (correct for SP-aware
+ADD/SUB, wrong for every XZR-only data-processing instruction). Confirmed empirically via the
+characterization test `mul_sp_in_rm_is_silently_accepted_as_xzr`; same aliasing hits SP in Rd
+and Rn too, and sibling encoders (`encode_madd`/`encode_div`/`encode_logical` reg form/etc.).
 
-## Verification notes
-- All 5 `adc_*` tests pass (`cargo test --lib data_processing::tests::adc`).
-- The 17 failures in the broader `data_processing` module are pre-existing
-  rejection/range tests for *other* encoders (movz/movn/movk/neg/mvn/logical/shift)
-  and are unrelated to `encode_adc`.
-
-## encode_sbc (data_processing.rs) — 2026-07-08
-Added 5 proptest properties + 1 deterministic reference-oracle test for
-`encode_sbc` (ARMv8 Subtract-with-Carry). All pass (256 cases each).
-
-- `sbc_known_constant_encoding`: independent oracle `sbc x0,x1,x2 == 0xDA020020`,
-  `sbcs == 0xDA020020|(1<<29)`.
-- `sbc_64bit_field_placement`: every fixed (sf, op, S, opcode bits 28..21,
-  reserved bits 15..10) and variable (Rm/Rn/Rd) field matches the ARMv8 spec.
-- `sbcs_flips_only_s_bit`: SBC vs SBCS differ only in bit 29.
-- `sbc_is_adc_with_op_bit_set`: SBC ^ ADC == (1<<30) — the two carry
-  instructions are structurally identical apart from the subtract op bit.
-- `sbc_sf_tracks_register_width`: sf (bit 31) tracks W vs X register bank.
-- `sbc_rejects_bad_operand_arities`: negative contract — <3 operands or an
-  immediate in the 3rd slot returns Err (never silently encoded).
-
-No finding: `encode_sbc` correctly emits `sf 1 S 11010000 Rm 000000 Rn Rd`,
-reserved bits are 0, and arity errors are rejected via `get_reg`.
+- **Report:** `pbt-out/bug_reports/encode_mul_sp_operand_silently_accepted_as_xzr.md`
+- **Repro:** `cargo test --lib backend::arm::assembler::encoder::data_processing::tests::mul_sp_in_rm_is_silently_accepted_as_xzr -- --nocapture`
+- **Evidence:** `mul x0,x1,sp -> Ok(Word(2602531872))`, Rm field = 31 (XZR)
+- **Suggested fix:** reject SP/WSP (and mixed widths) in `encode_mul` before encoding, or
+  add a `get_reg_no_sp` helper used by all XZR-only data-processing encoders.

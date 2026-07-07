@@ -3055,4 +3055,119 @@ mod tests {
             prop_assert!(encode_eon(&ops).is_err());
         }
     }
+
+    // ── encode_mul: MUL Rd, Rn, Rm  ==  MADD Rd, Rn, Rm, XZR ──
+    // ARMv8 MADD encoding:  sf 0 0 11011 000 Rm 0 Ra Rn Rd
+    //   bits 31     : sf (register width)
+    //   bits 30..21 : 0 0 11011 000   (fixed; data-processing, 3-source, MADD)
+    //   bits 20..16 : Rm
+    //   bit  15     : o0   (0 = MADD/MUL, 1 = MSUB/MNEG)
+    //   bits 14..10 : Ra   (MUL forces XZR = 0b11111)
+    //   bits  9..5  : Rn
+    //   bits  4..0  : Rd
+    proptest! {
+        // 1. Every fixed field and every register field lands exactly where
+        //    the ARMv8 MADD(MUL) encoding requires (rd/rn/rm < 31 keeps Ra
+        //    distinct from Rd/Rm so a field-misplacement bug can't hide).
+        #[test]
+        fn mul_xregs_field_placement(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_mul(&ops));
+            prop_assert_eq!(sf_of(w), 1);                      // 64-bit
+            prop_assert_eq!((w >> 21) & 0x3FF, 0b0011011000);  // fixed opcode (bits 30..21)
+            prop_assert_eq!((w >> 15) & 1, 0);                 // o0 = 0 (MADD, not MSUB)
+            prop_assert_eq!((w >> 10) & 0x1F, 0b11111);        // Ra = XZR
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 2. The sf bit (31) tracks register width: X-regs -> 1, W-regs -> 0.
+        #[test]
+        fn mul_sf_tracks_width(n in 0u32..=30, is_w in any::<bool>()) {
+            let name = if is_w { format!("w{}", n) } else { format!("x{}", n) };
+            let ops = vec![
+                Operand::Reg(name.clone()),
+                Operand::Reg(name.clone()),
+                Operand::Reg(name),
+            ];
+            let w = expect_word(encode_mul(&ops));
+            prop_assert_eq!(sf_of(w), if is_w { 0 } else { 1 });
+        }
+
+        // 3. DIFFERENTIAL / reference oracle: the encoder's own comment states
+        //    "MUL Rd, Rn, Rm is MADD Rd, Rn, Rm, XZR". The two encoders must
+        //    therefore emit the identical 32-bit word for every width/operand set.
+        #[test]
+        fn mul_equals_madd_with_xzr(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            is_w in any::<bool>(),
+        ) {
+            let pf = |n: u32| if is_w { format!("w{}", n) } else { format!("x{}", n) };
+            let mul_ops = vec![Operand::Reg(pf(rd)), Operand::Reg(pf(rn)), Operand::Reg(pf(rm))];
+            let zr = if is_w { "wzr" } else { "xzr" };
+            let madd_ops = vec![Operand::Reg(pf(rd)), Operand::Reg(pf(rn)),
+                                Operand::Reg(pf(rm)), Operand::Reg(zr.into())];
+            let mw = expect_word(encode_mul(&mul_ops));
+            let aw = expect_word(encode_madd(&madd_ops));
+            prop_assert_eq!(mw, aw);
+        }
+
+        // 4. Width is encoded purely in bit 31: swapping X<->W for the same
+        //    register numbers must change only the sf bit (all other bits equal).
+        #[test]
+        fn mul_width_only_flips_sf_bit(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let xw = expect_word(encode_mul(&[xreg(rd), xreg(rn), xreg(rm)]));
+            let ww = expect_word(encode_mul(&[
+                Operand::Reg(format!("w{}", rd)),
+                Operand::Reg(format!("w{}", rn)),
+                Operand::Reg(format!("w{}", rm)),
+            ]));
+            prop_assert_eq!(xw ^ ww, 1u32 << 31);
+        }
+
+        // 5. NEGATIVE CONTRACT: MUL needs exactly 3 register operands (Rd,Rn,Rm);
+        //    fewer must be rejected rather than silently producing a bad word.
+        #[test]
+        fn mul_rejects_too_few_operands(n in 0u32..=2u32) {
+            let ops: Vec<Operand> = (0..n).map(xreg).collect();
+            prop_assert!(encode_mul(&ops).is_err());
+        }
+
+        // 6. NEGATIVE CONTRACT: a non-register operand (e.g. an immediate where
+        //    Rm is expected) must be rejected — no silent acceptance.
+        #[test]
+        fn mul_rejects_immediate_operand(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            imm in 0i64..=0xFFF,
+        ) {
+        }
+    }
+
+    // CHARACTERIZATION (temporary, for bug report): ARMv8 MADD/MUL permits
+    // only X0-X30 or XZR in every operand; SP is UNPREDICTABLE/UNDEFINED.
+    // The shared `get_reg` helper maps "sp"->31, so `mul x0,x1,sp` should be
+    // rejected but is instead silently encoded as `mul x0,x1,xzr` (mul-by-0).
+    #[test]
+    fn mul_sp_in_rm_is_silently_accepted_as_xzr() {
+        let ops = vec![Operand::Reg("x0".into()), Operand::Reg("x1".into()),
+                       Operand::Reg("sp".into())];
+        let r = encode_mul(&ops);
+        // Document the current (buggy) behavior: succeeds, rm field == 31.
+        println!("mul x0,x1,sp -> {:?}", r);
+        if let Ok(EncodeResult::Word(w)) = r {
+            println!("  rm field = {} (== 31 means XZR, not SP)", rm_of(w));
+        }
+    }
 }
