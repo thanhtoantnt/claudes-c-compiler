@@ -4121,4 +4121,113 @@ mod tests {
             prop_assert!(encode_smaddl(&ops).is_err());
         }
     }
+
+    // ── encode_umaddl: UMADDL Xd, Wn, Wm, Xa (unsigned multiply-add long) ─────
+    // ARMv8 UMADDL reference (data-processing, 3 source):
+    //   bit 31 = 1 (sf)            bits 30:29 = 00
+    //   bits 28:24 = 11011         bits 23:21 = 101 (op31, selects UMADDL)
+    //   bits 20:16 = Rm            bit 15 = 0 (o0)
+    //   bits 14:10 = Ra            bits 9:5 = Rn   bits 4:0 = Rd
+    //   Rn/Rm are 32-bit (W) sources; Rd/Ra are 64-bit (X) dest/accumulator.
+    fn umaddl_ref(rd: u32, rn: u32, rm: u32, ra: u32) -> u32 {
+        0x9BA00000u32 | (rm << 16) | (ra << 10) | (rn << 5) | rd
+    }
+
+    proptest! {
+        // 1. Differential / reference match: every valid register quadruple
+        //    encodes to exactly the ARMv8 UMADDL word reconstructed from the
+        //    bit-level spec (op31=101 -> 0x9BA00000 base). Strongest spec check.
+        #[test]
+        fn umaddl_matches_armv8_reference(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            ra in 0u32..=31,
+        ) {
+            // Architecturally correct widths: Xd, Wn, Wm, Xa.
+            let ops = vec![xreg(rd), wreg(rn), wreg(rm), xreg(ra)];
+            let w = expect_word(encode_umaddl(&ops));
+            prop_assert_eq!(w, umaddl_ref(rd, rn, rm, ra));
+        }
+
+        // 2. Fixed fields: regardless of operands, UMADDL pins sf=1 (64-bit
+        //    only), bits 30:29 = 00, the data-processing (3 source) class
+        //    opcode (11011), op31=101 (the UMADDL selector), and o0=0.
+        #[test]
+        fn umaddl_fixed_fields(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            ra in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), wreg(rn), wreg(rm), xreg(ra)];
+            let w = expect_word(encode_umaddl(&ops));
+            prop_assert_eq!((w >> 31) & 1, 1);               // sf always 1 (64-bit only)
+            prop_assert_eq!((w >> 29) & 0x3, 0b00);          // bits 30:29 = 00
+            prop_assert_eq!(opcode5_of(w), 0b11011);         // data-processing (3 source) class
+            prop_assert_eq!(op31_of(w), 0b101);              // op31=101 selects UMADDL
+            prop_assert_eq!(o0_of(w), 0);                    // o0 = 0
+        }
+
+        // 3. Register field placement: Rd/Rn/Rm/Ra land in bits 4:0 / 9:5 /
+        //    20:16 / 14:10 exactly as supplied — non-overlapping, no spill.
+        #[test]
+        fn umaddl_register_fields(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            ra in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), wreg(rn), wreg(rm), xreg(ra)];
+            let w = expect_word(encode_umaddl(&ops));
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(ra_of(w), ra);
+        }
+
+        // 4. NEGATIVE CONTRACT (operand count): UMADDL takes exactly four
+        //    register operands. Any subset of fewer than four must yield Err
+        //    (get_reg fails on the missing operand), never a truncated word.
+        #[test]
+        fn umaddl_missing_operand_errors(
+            n in 0u32..=3u32,         // 0..3 operands — never the required 4
+        ) {
+            let ops: Vec<Operand> = (0..n).map(xreg).collect();
+            prop_assert!(encode_umaddl(&ops).is_err());
+        }
+
+        // 5. NEGATIVE CONTRACT (width, destination): UMADDL is "Xd, Wn, Wm, Xa"
+        //    — it is defined ONLY in the 64-bit (sf=1) form, so the destination
+        //    Rd (and accumulator Ra) MUST be a 64-bit X register. Supplying a
+        //    32-bit W register for the destination is architecturally UNDEF and
+        //    must be rejected with Err, not silently re-encoded. (Mirrors the
+        //    SMADDL width finding.)
+        #[test]
+        fn umaddl_rejects_w_destination_register(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            ra in 0u32..=30,
+        ) {
+            let ops = vec![wreg(rd), wreg(rn), wreg(rm), xreg(ra)];
+            prop_assert!(encode_umaddl(&ops).is_err());
+        }
+
+        // 6. NEGATIVE CONTRACT (width, sources): UMADDL widens 32x32->64, so
+        //    the multiplier inputs Rn and Rm MUST be 32-bit (W) registers.
+        //    Supplying 64-bit (X) source registers is a syntax error / UNDEF
+        //    and must be rejected with Err. (UMADDL-specific: unlike SMADDL,
+        //    the "long" form constrains width in BOTH directions.)
+        #[test]
+        fn umaddl_rejects_x_source_registers(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            ra in 0u32..=30,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm), xreg(ra)];
+            prop_assert!(encode_umaddl(&ops).is_err());
+        }
+    }
 }
