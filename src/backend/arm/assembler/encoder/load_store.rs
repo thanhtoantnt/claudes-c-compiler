@@ -1238,3 +1238,156 @@ mod prop_encode_ldr_str_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_ldur_stur_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: reference-encoding / field-placement (ARMv8-A Architecture
+    // Reference Manual, §C4.1.66 LDUR/STUR “Load/Store Register (unscaled
+    // immediate)”).
+    //
+    // Encoding (GP, V=0):
+    //   size[31:30] 111[29:27] V[26] 00[25:24] opc[23:22] 0[21]
+    //     imm9[20:12] op2[11:10] Rn[9:5] Rt[4:0]
+    //
+    // Hand-derived golden encodings (independently cross-checked against
+    // `llvm-mc`/objdump), used as an anchor rather than this crate's own
+    // bit-fiddling formula:
+    //
+    //   ldur x0, [x1]      = 0xF8400020   (size=11, opc=01, imm9=0, op2=00)
+    //   ldur x0, [x1, #8]  = 0xF8408020   (imm9=8)
+    //   ldur x0, [x1, #-1] = 0xF85FF020   (imm9=0x1FF = -1 in 9-bit 2's-comp)
+    //   ldur w0, [x1]      = 0xB8400020   (size=10)
+    //
+    // The 9-bit imm9 is a SIGNED immediate: encodable range [-256, 255].
+
+    const GOLDEN_LDUR_X0_X1_0: u32 = 0xF8400020;
+    const GOLDEN_LDUR_X0_X1_8: u32 = 0xF8408020;
+    const GOLDEN_LDUR_X0_X1_M1: u32 = 0xF85FF020;
+    const GOLDEN_LDUR_W0_X1_0: u32 = 0xB8400020;
+
+    fn gp_xreg(num: u32) -> Operand {
+        Operand::Reg(format!("x{}", num))
+    }
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    prop_compose! {
+        fn arb_reg_num()(n in 0u32..=30u32) -> u32 { n }
+    }
+
+    proptest! {
+        // Property 1 — full-word field layout vs golden.
+        // For `ldur xRt,[xRn,#off]` with off in [0,255] (inside the imm9
+        // range, so no masking aliasing), the word equals the golden
+        // `ldur x0,[x1,#0]` offset additively by Rt[4:0], Rn[9:5], and
+        // imm9[20:12]. Anchored to the ARM ARM, not to this crate's formula.
+        #[test]
+        fn prop_gp_layout_matches_golden(
+            rt in arb_reg_num(),
+            rn in arb_reg_num(),
+            off in 0i64..=255i64,
+        ) {
+            let ops = vec![gp_xreg(rt), Operand::Mem { base: format!("x{}", rn), offset: off }];
+            let w = word(encode_ldur_stur(&ops, true, 0b00));
+            let expected = (GOLDEN_LDUR_X0_X1_0 as i64
+                + (rt as i64)
+                + (((rn as i64) - 1) << 5)
+                + (off << 12)) as u32;
+            prop_assert_eq!(w, expected);
+        }
+
+        // Property 1b — negative imm9 round-trips through the 9-bit field.
+        // The field at [20:12], sign-extended back to i32, must equal the
+        // input offset for every imm9 in the valid range [-256, 255], and
+        // the three documented golden offsets must match exactly.
+        #[test]
+        fn prop_imm9_field_sign_extended_equals_input(off in -256i64..=255i64) {
+            let ops = vec![gp_xreg(0), Operand::Mem { base: "x1".to_string(), offset: off }];
+            let w = word(encode_ldur_stur(&ops, true, 0b00));
+            let field = ((w >> 12) & 0x1FF) as i32;
+            let sx = if field & 0x100 != 0 { field | (!0x1FF) } else { field };
+            prop_assert_eq!(sx, off as i32);
+            if off == 0   { prop_assert_eq!(w, GOLDEN_LDUR_X0_X1_0); }
+            if off == 8   { prop_assert_eq!(w, GOLDEN_LDUR_X0_X1_8); }
+            if off == -1  { prop_assert_eq!(w, GOLDEN_LDUR_X0_X1_M1); }
+        }
+
+        // Property 2 — size field [31:30] tracks register width:
+        // xN -> 0b11 (64-bit), wN -> 0b10 (32-bit); matches golden offsets.
+        #[test]
+        fn prop_size_field_tracks_reg_width(rt in arb_reg_num()) {
+            let mem = || Operand::Mem { base: "x1".to_string(), offset: 0 };
+            let xw = word(encode_ldur_stur(&[Operand::Reg(format!("x{}", rt)), mem()], true, 0b00));
+            let ww = word(encode_ldur_stur(&[Operand::Reg(format!("w{}", rt)), mem()], true, 0b00));
+            prop_assert_eq!((xw >> 30) & 0b11, 0b11u32);
+            prop_assert_eq!((ww >> 30) & 0b11, 0b10u32);
+            prop_assert_eq!(xw, GOLDEN_LDUR_X0_X1_0 + rt);
+            prop_assert_eq!(ww, GOLDEN_LDUR_W0_X1_0 + rt);
+        }
+
+        // Property 3 — differential: load vs store differ ONLY in opc bit 22.
+        // For GP registers ldur opc=01, stur opc=00, so load ^ store == 0x0040_0000.
+        #[test]
+        fn prop_load_xor_store_is_opc_bit22(
+            rt in arb_reg_num(),
+            rn in arb_reg_num(),
+            off in -256i64..=255i64,
+        ) {
+            let ops = vec![gp_xreg(rt), Operand::Mem { base: format!("x{}", rn), offset: off }];
+            let load  = word(encode_ldur_stur(&ops, true,  0b00));
+            let store = word(encode_ldur_stur(&ops, false, 0b00));
+            prop_assert_eq!(load ^ store, 0x0040_0000u32);
+        }
+
+        // Property 4 — op2_bits parameter lands in bits [11:10].
+        // The function is shared by LDUR/STUR (op2=0b00) and LDTR/STTR
+        // (op2=0b10); only bits [11:10] may differ, (w>>10)&0b11 must equal
+        // the parameter, and op2=0b10 flips exactly bit 11 (0x0000_0800).
+        #[test]
+        fn prop_op2_bits_in_field_11_10(op2 in 0u32..4u32) {
+            let ops = vec![gp_xreg(0), Operand::Mem { base: "x1".to_string(), offset: 0 }];
+            let w = word(encode_ldur_stur(&ops, true, op2));
+            prop_assert_eq!((w >> 10) & 0b11, op2 & 0b11);
+            let base = word(encode_ldur_stur(&ops, true, 0b00));
+            prop_assert_eq!(w & !0xC00u32, base & !0xC00u32);
+            let w10 = word(encode_ldur_stur(&ops, true, 0b10));
+            prop_assert_eq!(w10 ^ base, 0x0000_0800u32);
+        }
+
+        // Property 5 — NEGATIVE CONTRACT (expected to FAIL: silent truncation).
+        // The 9-bit imm9 is a SIGNED immediate covering [-256, 255]. An offset
+        // strictly outside that range cannot be represented by LDUR/STUR and the
+        // encoder MUST return Err (the user should use the LDR unsigned-offset
+        // form instead). Instead the implementation does
+        //   imm9_enc = (imm9 as u32) & 0x1FF
+        // silently wrapping out-of-range offsets (#256 -> #0, #-257 -> #-1).
+        #[test]
+        fn prop_out_of_range_imm9_is_rejected(
+            excess in 1u32..2000u32,
+            negative in any::<bool>(),
+        ) {
+            let offset = if negative {
+                -256i64 - excess as i64
+            } else {
+                255i64 + excess as i64
+            };
+            let ops = vec![gp_xreg(0), Operand::Mem { base: "x1".to_string(), offset }];
+            let r = encode_ldur_stur(&ops, true, 0b00);
+            prop_assert!(
+                r.is_err(),
+                "offset {} is outside the LDUR/STUR imm9 range [-256, 255] \
+                 and must be rejected, but the encoder returned {:?}",
+                offset, r
+            );
+        }
+    }
+}
