@@ -70,3 +70,16 @@
 - Masking invariance (property 3) is checked over inputs up to 0xFFFF — well outside each 3-/4-bit field width — confirming the `& 7` / `& 0xF` masks.
 - Error contract (property 6) covers all four failure paths: arity, op1 parse, op2 parse, and register parse.
 - No bugs found in `encode_sys`.
+
+## `encode_neon_ext` (src/backend/arm/assembler/encoder/neon.rs)
+
+Property suite in `mod ext_pbt_tests` — 6 properties, all PASS (proptest default 256 cases each).
+
+- **prop_matches_reference** — differential oracle: encoder word == independent reconstruction of the `0 Q 101110 00 0 Rm 0 imm4 0 Rn Rd` layout, for all rd/rn/rm in 0..32 and index 0..16, both `.8b` and `.16b`.
+- **prop_fixed_opcode_fields** — bit31==0, bits29-24==0b101110, and the always-zero filler bits 10/15/21/22/23 are clear.
+- **prop_q_bit_selects_16b** — Q (bit 30) is 1 iff arrangement == "16b".
+- **prop_register_fields_preserved** — Rd (4-0), Rn (9-5), Rm (20-16) round-trip the inputs.
+- **prop_imm4_field_masks** — bits 14-11 == index & 0xF; for index < 16, equal to index. Documents that the encoder performs no range validation (index is masked, not rejected).
+- **prop_error_contracts** — <4 operands or a non-Imm 4th operand return Err.
+
+No bugs found. Notable observation (not a defect, recorded): the function does not validate the byte-index range (ARM allows 0-15) nor the arrangement string; any index is silently truncated to 4 bits and any non-`16b` string maps to Q=0. The `prop_imm4_field_masks` property pins this current behavior.

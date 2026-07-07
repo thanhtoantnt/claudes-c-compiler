@@ -2339,3 +2339,174 @@ mod tbl_pbt_tests {
     }
 }
 
+
+#[cfg(test)]
+mod ext_pbt_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // EXT Vd.T, Vn.T, Vm.T, #index
+    // ARMv8 encoding: 0 Q 10 1110 00 0 Rm 0 imm4 0 Rn Rd
+    //   bit 31      : 0
+    //   bit 30      : Q (1 iff arrangement == "16b")
+    //   bits 29-24  : 101110  (fixed)
+    //   bits 23-22  : 00
+    //   bit 21      : 0
+    //   bits 20-16  : Rm
+    //   bit 15      : 0
+    //   bits 14-11  : imm4  (== index & 0xF)
+    //   bit 10      : 0
+    //   bits 9-5    : Rn
+    //   bits 4-0    : Rd
+
+    // Both .8b and .16b are valid; any other string silently maps to Q=0 (no validation).
+    const ARRANGEMENTS: &[&str] = &["8b", "16b"];
+
+    fn ext_ops(rd: u32, rn: u32, rm: u32, arr: &str, index: i64) -> Vec<Operand> {
+        vec![
+            Operand::RegArrangement { reg: format!("v{}", rd), arrangement: arr.to_string() },
+            Operand::RegArrangement { reg: format!("v{}", rn), arrangement: arr.to_string() },
+            Operand::RegArrangement { reg: format!("v{}", rm), arrangement: arr.to_string() },
+            Operand::Imm(index),
+        ]
+    }
+
+    fn encode(rd: u32, rn: u32, rm: u32, arr: &str, index: i64) -> Result<u32, String> {
+        match encode_neon_ext(&ext_ops(rd, rn, rm, arr, index)) {
+            Ok(EncodeResult::Word(w)) => Ok(w),
+            Ok(other) => Err(format!("unexpected non-Word result: {:?}", other)),
+            Err(e) => Err(e),
+        }
+    }
+
+    // Independent reference oracle from the ARM ARM (C7.2.96 EXT).
+    fn ref_word(rd: u32, rn: u32, rm: u32, q: u32, index: u32) -> u32 {
+        let imm4 = index & 0xF;
+        (q << 30) | (0b101110u32 << 24) | (rm << 16) | (imm4 << 11) | (rn << 5) | rd
+    }
+
+    proptest! {
+        // 1. Differential oracle: encoder output equals an independent reference
+        //    reconstruction of the EXT word for all valid register numbers and
+        //    in-range byte indices (0..=15), for both .8b and .16b.
+        #[test]
+        fn prop_matches_reference(
+            rd in 0u32..32u32,
+            rn in 0u32..32u32,
+            rm in 0u32..32u32,
+            index in 0u32..16u32,
+        ) {
+            for &arr in ARRANGEMENTS {
+                let q = if arr == "16b" { 1u32 } else { 0u32 };
+                let word = encode(rd, rn, rm, arr, index as i64)
+                    .expect("valid EXT must encode");
+                prop_assert_eq!(word, ref_word(rd, rn, rm, q, index), "diff for arr {}", arr);
+            }
+        }
+
+        // 2. Fixed ISA opcode fields are invariant: bit31==0, bits29-24==101110,
+        //    and the always-zero filler bits (10, 15, 21, 22, 23) are clear.
+        #[test]
+        fn prop_fixed_opcode_fields(
+            rd in 0u32..32u32,
+            rn in 0u32..32u32,
+            rm in 0u32..32u32,
+            index in 0u32..16u32,
+        ) {
+            for &arr in ARRANGEMENTS {
+                let word = encode(rd, rn, rm, arr, index as i64)
+                    .expect("valid EXT must encode");
+                prop_assert_eq!((word >> 31) & 1, 0u32, "bit31 must be 0");
+                prop_assert_eq!((word >> 24) & 0x3F, 0b101110u32, "opcode bits 29-24");
+                for (bit, name) in [(10u32, "10"), (15u32, "15"), (21u32, "21"), (22u32, "22"), (23u32, "23")] {
+                    prop_assert_eq!((word >> bit) & 1, 0u32, "bit {} must be 0", name);
+                }
+            }
+        }
+
+        // 3. Q bit (bit 30) is 1 iff the destination arrangement is "16b".
+        #[test]
+        fn prop_q_bit_selects_16b(
+            rd in 0u32..32u32,
+            rn in 0u32..32u32,
+            rm in 0u32..32u32,
+            index in 0u32..16u32,
+        ) {
+            for &arr in ARRANGEMENTS {
+                let word = encode(rd, rn, rm, arr, index as i64)
+                    .expect("valid EXT must encode");
+                let expected_q = if arr == "16b" { 1u32 } else { 0u32 };
+                prop_assert_eq!((word >> 30) & 1, expected_q, "Q for arr {}", arr);
+            }
+        }
+
+        // 4. Register operand fields are preserved verbatim:
+        //    Rd (bits 4-0) == rd, Rn (bits 9-5) == rn, Rm (bits 20-16) == rm.
+        #[test]
+        fn prop_register_fields_preserved(
+            rd in 0u32..32u32,
+            rn in 0u32..32u32,
+            rm in 0u32..32u32,
+            index in 0u32..16u32,
+        ) {
+            for &arr in ARRANGEMENTS {
+                let word = encode(rd, rn, rm, arr, index as i64)
+                    .expect("valid EXT must encode");
+                prop_assert_eq!(word & 0x1F, rd, "Rd for arr {}", arr);
+                prop_assert_eq!((word >> 5) & 0x1F, rn, "Rn for arr {}", arr);
+                prop_assert_eq!((word >> 16) & 0x1F, rm, "Rm for arr {}", arr);
+            }
+        }
+
+        // 5. imm4 field round-trips: bits 14-11 == index & 0xF. For out-of-range
+        //    indices (>=16) only the low nibble is kept (index is masked with 0xF),
+        //    documenting the absence of range validation.
+        #[test]
+        fn prop_imm4_field_masks(
+            rd in 0u32..32u32,
+            rn in 0u32..32u32,
+            rm in 0u32..32u32,
+            index in 0u32..256u32,
+        ) {
+            for &arr in ARRANGEMENTS {
+                let word = encode(rd, rn, rm, arr, index as i64)
+                    .expect("any index must encode (no range check)");
+                let imm4 = (word >> 11) & 0xF;
+                prop_assert_eq!(imm4, index & 0xF, "imm4 == index & 0xF for arr {}", arr);
+                // For in-range indices, imm4 equals the index exactly.
+                if index < 16 {
+                    prop_assert_eq!(imm4, index, "imm4 == index (in range) for arr {}", arr);
+                }
+            }
+        }
+
+        // 6. Error contracts: fewer than 4 operands must be rejected, and a
+        //    non-immediate 4th operand must be rejected (get_imm contract).
+        #[test]
+        fn prop_error_contracts(rd in 0u32..32u32, rn in 0u32..32u32, rm in 0u32..32u32) {
+            // 0, 1, 2, 3 operands -> all must error.
+            for n in 0..4 {
+                let mut ops: Vec<Operand> = vec![
+                    Operand::RegArrangement { reg: format!("v{}", rd), arrangement: "8b".to_string() },
+                    Operand::RegArrangement { reg: format!("v{}", rn), arrangement: "8b".to_string() },
+                    Operand::RegArrangement { reg: format!("v{}", rm), arrangement: "8b".to_string() },
+                    Operand::Imm(7),
+                ];
+                ops.truncate(n);
+                prop_assert!(
+                    encode_neon_ext(&ops).is_err(),
+                    "{} operands must be rejected", n
+                );
+            }
+
+            // 4th operand is not an Imm -> must error.
+            let bad_imm = vec![
+                Operand::RegArrangement { reg: format!("v{}", rd), arrangement: "8b".to_string() },
+                Operand::RegArrangement { reg: format!("v{}", rn), arrangement: "8b".to_string() },
+                Operand::RegArrangement { reg: format!("v{}", rm), arrangement: "8b".to_string() },
+                Operand::Reg(format!("v{}", rm)),
+            ];
+            prop_assert!(encode_neon_ext(&bad_imm).is_err(), "non-Imm index must error");
+        }
+    }
+}
