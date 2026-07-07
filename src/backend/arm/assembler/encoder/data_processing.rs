@@ -3857,4 +3857,103 @@ mod tests {
             prop_assert_eq!((msub >> 15) & 1, 1);
         }
     }
+
+    // ── Field extractors for Data-processing (3 source): SMULH / UMULH ──
+    // Layout:  sf 00 11011 op31 Rm o0 Ra Rn Rd
+    // bit:     31 30:29 28:24 23:21 20:16 15 14:10 9:5 4:0
+    // (o0_of / ra_of for bits 15 and 14:10 are reused from above.)
+    fn op31_of(w: u32) -> u32 { (w >> 21) & 0x7 }
+
+    /// SMULH reference word per ARMv8 ARM ("SMULH Xd, Xn, Xm"):
+    ///   1 00 11011 010 Rm 0 11111 Rn Rd
+    /// sf=1, op31=010, o0=0, Ra hardwired to XZR (11111). Signed multiply high.
+    fn smulh_ref(rd: u32, rn: u32, rm: u32) -> u32 {
+        (1u32 << 31) | (0b11011u32 << 24) | (0b010u32 << 21) | (rm << 16)
+            | (0b11111u32 << 10) | (rn << 5) | rd
+    }
+
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+
+    proptest! {
+        // 1. Fixed fields: regardless of operands, SMULH pins sf=1, the 11011
+        //    class opcode, op31=010, o0=0, and Ra=XZR (11111), per the ARMv8
+        //    spec for "Signed multiply high".
+        #[test]
+        fn smulh_fixed_fields(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_smulh(&ops));
+            prop_assert_eq!((w >> 31) & 1, 1);               // sf
+            prop_assert_eq!((w >> 29) & 0x3, 0b00);          // bits 30:29
+            prop_assert_eq!((w >> 24) & 0x1F, 0b11011);      // class opcode
+            prop_assert_eq!(op31_of(w), 0b010);              // op31 selects SMULH
+            prop_assert_eq!(o0_of(w), 0);                    // o0 = 0
+            prop_assert_eq!(ra_of(w), 0b11111);              // Ra hardwired to XZR
+        }
+
+        // 2. Register field placement: Rd/Rn/Rm land in bits 4:0 / 9:5 / 20:16
+        //    exactly as supplied, and the whole word matches an independent
+        //    reference construction.
+        #[test]
+        fn smulh_register_field_placement(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_smulh(&ops));
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(w, smulh_ref(rd, rn, rm));
+        }
+
+        // 3. Width: SMULH is defined ONLY in the 64-bit (X) form, so the sf
+        //    bit is always 1 for every valid operand combination.
+        #[test]
+        fn smulh_always_64bit(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_smulh(&ops));
+            prop_assert_eq!((w >> 31) & 1, 1);
+        }
+
+        // 4. Differential vs UMULH: with identical operands, SMULH and UMULH
+        //    differ ONLY in op31's sign-select bit (bit 23). All register
+        //    fields, Ra=XZR, o0, and the class opcode are shared.
+        #[test]
+        fn smulh_vs_umulh_only_sign_bit_differs(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let s = expect_word(encode_smulh(&ops));
+            let u = expect_word(encode_umulh(&ops));
+            prop_assert_eq!(s ^ u, 1u32 << 23);
+            // UMULH selects op31=110 (bit 23 set); SMULH op31=010 (clear).
+            prop_assert_eq!((u >> 23) & 1, 1);
+            prop_assert_eq!((s >> 23) & 1, 0);
+        }
+
+        // 5. NEGATIVE CONTRACT: SMULH has no 32-bit (W) form. The ARMv8 ARM
+        //    defines SMULH exclusively as "SMULH Xd, Xn, Xm"; W-register
+        //    operands are architecturally UNDEF and must be rejected with Err,
+        //    not silently re-encoded as a 64-bit instruction.
+        #[test]
+        fn smulh_rejects_32bit_w_registers(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let ops = vec![wreg(rd), wreg(rn), wreg(rm)];
+            prop_assert!(encode_smulh(&ops).is_err());
+        }
+    }
 }
