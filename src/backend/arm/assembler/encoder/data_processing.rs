@@ -2398,4 +2398,78 @@ mod tests {
             prop_assert!(encode_negs(&ops).is_err());
         }
     }
+
+    // ── encode_adc / encode_adcs (ADC family, ARMv8 ARM C4.1.4) ─────────────
+    // Encoding: sf | 0 | S | 11010000 | Rm | 000000 | Rn | Rd
+    //   bit 31 = sf (1=X, 0=W); bit 30 = op (0=ADC, 1=SBC); bit 29 = S (flags);
+    //   bits 28:21 = 0b11010000 fixed; bits 20:16 = Rm; bits 15:10 = 000000 (reserved 0);
+    //   bits 9:5 = Rn; bits 4:0 = Rd.
+    fn adc_fixed_of(w: u32) -> u32 { (w >> 21) & 0xFF }   // bits 28:21 = 11010000
+    fn reserved6_of(w: u32) -> u32 { (w >> 10) & 0x3F }  // bits 15:10 (must be 0)
+
+    proptest! {
+        // 1. Every fixed and operand field lands exactly where the ARMv8 spec
+        //    dictates for `ADC Xd, Xn, Xm`: sf=1, op(bit30)=0, opcode=0xD0,
+        //    reserved6=0, and Rm/Rn/Rd extracted from their operands.
+        #[test]
+        fn adc_field_placement(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30, set_flags in any::<bool>(),
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_adc(&ops, set_flags));
+            prop_assert_eq!(sf_of(w), 1);
+            prop_assert_eq!(op_of(w), 0);            // ADC => add family, op=0
+            prop_assert_eq!(adc_fixed_of(w), 0xD0);  // bits 28:21 = 11010000
+            prop_assert_eq!(reserved6_of(w), 0);     // bits 15:10 must be zero
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 2. The S bit (bit 29) is exactly set_flags: ADC (S=0) vs ADCS (S=1).
+        #[test]
+        fn adc_s_bit_tracks_set_flags(
+            n in 0u32..=30, set_flags in any::<bool>(), is_w in any::<bool>(),
+        ) {
+            let r = if is_w { Operand::Reg(format!("w{}", n)) } else { xreg(n) };
+            let ops = vec![r.clone(), r.clone(), r];
+            let w = expect_word(encode_adc(&ops, set_flags));
+            prop_assert_eq!(s_of(w), if set_flags { 1 } else { 0 });
+        }
+
+        // 3. sf (bit 31) tracks register width: W -> 0, X -> 1.
+        #[test]
+        fn adc_sf_tracks_register_width(n in 0u32..=30, is_w in any::<bool>()) {
+            let r = if is_w { Operand::Reg(format!("w{}", n)) } else { xreg(n) };
+            let ops = vec![r.clone(), r.clone(), r];
+            let w = expect_word(encode_adc(&ops, false));
+            prop_assert_eq!(sf_of(w), if is_w { 0 } else { 1 });
+        }
+
+        // 4. Differential: within the add/sub carry family, ADC always sets
+        //    op=0 and SBC always sets op=1 (bit 30), regardless of flags/width.
+        //    A regression that drops or swaps the op term would be caught here.
+        #[test]
+        fn adc_vs_sbc_op_bit(n in 0u32..=30, set_flags in any::<bool>(), is_w in any::<bool>()) {
+            let r = if is_w { Operand::Reg(format!("w{}", n)) } else { xreg(n) };
+            let ops = vec![r.clone(), r.clone(), r];
+            prop_assert_eq!(op_of(expect_word(encode_adc(&ops, set_flags))), 0);
+            prop_assert_eq!(op_of(expect_word(encode_sbc(&ops, set_flags))), 1);
+        }
+
+        // 5. NEGATIVE CONTRACT: ADC requires exactly three register operands.
+        //    Missing operands or a non-register (immediate) in an operand slot
+        //    MUST be rejected with Err, never silently encoded.
+        #[test]
+        fn adc_rejects_bad_operand_arities(
+            rd in 0u32..=30, rn in 0u32..=30, bad_imm in 0i64..=0xFFF,
+        ) {
+            // too few operands (< 3)
+            let two = vec![xreg(rd), xreg(rn)];
+            prop_assert!(encode_adc(&two, false).is_err());
+            // third operand is an immediate, not a register
+            let imm_third = vec![xreg(rd), xreg(rn), Operand::Imm(bad_imm)];
+            prop_assert!(encode_adc(&imm_third, false).is_err());
+        }
+    }
 }
