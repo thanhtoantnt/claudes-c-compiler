@@ -124,3 +124,18 @@ No bugs found. `encode_jal` correctly handles both the two-operand `jal rd, offs
 
 Verification:
 - `cargo test --lib pbt_encode_jal`
+
+## PBT coverage: `encode_alu_imm` (src/backend/riscv/assembler/encoder/base.rs)
+
+Module `pbt_encode_alu_imm` (5 properties, all PASS, 256 cases each via proptest):
+
+- `alu_imm_encodes_all_fields` — Reference oracle: `encode_alu_imm([rd, rs1, imm], funct3)` produces an I-format Word with opcode bits[6:0] == OP_OP_IMM (0x13), rd bits[11:7] == rd number, funct3 bits[14:12] == funct3 arg, rs1 bits[19:15] == rs1 number, and the whole word equals the raw `encode_i(OP_OP_IMM, rd, funct3, rs1, imm as i32)` exactly.
+- `alu_imm_imm_field_is_low_12_bits_of_i32_truncation` — Reference (truncation) oracle: because the impl does `*imm as i32` (i64→i32) and `encode_i` masks with 0xFFF, the imm field must equal `((imm as i32) as u32) & 0xFFF` for ANY i64 input — including values outside i32 range, which silently truncate. This pins the silent-truncation behavior.
+- `alu_imm_symbol_maps_reloc_and_zeros_imm` — Reference oracle: a Symbol third operand emits a WordWithReloc whose word is `encode_i(OP_OP_IMM, rd, funct3, rs1, 0)` (zeroed imm), addend 0, modifier-stripped symbol, and the *load-style* (Lo12*) reloc variant: `%hi`→Lo12I, `%pcrel_hi`→PcrelLo12I, `%tprel_hi`→TprelLo12I, while `%lo`/`%pcrel_lo`/`%tprel_lo` pass through unchanged and a bare symbol becomes PcrelLo12I.
+- `alu_imm_real_mnemonics_decode_to_canonical_fields` — Reference oracle: the real RV64I ALU-immediate mnemonics addi(000)/slti(010)/sltiu(011)/xori(100)/ori(110)/andi(111) decode to opcode 0x13 with correct funct3, rd, rs1, and imm field.
+- `alu_imm_rejects_invalid_operands` — Negative contract: a non-Imm/non-Symbol third operand (Reg/Label/Mem/MemSymbol/SymbolOffset/FenceArg/Csr/RoundingMode), missing third operand, missing second operand, empty operands, and unparseable registers (`x32`) are all rejected; the specific "alu_imm: expected immediate" / "invalid integer register" messages are asserted.
+
+No bugs found. `encode_alu_imm` correctly emits I-format OP-IMM words for immediates (with i64→i32 silent truncation matching the encoder), and WordWithReloc results with the Lo12*-style reloc mapping and zero addend/stripped symbol for symbol operands.
+
+Verification:
+- `cargo test --lib pbt_encode_alu_imm`

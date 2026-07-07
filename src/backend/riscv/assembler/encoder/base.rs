@@ -892,3 +892,233 @@ mod pbt_encode_jal {
         }
     }
 }
+
+#[cfg(test)]
+mod pbt_encode_alu_imm {
+    use super::*;
+    use proptest::prelude::*;
+
+    const OP_OP_IMM_BITS: u32 = OP_OP_IMM; // 0b0010011 == 0x13
+
+    /// Strategy yielding (register_name, expected_5bit_number) pairs covering
+    /// both the `xN` form and the ABI alias names accepted by `reg_num`.
+    fn reg_strategy() -> impl Strategy<Value = (String, u32)> {
+        let pairs: Vec<(String, u32)> = (0u32..=31)
+            .flat_map(|n| {
+                let mut v: Vec<(String, u32)> = vec![(format!("x{}", n), n)];
+                let abi: Option<&'static str> = match n {
+                    0 => Some("zero"), 1 => Some("ra"), 2 => Some("sp"), 3 => Some("gp"),
+                    4 => Some("tp"), 5 => Some("t0"), 6 => Some("t1"), 7 => Some("t2"),
+                    8 => Some("s0"), 9 => Some("s1"), 10 => Some("a0"), 11 => Some("a1"),
+                    12 => Some("a2"), 13 => Some("a3"), 14 => Some("a4"), 15 => Some("a5"),
+                    16 => Some("a6"), 17 => Some("a7"), 18 => Some("s2"), 19 => Some("s3"),
+                    20 => Some("s4"), 21 => Some("s5"), 22 => Some("s6"), 23 => Some("s7"),
+                    24 => Some("s8"), 25 => Some("s9"), 26 => Some("s10"), 27 => Some("s11"),
+                    28 => Some("t3"), 29 => Some("t4"), 30 => Some("t5"), 31 => Some("t6"),
+                    _ => None,
+                };
+                if let Some(a) = abi {
+                    v.push((a.to_string(), n));
+                }
+                if n == 8 {
+                    v.push(("fp".to_string(), n));
+                }
+                v
+            })
+            .collect();
+        proptest::sample::select(pairs)
+    }
+
+    proptest! {
+        // Oracle: Reference — `encode_alu_imm` with an immediate operand builds
+        // an I-format OP-IMM word whose every field is exactly determined by
+        // its inputs:
+        //   bits[6:0]   = OP_OP_IMM (0x13)
+        //   bits[11:7]  = rd register number
+        //   bits[14:12] = funct3 argument
+        //   bits[19:15] = rs1 register number
+        //   bits[31:20] = low 12 bits of (imm cast to i32)
+        // The whole word must also equal the raw I-format encoder applied to
+        // the same arguments.
+        #[test]
+        fn alu_imm_encodes_all_fields(
+            (rd_name, rd_num) in reg_strategy(),
+            (rs1_name, rs1_num) in reg_strategy(),
+            funct3 in 0u32..8,
+            imm in any::<i64>(),
+        ) {
+            let ops = [Operand::Reg(rd_name), Operand::Reg(rs1_name), Operand::Imm(imm)];
+            let w = match encode_alu_imm(&ops, funct3).expect("valid operands must encode") {
+                EncodeResult::Word(w) => w,
+                other => panic!("expected Word, got {:?}", other),
+            };
+
+            prop_assert_eq!(w & 0x7F, OP_OP_IMM_BITS, "opcode bits[6:0]");
+            prop_assert_eq!((w >> 7) & 0x1F, rd_num, "rd bits[11:7]");
+            prop_assert_eq!((w >> 12) & 0x7, funct3, "funct3 bits[14:12]");
+            prop_assert_eq!((w >> 15) & 0x1F, rs1_num, "rs1 bits[19:15]");
+            // Cross-check against the raw I-format encoder used by the impl.
+            prop_assert_eq!(w, encode_i(OP_OP_IMM, rd_num, funct3, rs1_num, imm as i32));
+        }
+
+        // Oracle: Reference (truncation semantics) — the assembler casts the
+        // i64 immediate to i32 before encoding, and encode_i masks to the low
+        // 12 bits. The imm field must therefore equal
+        // `((imm as i32) as u32) & 0xFFF` for ANY i64 input, including values
+        // outside the i32 range (which silently truncate).
+        #[test]
+        fn alu_imm_imm_field_is_low_12_bits_of_i32_truncation(
+            (rd_name, _rd) in reg_strategy(),
+            (rs1_name, _rs1) in reg_strategy(),
+            funct3 in 0u32..8,
+            imm in any::<i64>(),
+        ) {
+            let ops = [Operand::Reg(rd_name), Operand::Reg(rs1_name), Operand::Imm(imm)];
+            let w = match encode_alu_imm(&ops, funct3).expect("must encode") {
+                EncodeResult::Word(w) => w,
+                other => panic!("expected Word, got {:?}", other),
+            };
+
+            let expected_imm_field = ((imm as i32) as u32) & 0xFFF;
+            prop_assert_eq!(
+                (w >> 20) & 0xFFF,
+                expected_imm_field,
+                "imm[31:20] == low 12 bits of i32-truncated immediate"
+            );
+        }
+
+        // Oracle: Reference — a symbol third operand must defer the value to
+        // link time: emit a WordWithReloc whose word is the I-format encoder
+        // with a ZERO immediate, whose reloc has a zero addend and the
+        // modifier-stripped symbol, and whose reloc type is the *load-style*
+        // (Lo12*) variant of whatever parse_reloc_modifier produced:
+        //   %hi        -> Hi20        -> Lo12I
+        //   %pcrel_hi  -> PcrelHi20   -> PcrelLo12I
+        //   %tprel_hi  -> TprelHi20   -> TprelLo12I
+        //   %lo / %pcrel_lo / %tprel_lo  -> already Lo12*, pass through unchanged
+        //   plain symbol               -> PcrelHi20 -> PcrelLo12I
+        #[test]
+        fn alu_imm_symbol_maps_reloc_and_zeros_imm(
+            (rd_name, rd_num) in reg_strategy(),
+            (rs1_name, rs1_num) in reg_strategy(),
+            funct3 in 0u32..8,
+            sym_body in "[%a-zA-Z_][%a-zA-Z0-9_]*",
+            case in prop::sample::select(vec![0u8, 1, 2, 3, 4, 5, 6]),
+        ) {
+            // (symbol_operand_string, expected reloc variant)
+            // 0=%hi 1=%pcrel_hi 2=%tprel_hi 3=%lo 4=%pcrel_lo 5=%tprel_lo 6=plain
+            let (sym_str, expected): (String, RelocType) = match case {
+                0 => (format!("%hi({})", sym_body), RelocType::Lo12I),
+                1 => (format!("%pcrel_hi({})", sym_body), RelocType::PcrelLo12I),
+                2 => (format!("%tprel_hi({})", sym_body), RelocType::TprelLo12I),
+                3 => (format!("%lo({})", sym_body), RelocType::Lo12I),
+                4 => (format!("%pcrel_lo({})", sym_body), RelocType::PcrelLo12I),
+                5 => (format!("%tprel_lo({})", sym_body), RelocType::TprelLo12I),
+                _ => (sym_body.clone(), RelocType::PcrelLo12I),
+            };
+
+            let ops = [
+                Operand::Reg(rd_name),
+                Operand::Reg(rs1_name),
+                Operand::Symbol(sym_str.clone()),
+            ];
+            let (word, reloc) = match encode_alu_imm(&ops, funct3).expect("symbol must encode") {
+                EncodeResult::WordWithReloc { word, reloc } => (word, reloc),
+                other => panic!("expected WordWithReloc, got {:?}", other),
+            };
+
+            // Word is the I-format encoder with a zeroed immediate.
+            prop_assert_eq!(word, encode_i(OP_OP_IMM, rd_num, funct3, rs1_num, 0), "imm field zeroed");
+            prop_assert_eq!((word >> 20) & 0xFFF, 0, "imm[31:20] must be zero");
+            prop_assert_eq!(word & 0x7F, OP_OP_IMM_BITS, "opcode");
+
+            // Reloc type matches the expected mapping.
+            let types_match = matches!((&reloc.reloc_type, &expected),
+                (RelocType::Lo12I, RelocType::Lo12I) |
+                (RelocType::PcrelLo12I, RelocType::PcrelLo12I) |
+                (RelocType::TprelLo12I, RelocType::TprelLo12I));
+            prop_assert!(types_match,
+                "reloc type {:?} != expected {:?} for symbol {}",
+                reloc.reloc_type, expected, sym_str);
+
+            // Addend is zero and symbol is the modifier-stripped body.
+            prop_assert_eq!(reloc.addend, 0, "addend must be zero");
+            prop_assert_eq!(reloc.symbol, sym_body, "symbol must be modifier-stripped");
+        }
+
+        // Oracle: Reference — the real RV64I ALU-immediate mnemonics
+        // (addi/slti/sltiu/xori/ori/andi) flow through encode_alu_imm with
+        // their canonical funct3 and decode back to opcode 0x13 with the
+        // correct funct3 and a zero rd/rs1 baseline.
+        #[test]
+        fn alu_imm_real_mnemonics_decode_to_canonical_fields(
+            rd_num in 0u32..32,
+            rs1_num in 0u32..32,
+            imm in any::<i64>(),
+        ) {
+            // (mnemonic, funct3)
+            for (mnem, f3) in [
+                ("addi",  0b000u32),
+                ("slti",  0b010u32),
+                ("sltiu", 0b011u32),
+                ("xori",  0b100u32),
+                ("ori",   0b110u32),
+                ("andi",  0b111u32),
+            ] {
+                let ops = vec![
+                    Operand::Reg(format!("x{}", rd_num)),
+                    Operand::Reg(format!("x{}", rs1_num)),
+                    Operand::Imm(imm),
+                ];
+                let w = match encode_alu_imm(&ops, f3).expect("must encode") {
+                    EncodeResult::Word(w) => w,
+                    other => panic!("expected Word for {}, got {:?}", mnem, other),
+                };
+                prop_assert_eq!(w & 0x7F, 0x13, "opcode for {}", mnem);
+                prop_assert_eq!((w >> 12) & 0x7, f3, "funct3 for {}", mnem);
+                prop_assert_eq!((w >> 7) & 0x1F, rd_num & 0x1F, "rd for {}", mnem);
+                prop_assert_eq!((w >> 15) & 0x1F, rs1_num & 0x1F, "rs1 for {}", mnem);
+                prop_assert_eq!((w >> 20) & 0xFFF, ((imm as i32) as u32) & 0xFFF, "imm for {}", mnem);
+            }
+        }
+
+        // Oracle: Negative/error contract — encode_alu_imm requires exactly
+        // (rd, rs1, imm|symbol). A missing or non-imm/non-symbol third
+        // operand must yield the specific "alu_imm: expected immediate"
+        // error; a missing/unparseable register must also be rejected.
+        #[test]
+        fn alu_imm_rejects_invalid_operands(
+            bad_third in prop::sample::select(vec![
+                Operand::Reg("a1".to_string()),
+                Operand::Label("foo".to_string()),
+                Operand::Mem { base: "sp".to_string(), offset: 0 },
+                Operand::MemSymbol { base: "sp".to_string(), symbol: "s".to_string(), modifier: "%lo".to_string() },
+                Operand::SymbolOffset("s".to_string(), 4),
+                Operand::FenceArg("iorw".to_string()),
+                Operand::Csr("cycle".to_string()),
+                Operand::RoundingMode("rne".to_string()),
+            ])
+        ) {
+            // Present but invalid third operand.
+            let ops = vec![Operand::Reg("a0".to_string()), Operand::Reg("a1".to_string()), bad_third.clone()];
+            let err = encode_alu_imm(&ops, 0b000).expect_err("bad 3rd operand must error");
+            prop_assert!(err.contains("alu_imm: expected immediate"), "got: {}", err);
+
+            // Missing third operand.
+            let ops = vec![Operand::Reg("a0".to_string()), Operand::Reg("a1".to_string())];
+            let err = encode_alu_imm(&ops, 0b000).expect_err("missing 3rd operand must error");
+            prop_assert!(err.contains("alu_imm: expected immediate"), "got: {}", err);
+
+            // Missing second operand (different message, still an error).
+            prop_assert!(encode_alu_imm(&[Operand::Reg("a0".to_string())], 0b000).is_err());
+
+            // Empty operands.
+            prop_assert!(encode_alu_imm(&[], 0b000).is_err());
+
+            // Invalid register name as first operand.
+            let ops = vec![Operand::Reg("x32".to_string()), Operand::Reg("a1".to_string()), Operand::Imm(1)];
+            let err = encode_alu_imm(&ops, 0b000).expect_err("invalid register must error");
+            prop_assert!(err.contains("invalid integer register"), "got: {}", err);
+        }
+    }
+}
