@@ -259,3 +259,151 @@ pub fn f128_const_halves(op: &Operand) -> Option<(u64, u64)> {
         None
     }
 }
+
+#[cfg(test)]
+mod classify_cast_properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        fn arb_ir_type()(idx in 0usize..14) -> IrType {
+            match idx {
+                0 => IrType::I8,
+                1 => IrType::I16,
+                2 => IrType::I32,
+                3 => IrType::I64,
+                4 => IrType::I128,
+                5 => IrType::U8,
+                6 => IrType::U16,
+                7 => IrType::U32,
+                8 => IrType::U64,
+                9 => IrType::U128,
+                10 => IrType::F32,
+                11 => IrType::F64,
+                12 => IrType::F128,
+                _ => IrType::Ptr,
+            }
+        }
+    }
+
+    prop_compose! {
+        fn arb_int_type()(idx in 0usize..10) -> IrType {
+            match idx {
+                0 => IrType::I8,
+                1 => IrType::I16,
+                2 => IrType::I32,
+                3 => IrType::I64,
+                4 => IrType::I128,
+                5 => IrType::U8,
+                6 => IrType::U16,
+                7 => IrType::U32,
+                8 => IrType::U64,
+                _ => IrType::U128,
+            }
+        }
+    }
+
+    prop_compose! {
+        fn arb_float_type()(idx in 0usize..2) -> IrType {
+            if idx == 0 { IrType::F32 } else { IrType::F64 }
+        }
+    }
+
+    prop_compose! {
+        fn arb_non_f128_type()(idx in 0usize..13) -> IrType {
+            match idx {
+                0 => IrType::I8,
+                1 => IrType::I16,
+                2 => IrType::I32,
+                3 => IrType::I64,
+                4 => IrType::I128,
+                5 => IrType::U8,
+                6 => IrType::U16,
+                7 => IrType::U32,
+                8 => IrType::U64,
+                9 => IrType::U128,
+                10 => IrType::F32,
+                11 => IrType::F64,
+                _ => IrType::Ptr,
+            }
+        }
+    }
+
+    fn expected_int_cast(from_ty: IrType, to_ty: IrType) -> CastKind {
+        match from_ty.size().cmp(&to_ty.size()) {
+            std::cmp::Ordering::Equal if from_ty.is_signed() && to_ty.is_unsigned() => {
+                CastKind::SignedToUnsignedSameSize { to_ty }
+            }
+            std::cmp::Ordering::Equal if from_ty.is_unsigned() && to_ty.is_signed() => {
+                CastKind::UnsignedToSignedSameSize { to_ty }
+            }
+            std::cmp::Ordering::Equal => CastKind::Noop,
+            std::cmp::Ordering::Less => CastKind::IntWiden { from_ty, to_ty },
+            std::cmp::Ordering::Greater => CastKind::IntNarrow { to_ty },
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn same_type_casts_are_always_noop(ty in arb_ir_type(), f128_is_native in any::<bool>()) {
+            prop_assert_eq!(classify_cast_with_f128(ty, ty, f128_is_native), CastKind::Noop);
+        }
+
+        #[test]
+        fn integer_cast_shape_depends_on_width_and_signedness(from_ty in arb_int_type(), to_ty in arb_int_type()) {
+            prop_assert_eq!(classify_cast(from_ty, to_ty), expected_int_cast(from_ty, to_ty));
+        }
+
+        #[test]
+        fn float_and_integer_casts_preserve_direction_and_signedness(float_ty in arb_float_type(), int_ty in arb_int_type()) {
+            let from_f64 = float_ty == IrType::F64;
+            let to_f64 = float_ty == IrType::F64;
+
+            if int_ty.is_unsigned() {
+                prop_assert_eq!(classify_cast(float_ty, int_ty), CastKind::FloatToUnsigned { from_f64, to_u64: int_ty == IrType::U64 });
+                prop_assert_eq!(classify_cast(int_ty, float_ty), CastKind::UnsignedToFloat { to_f64, from_ty: int_ty });
+            } else {
+                prop_assert_eq!(classify_cast(float_ty, int_ty), CastKind::FloatToSigned { from_f64 });
+                prop_assert_eq!(classify_cast(int_ty, float_ty), CastKind::SignedToFloat { to_f64, from_ty: int_ty });
+            }
+        }
+
+        #[test]
+        fn non_native_f128_reduces_to_f64_classification(other_ty in arb_non_f128_type()) {
+            let expected_from_f128 = if other_ty == IrType::F64 { CastKind::Noop } else { classify_cast(IrType::F64, other_ty) };
+            let expected_to_f128 = if other_ty == IrType::F64 { CastKind::Noop } else { classify_cast(other_ty, IrType::F64) };
+
+            prop_assert_eq!(classify_cast_with_f128(IrType::F128, other_ty, false), expected_from_f128);
+            prop_assert_eq!(classify_cast_with_f128(other_ty, IrType::F128, false), expected_to_f128);
+        }
+
+        #[test]
+        fn native_f128_uses_softfloat_families(other_ty in arb_non_f128_type()) {
+            let to_f128 = classify_cast_with_f128(other_ty, IrType::F128, true);
+            let from_f128 = classify_cast_with_f128(IrType::F128, other_ty, true);
+
+            match other_ty {
+                IrType::F32 => {
+                    prop_assert_eq!(to_f128, CastKind::FloatToF128 { from_f32: true });
+                    prop_assert_eq!(from_f128, CastKind::F128ToFloat { to_f32: true });
+                }
+                IrType::F64 => {
+                    prop_assert_eq!(to_f128, CastKind::FloatToF128 { from_f32: false });
+                    prop_assert_eq!(from_f128, CastKind::F128ToFloat { to_f32: false });
+                }
+                IrType::Ptr => {
+                    prop_assert_eq!(to_f128, CastKind::UnsignedToF128 { from_ty: other_ty });
+                    prop_assert_eq!(from_f128, CastKind::F128ToUnsigned { to_ty: other_ty });
+                }
+                ty if ty.is_unsigned() => {
+                    prop_assert_eq!(to_f128, CastKind::UnsignedToF128 { from_ty: ty });
+                    prop_assert_eq!(from_f128, CastKind::F128ToUnsigned { to_ty: ty });
+                }
+                ty => {
+                    prop_assert_eq!(to_f128, CastKind::SignedToF128 { from_ty: ty });
+                    prop_assert_eq!(from_f128, CastKind::F128ToSigned { to_ty: ty });
+                }
+            }
+        }
+    }
+}
