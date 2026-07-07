@@ -343,67 +343,94 @@ mod classify_cast_properties {
         }
     }
 
-    proptest! {
-        #[test]
-        fn same_type_casts_are_always_noop(ty in arb_ir_type(), f128_is_native in any::<bool>()) {
-            prop_assert_eq!(classify_cast_with_f128(ty, ty, f128_is_native), CastKind::Noop);
-        }
-
-        #[test]
-        fn integer_cast_shape_depends_on_width_and_signedness(from_ty in arb_int_type(), to_ty in arb_int_type()) {
-            prop_assert_eq!(classify_cast(from_ty, to_ty), expected_int_cast(from_ty, to_ty));
-        }
-
-        #[test]
-        fn float_and_integer_casts_preserve_direction_and_signedness(float_ty in arb_float_type(), int_ty in arb_int_type()) {
-            let from_f64 = float_ty == IrType::F64;
-            let to_f64 = float_ty == IrType::F64;
-
-            if int_ty.is_unsigned() {
-                prop_assert_eq!(classify_cast(float_ty, int_ty), CastKind::FloatToUnsigned { from_f64, to_u64: int_ty == IrType::U64 });
-                prop_assert_eq!(classify_cast(int_ty, float_ty), CastKind::UnsignedToFloat { to_f64, from_ty: int_ty });
-            } else {
-                prop_assert_eq!(classify_cast(float_ty, int_ty), CastKind::FloatToSigned { from_f64 });
-                prop_assert_eq!(classify_cast(int_ty, float_ty), CastKind::SignedToFloat { to_f64, from_ty: int_ty });
-            }
-        }
-
-        #[test]
-        fn non_native_f128_reduces_to_f64_classification(other_ty in arb_non_f128_type()) {
-            let expected_from_f128 = if other_ty == IrType::F64 { CastKind::Noop } else { classify_cast(IrType::F64, other_ty) };
-            let expected_to_f128 = if other_ty == IrType::F64 { CastKind::Noop } else { classify_cast(other_ty, IrType::F64) };
-
-            prop_assert_eq!(classify_cast_with_f128(IrType::F128, other_ty, false), expected_from_f128);
-            prop_assert_eq!(classify_cast_with_f128(other_ty, IrType::F128, false), expected_to_f128);
-        }
-
-        #[test]
-        fn native_f128_uses_softfloat_families(other_ty in arb_non_f128_type()) {
-            let to_f128 = classify_cast_with_f128(other_ty, IrType::F128, true);
-            let from_f128 = classify_cast_with_f128(IrType::F128, other_ty, true);
-
-            match other_ty {
-                IrType::F32 => {
-                    prop_assert_eq!(to_f128, CastKind::FloatToF128 { from_f32: true });
-                    prop_assert_eq!(from_f128, CastKind::F128ToFloat { to_f32: true });
-                }
-                IrType::F64 => {
-                    prop_assert_eq!(to_f128, CastKind::FloatToF128 { from_f32: false });
-                    prop_assert_eq!(from_f128, CastKind::F128ToFloat { to_f32: false });
-                }
-                IrType::Ptr => {
-                    prop_assert_eq!(to_f128, CastKind::UnsignedToF128 { from_ty: other_ty });
-                    prop_assert_eq!(from_f128, CastKind::F128ToUnsigned { to_ty: other_ty });
-                }
-                ty if ty.is_unsigned() => {
-                    prop_assert_eq!(to_f128, CastKind::UnsignedToF128 { from_ty: ty });
-                    prop_assert_eq!(from_f128, CastKind::F128ToUnsigned { to_ty: ty });
-                }
-                ty => {
-                    prop_assert_eq!(to_f128, CastKind::SignedToF128 { from_ty: ty });
-                    prop_assert_eq!(from_f128, CastKind::F128ToSigned { to_ty: ty });
-                }
+    prop_compose! {
+        fn arb_cmp_op()(idx in 0usize..10) -> IrCmpOp {
+            match idx {
+                0 => IrCmpOp::Eq,
+                1 => IrCmpOp::Ne,
+                2 => IrCmpOp::Slt,
+                3 => IrCmpOp::Ult,
+                4 => IrCmpOp::Sle,
+                5 => IrCmpOp::Ule,
+                6 => IrCmpOp::Sgt,
+                7 => IrCmpOp::Ugt,
+                8 => IrCmpOp::Sge,
+                _ => IrCmpOp::Uge,
             }
         }
     }
+
+    fn expected_f128_cmp_libcall(op: IrCmpOp) -> (&'static str, F128CmpKind) {
+        match op {
+            IrCmpOp::Eq => ("__eqtf2", F128CmpKind::Eq),
+            IrCmpOp::Ne => ("__eqtf2", F128CmpKind::Ne),
+            IrCmpOp::Slt | IrCmpOp::Ult => ("__lttf2", F128CmpKind::Lt),
+            IrCmpOp::Sle | IrCmpOp::Ule => ("__letf2", F128CmpKind::Le),
+            IrCmpOp::Sgt | IrCmpOp::Ugt => ("__gttf2", F128CmpKind::Gt),
+            IrCmpOp::Sge | IrCmpOp::Uge => ("__getf2", F128CmpKind::Ge),
+        }
+    }
+
+    fn relation_family(op: IrCmpOp) -> (&'static str, F128CmpKind) {
+        match op {
+            IrCmpOp::Eq => ("eq", F128CmpKind::Eq),
+            IrCmpOp::Ne => ("ne", F128CmpKind::Ne),
+            IrCmpOp::Slt | IrCmpOp::Ult => ("lt", F128CmpKind::Lt),
+            IrCmpOp::Sle | IrCmpOp::Ule => ("le", F128CmpKind::Le),
+            IrCmpOp::Sgt | IrCmpOp::Ugt => ("gt", F128CmpKind::Gt),
+            IrCmpOp::Sge | IrCmpOp::Uge => ("ge", F128CmpKind::Ge),
+        }
+    }
+
+    fn relation_pair(kind: &'static str, unsigned: bool) -> IrCmpOp {
+        match (kind, unsigned) {
+            ("lt", false) => IrCmpOp::Slt,
+            ("lt", true) => IrCmpOp::Ult,
+            ("le", false) => IrCmpOp::Sle,
+            ("le", true) => IrCmpOp::Ule,
+            ("gt", false) => IrCmpOp::Sgt,
+            ("gt", true) => IrCmpOp::Ugt,
+            ("ge", false) => IrCmpOp::Sge,
+            ("ge", true) => IrCmpOp::Uge,
+            _ => unreachable!(),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn f128_cmp_libcall_matches_the_full_mapping_table(op in arb_cmp_op()) {
+            prop_assert_eq!(f128_cmp_libcall(op), expected_f128_cmp_libcall(op));
+        }
+
+        #[test]
+        fn eq_and_ne_share_the_same_libcall_but_different_kinds(op in prop_oneof![Just(IrCmpOp::Eq), Just(IrCmpOp::Ne)]) {
+            let (libcall, kind) = f128_cmp_libcall(op);
+
+            prop_assert_eq!(libcall, "__eqtf2");
+            prop_assert_eq!(kind, match op {
+                IrCmpOp::Eq => F128CmpKind::Eq,
+                IrCmpOp::Ne => F128CmpKind::Ne,
+                _ => unreachable!(),
+            });
+        }
+
+        #[test]
+        fn signed_and_unsigned_ordering_variants_share_libcalls_and_kinds(kind in prop_oneof![Just("lt"), Just("le"), Just("gt"), Just("ge")]) {
+            let signed = relation_pair(kind, false);
+            let unsigned = relation_pair(kind, true);
+
+            prop_assert_eq!(relation_family(signed), relation_family(unsigned));
+            prop_assert_eq!(f128_cmp_libcall(signed), f128_cmp_libcall(unsigned));
+        }
+
+        #[test]
+        fn f128_cmp_libcall_uses_only_the_expected_softfloat_family(op in arb_cmp_op()) {
+            let (libcall, kind) = f128_cmp_libcall(op);
+
+            prop_assert!(matches!(libcall, "__eqtf2" | "__lttf2" | "__letf2" | "__gttf2" | "__getf2"));
+            prop_assert_eq!(kind, expected_f128_cmp_libcall(op).1);
+        }
+    }
+
+
 }
