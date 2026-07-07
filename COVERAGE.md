@@ -139,3 +139,16 @@ No bugs found. `encode_alu_imm` correctly emits I-format OP-IMM words for immedi
 
 Verification:
 - `cargo test --lib pbt_encode_alu_imm`
+
+Generated property-based tests for `encode_ubfx` in `src/backend/arm/assembler/encoder/bitfield.rs` (module `prop_encode_ubfx_tests`).
+
+Properties covered:
+- Field-placement oracle: fixed opcode bits `10[30:29]` / `100110[28:23]` and the position+value of every variable field (sf[31], N[22], immr[21:16]=lsb, imms[15:10]=lsb+width-1, Rn[9:5], Rd[4:0]) for architecturally-valid lsb/width.
+- `N == sf` invariant: bit 22 always equals bit 31 (both derive from the destination register width), even for out-of-range immediates.
+- Differential vs sibling `encode_ubfm`: `UBFX Rd,Rn,#lsb,#width` is bit-identical to `UBFM Rd,Rn,#lsb,#(lsb+width-1)` (holds under u32 wrapping).
+- Register-width differential: encoding with `x{N}` vs `w{N}` differs in exactly bits 31 (sf) and 22 (N).
+- Error/negative contract: empty operands, missing width, and non-register/non-immediate operands in fixed slots are all rejected with `Err`.
+
+Verification:
+- `cargo test --lib prop_encode_ubfx_tests`
+- Stress run: `PROPTEST_CASES=3000 cargo test --lib prop_encode_ubfx_tests` — 5 passed, 0 failed.
