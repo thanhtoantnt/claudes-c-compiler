@@ -1335,3 +1335,197 @@ mod prop_encode_csel_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_csinc_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ---- CSINC opcode constants (ARM ARM C4.1.66, "Conditional Select (increment)") ----
+    // CSINC = sf 0 0 11010100 Rm cond 0 1 Rn Rd
+    //   [31]    sf        — 1 = 64-bit (X), 0 = 32-bit (W); taken from Rd ONLY
+    //   [30:29] 00        — op=0, S=0
+    //   [28:21] 11010100  — fixed opcode for the conditional-select group
+    //   [20:16] Rm
+    //   [15:12] cond
+    //   [11:10] 01        — o2=0, o1=1 (selects CSINC within the group)
+    //   [9:5]   Rn
+    //   [4:0]   Rd
+    const OPCODE: u32 = 0b11010100u32 << 21; // == 0x1A80_0000, bits [28:21]
+    // Bits that must be ZERO for CSINC: [30, 29, 11] (bit 10 is the CSINC marker = 1).
+    const FIXED_ZERO: u32 = (1u32 << 30) | (1u32 << 29) | (1u32 << 11); // == 0x6000_0800
+    // o1 bit [10] must be ONE: this is what distinguishes CSINC from CSEL.
+    const O1_BIT: u32 = 1u32 << 10; // == 0x400
+
+    /// Canonical ARM condition-code table mirroring `encode_cond`.
+    const COND_TABLE: &[(&str, u32)] = &[
+        ("eq", 0), ("ne", 1), ("cs", 2), ("hs", 2), ("cc", 3), ("lo", 3),
+        ("mi", 4), ("pl", 5), ("vs", 6), ("vc", 7), ("hi", 8), ("ls", 9),
+        ("ge", 10), ("lt", 11), ("gt", 12), ("le", 13), ("al", 14), ("nv", 15),
+    ];
+
+    fn word_of(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word_of(encode_csinc(ops))
+    }
+
+    prop_compose! {
+        fn arb_gp_reg()(n in 0u32..=30u32, is_64 in any::<bool>()) -> (String, u32) {
+            let name = if is_64 { format!("x{}", n) } else { format!("w{}", n) };
+            (name, n)
+        }
+    }
+
+    proptest! {
+        // Property A — full structural / field-placement oracle.
+        // The encoded word is fully determined: opcode 11010100 in [28:21],
+        // bits [30,29,11] are zero, bit [10] is one (the CSINC marker), sf
+        // tracks Rd's width, and Rm/cond/Rn/Rd occupy exactly their spec
+        // fields. Reconstructing from the fields reproduces the whole word.
+        #[test]
+        fn prop_opcode_structure_and_fields(
+            (rd_name, rd_num) in arb_gp_reg(),
+            (rn_name, rn_num) in arb_gp_reg(),
+            (rm_name, rm_num) in arb_gp_reg(),
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let (cond_name, cond_val) = COND_TABLE[cond_idx];
+            let ops = vec![
+                Operand::Reg(rd_name.clone()),
+                Operand::Reg(rn_name),
+                Operand::Reg(rm_name),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            let word = enc(&ops);
+
+            // Fixed opcode bits [28:21].
+            prop_assert_eq!(word & OPCODE, OPCODE);
+            // Bits that must be zero for CSINC.
+            prop_assert_eq!(word & FIXED_ZERO, 0u32);
+            // o1 bit [10] must be one — the CSINC distinguishing bit.
+            prop_assert_eq!(word & O1_BIT, O1_BIT);
+            // sf bit [31] tracks Rd's width.
+            let expected_sf = if rd_name.starts_with('x') { 1u32 } else { 0u32 };
+            prop_assert_eq!((word >> 31) & 1, expected_sf);
+            // Rm [20:16], cond [15:12], Rn [9:5], Rd [4:0].
+            prop_assert_eq!((word >> 16) & 0x1F, rm_num);
+            prop_assert_eq!((word >> 12) & 0xF, cond_val);
+            prop_assert_eq!((word >> 5) & 0x1F, rn_num);
+            prop_assert_eq!(word & 0x1F, rd_num);
+            // Full reconstruction — the word is exactly the OR of its fields.
+            prop_assert_eq!(
+                word,
+                (expected_sf << 31) | OPCODE | O1_BIT | (rm_num << 16)
+                    | (cond_val << 12) | (rn_num << 5) | rd_num
+            );
+        }
+
+        // Property B — differential: CSINC and CSEL are the same instruction
+        // group and differ ONLY in bit 10 (o1=1 for CSINC, o1=0 for CSEL) when
+        // given identical operands. This is the defining differentiator.
+        #[test]
+        fn prop_csinc_xor_csel_is_bit10(
+            (rd_name, _) in arb_gp_reg(),
+            (rn_name, _) in arb_gp_reg(),
+            (rm_name, _) in arb_gp_reg(),
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let (cond_name, _) = COND_TABLE[cond_idx];
+            let ops = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name),
+                Operand::Reg(rm_name),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            let csinc = enc(&ops);
+            let csel = word_of(encode_csel(&ops));
+            prop_assert_eq!(csinc ^ csel, O1_BIT);
+        }
+
+        // Property C — differential: 64- vs 32-bit Rd differ ONLY in bit 31.
+        // sf is derived solely from Rd (operand 0), so flipping x<->w on Rd
+        // changes exactly one bit and leaves every other field untouched.
+        #[test]
+        fn prop_sf_bit_is_bit31(
+            n in 0u32..=30u32,
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let cond_name = COND_TABLE[cond_idx].0;
+            let mk = |rd: String| vec![
+                Operand::Reg(rd),
+                Operand::Reg("x1".into()),
+                Operand::Reg("x2".into()),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            let w64 = enc(&mk(format!("x{}", n)));
+            let w32 = enc(&mk(format!("w{}", n)));
+            prop_assert_eq!(w64 ^ w32, 1u32 << 31);
+        }
+
+        // Property D — condition-code mapping round-trips for every name in
+        // the canonical table, and the cs/hs & cc/lo aliases encode bit-identically.
+        #[test]
+        fn prop_cond_round_trips_and_aliases(i in 0usize..COND_TABLE.len()) {
+            let (name_i, val_i) = COND_TABLE[i];
+            let ops = vec![
+                Operand::Reg("x0".into()),
+                Operand::Reg("x1".into()),
+                Operand::Reg("x2".into()),
+                Operand::Cond(name_i.to_string()),
+            ];
+            prop_assert_eq!((enc(&ops) >> 12) & 0xF, val_i);
+
+            let base = |c: &str| enc(&[
+                Operand::Reg("x0".into()),
+                Operand::Reg("x1".into()),
+                Operand::Reg("x2".into()),
+                Operand::Cond(c.to_string()),
+            ]);
+            prop_assert_eq!(base("cs"), base("hs"));
+            prop_assert_eq!(base("cc"), base("lo"));
+        }
+
+        // Property E — negative contract. CSINC needs exactly four operands:
+        // three registers followed by a condition. Operand lists that are too
+        // short, that lack a trailing condition, that place a non-register in
+        // the Rd/Rn/Rm slots — OR that use FP/SIMD register names, which CSINC
+        // is NOT defined on (ARM ARM C4.1.66: GP registers only) — must make
+        // encode_csinc return Err rather than silently re-encode them.
+        #[test]
+        fn prop_rejects_invalid_operands(case in 0usize..16usize) {
+            let r = Operand::Reg("x0".into());
+            let c = Operand::Cond("eq".into());
+            let result = match case {
+                0  => encode_csinc(&[]),                                            // no operands
+                1  => encode_csinc(&[r.clone()]),                                   // only Rd
+                2  => encode_csinc(&[r.clone(), r.clone()]),                        // Rd, Rn
+                3  => encode_csinc(&[r.clone(), r.clone(), r.clone()]),             // no condition
+                4  => encode_csinc(&[r.clone(), r.clone(), r.clone(), r.clone()]), // 4th not a Cond
+                5  => encode_csinc(&[Operand::Imm(0), r.clone(), r.clone(), c.clone()]),          // Rd not a reg
+                6  => encode_csinc(&[r.clone(), Operand::Imm(1), r.clone(), c.clone()]),          // Rn not a reg
+                7  => encode_csinc(&[r.clone(), r.clone(), Operand::Symbol("s".into()), c.clone()]), // Rm not a reg
+                8  => encode_csinc(&[r.clone(), r.clone(), r.clone(), Operand::Imm(4)]),          // cond is Imm
+                9  => encode_csinc(&[r.clone(), r.clone(), r.clone(), Operand::Symbol("notcond".into())]), // cond is Symbol
+                // CSINC is defined ONLY on GP (X/W) registers (ARM ARM C4.1.66).
+                // FP/SIMD register names must be rejected, not silently re-encoded
+                // with their numeric index as if they were GP registers.
+                10 => encode_csinc(&[Operand::Reg("d0".into()), r.clone(), r.clone(), c.clone()]), // Rd is FP
+                11 => encode_csinc(&[r.clone(), Operand::Reg("s1".into()), r.clone(), c.clone()]), // Rn is FP
+                12 => encode_csinc(&[r.clone(), r.clone(), Operand::Reg("v2".into()), c.clone()]), // Rm is SIMD
+                13 => encode_csinc(&[Operand::Reg("q3".into()), r.clone(), r.clone(), c.clone()]),
+                14 => encode_csinc(&[Operand::Reg("h4".into()), r.clone(), r.clone(), c.clone()]),
+                _  => encode_csinc(&[r.clone(), r.clone(), r.clone(), Operand::Extend { kind: "sxtw".into(), amount: 0 }]),
+            };
+            prop_assert!(
+                result.is_err(),
+                "encode_csinc should reject case {} (got {:?})", case, result
+            );
+        }
+    }
+}
