@@ -2721,4 +2721,93 @@ mod tests {
             prop_assert!(encode_bic(&ops).is_err());
         }
     }
+
+    // ── encode_bics: BICS (bitwise clear, setting flags), shifted-register form ──
+    // Oracle: reference (ARMv8 ARM §C4.1.64) + differential vs encode_bic.
+    // BICS is ANDS with an inverted second operand, encoding as
+    //   sf 11 01010 shift 1 Rm imm6 Rn Rd   (opc=11, N=1).
+    // It differs from BIC (opc=00) ONLY in bits 30:29.
+    proptest! {
+        // 1. Fixed-field + register/shift placement for the register form, with
+        //    and without an explicit shift. opc=11, op5=01010, N=1; the default
+        //    (no shift operand) is LSL #0.
+        #[test]
+        fn bics_field_placement(
+            rd in 0u32..=31, rn in 0u32..=31, rm in 0u32..=31,
+            shifted in any::<bool>(), sk in 0u32..=3u32, amount in 0u32..=63u32,
+        ) {
+            let (kind, want_st) = match sk {
+                0 => ("lsl", 0u32), 1 => ("lsr", 1u32),
+                2 => ("asr", 2u32), _ => ("ror", 3u32),
+            };
+            let ops = if shifted {
+                vec![xreg(rd), xreg(rn), xreg(rm),
+                     Operand::Shift { kind: kind.into(), amount }]
+            } else {
+                vec![xreg(rd), xreg(rn), xreg(rm)]
+            };
+            let w = expect_word(encode_bics(&ops));
+            prop_assert_eq!(sf_of(w), 1);                              // 64-bit
+            prop_assert_eq!((op_of(w) << 1) | s_of(w), 0b11u32);       // opc = ANDS family
+            prop_assert_eq!(opcode5_of(w), 0b01010);                   // logical shifted reg
+            prop_assert_eq!(n21_of(w), 1);                             // "NOT" variant
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(shift_type_of(w), if shifted { want_st } else { 0 });
+            prop_assert_eq!(shift_amt_of(w), if shifted { amount } else { 0 });
+        }
+
+        // 2. sf (bit 31) tracks operand width: W registers -> 0, X -> 1.
+        #[test]
+        fn bics_sf_tracks_width(n in 0u32..=31, is_w in any::<bool>()) {
+            let r = if is_w { format!("w{}", n) } else { format!("x{}", n) };
+            let ops = vec![Operand::Reg(r.clone()), Operand::Reg(r.clone()), Operand::Reg(r)];
+            let w = expect_word(encode_bics(&ops));
+            prop_assert_eq!(sf_of(w), if is_w { 0 } else { 1 });
+        }
+
+        // 3. Differential: BICS and BIC (register form) differ ONLY in the opc
+        //    field (bits 30:29): BIC=00, BICS=11. Every other field is identical.
+        #[test]
+        fn bics_differs_from_bic_only_in_opc(
+            rd in 0u32..=31, rn in 0u32..=31, rm in 0u32..=31, is_w in any::<bool>(),
+            shifted in any::<bool>(), sk in 0u32..=3u32, amount in 0u32..=63u32,
+        ) {
+            let mk = |n: u32| if is_w { format!("w{}", n) } else { format!("x{}", n) };
+            let ops = if shifted {
+                let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+                vec![Operand::Reg(mk(rd)), Operand::Reg(mk(rn)), Operand::Reg(mk(rm)),
+                     Operand::Shift { kind: kind.into(), amount }]
+            } else {
+                vec![Operand::Reg(mk(rd)), Operand::Reg(mk(rn)), Operand::Reg(mk(rm))]
+            };
+            let bic = expect_word(encode_bic(&ops));
+            let bics = expect_word(encode_bics(&ops));
+            prop_assert_eq!(bics ^ bic, 0b11u32 << 29);
+        }
+
+        // 4. NEGATIVE CONTRACT: fewer than 3 operands must be rejected.
+        #[test]
+        fn bics_rejects_too_few_operands(n in 0u32..=2u32) {
+            let ops: Vec<Operand> = (0..n).map(xreg).collect();
+            prop_assert!(encode_bics(&ops).is_err());
+        }
+
+        // 5. NEGATIVE CONTRACT: for sf=0 (W register) the imm6 shift must be
+        //    0..=31 (ARMv8 ARM §C4.1.64); 32..=63 is UNPREDICTABLE and MUST be
+        //    rejected. The encoder currently masks with `& 0x3F` and accepts it.
+        #[test]
+        fn bics_w_register_rejects_shift_above_31(
+            rd in 0u32..=31, rn in 0u32..=31, rm in 0u32..=31,
+            amount in 32u32..=63u32, sk in 0u32..=3u32,
+        ) {
+            let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+            let ops = vec![Operand::Reg(format!("w{}", rd)),
+                           Operand::Reg(format!("w{}", rn)),
+                           Operand::Reg(format!("w{}", rm)),
+                           Operand::Shift { kind: kind.into(), amount }];
+            prop_assert!(encode_bics(&ops).is_err());
+        }
+    }
 }
