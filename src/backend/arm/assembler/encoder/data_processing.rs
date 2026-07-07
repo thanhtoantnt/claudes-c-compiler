@@ -1085,6 +1085,10 @@ mod tests {
     fn rm_of(w: u32) -> u32        { (w >> 16) & 0x1F }
     fn rn_of(w: u32) -> u32        { (w >> 5) & 0x1F }
     fn rd_of(w: u32) -> u32        { w & 0x1F }
+    // Extended-register form fields (share the imm6 region: option = bits 15:13, imm3 = bits 12:10)
+    fn ext21_of(w: u32) -> u32     { (w >> 21) & 1 }    // 1 => extended register, 0 => shifted register
+    fn option_of(w: u32) -> u32    { (w >> 13) & 0x7 }
+    fn imm3_of(w: u32) -> u32      { (w >> 10) & 0x7 }
 
     fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
 
@@ -1200,6 +1204,149 @@ mod tests {
             let ops = vec![rd, rn, Operand::Imm(0)];
             let w = expect_word(encode_add_sub(&ops, false, false));
             prop_assert_eq!(sf_of(w), if is_w { 0 } else { 1 });
+        }
+    }
+
+    // ── encode_add_sub: shifted / extended / SP / relocation / width contracts ──
+    proptest! {
+        // 7. Shifted-register form: ADD Xd, Xn, Xm, <shift> #amount. The
+        //    shift-type field (bits 23:22), imm6 shift amount (bits 15:10),
+        //    S bit (set_flags), and all register fields land per the ARMv8 spec.
+        #[test]
+        fn add_shifted_register_fields(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            sk in 0u32..=2u32,          // 0=lsl, 1=lsr, 2=asr
+            amount in 0u32..=63u32,     // X-register imm6 range
+            set_flags in any::<bool>(),
+        ) {
+            let (kind, want_st) = match sk {
+                0 => ("lsl", 0u32),
+                1 => ("lsr", 1u32),
+                _ => ("asr", 2u32),
+            };
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm),
+                           Operand::Shift { kind: kind.into(), amount }];
+            let w = expect_word(encode_add_sub(&ops, false, set_flags));
+            prop_assert_eq!(opcode5_of(w), 0b01011); // add/sub shifted register
+            prop_assert_eq!(shift_type_of(w), want_st);
+            prop_assert_eq!(shift_amt_of(w), amount);
+            prop_assert_eq!(s_of(w), if set_flags { 1 } else { 0 });
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(sf_of(w), 1);
+        }
+
+        // 8. Extended-register form: ADD Xd, Xn, Wm, <extend>. The option
+        //    field (bits 15:13) selects the extend kind, bit 21 is the
+        //    extended-register indicator, and imm3 is 0 with no extra shift.
+        #[test]
+        fn add_extended_register_option_field(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            ek in 0u32..=7u32,
+            set_flags in any::<bool>(),
+        ) {
+            let (kind, want_opt) = match ek {
+                0 => ("uxtb", 0b000u32),
+                1 => ("uxth", 0b001),
+                2 => ("uxtw", 0b010),
+                3 => ("uxtx", 0b011),
+                4 => ("sxtb", 0b100),
+                5 => ("sxth", 0b101),
+                6 => ("sxtw", 0b110),
+                _ => ("sxtx", 0b111),
+            };
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm),
+                           Operand::Extend { kind: kind.into(), amount: 0 }];
+            let w = expect_word(encode_add_sub(&ops, false, set_flags));
+            prop_assert_eq!(opcode5_of(w), 0b01011);
+            prop_assert_eq!(ext21_of(w), 1);              // extended, not shifted
+            prop_assert_eq!(option_of(w), want_opt);
+            prop_assert_eq!(imm3_of(w), 0);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(s_of(w), if set_flags { 1 } else { 0 });
+        }
+
+        // 9. SP in rd or rn forces the extended-register form (option=UXTX,
+        //    imm3=0) so register 31 reads as SP rather than XZR.
+        #[test]
+        fn sp_operand_uses_extended_register_form(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+            sp_in_rd in any::<bool>(),
+        ) {
+            let (rd_op, rn_op) = if sp_in_rd {
+                (Operand::Reg("sp".into()), xreg(rd))
+            } else {
+                (xreg(rd), Operand::Reg("sp".into()))
+            };
+            let ops = vec![rd_op, rn_op, xreg(rm)];
+            let w = expect_word(encode_add_sub(&ops, false, false));
+            prop_assert_eq!(opcode5_of(w), 0b01011);
+            prop_assert_eq!(ext21_of(w), 1);          // extended register
+            prop_assert_eq!(option_of(w), 0b011);     // UXTX (64-bit SP)
+            prop_assert_eq!(imm3_of(w), 0);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(sf_of(w), 1);
+        }
+
+        // 10. Relocation modifiers (:lo12:, :tprel_lo12_nc:, :tprel_hi12:)
+        //     emit WordWithReloc with the correct reloc type/symbol, leave
+        //     imm12 zero for the linker, and (for tprel_hi12) set the sh bit.
+        #[test]
+        fn reloc_modifier_emits_correct_reloc(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            sym_id in 0u32..=1000u32,
+            mk in 0u32..=2u32,
+        ) {
+            let (kind, want_reloc, want_sh) = match mk {
+                0 => ("lo12", "AddAbsLo12", 0u32),
+                1 => ("tprel_lo12_nc", "TlsLeAddTprelLo12", 0u32),
+                _ => ("tprel_hi12", "TlsLeAddTprelHi12", 1u32),
+            };
+            let sym = format!("sym{}", sym_id);
+            let ops = vec![xreg(rd), xreg(rn),
+                           Operand::Modifier { kind: kind.into(), symbol: sym.clone() }];
+            let (word, reloc) = match encode_add_sub(&ops, false, false) {
+                Ok(EncodeResult::WordWithReloc { word, reloc }) => (word, reloc),
+                Ok(other) => return Err(proptest::test_runner::TestCaseError::fail(
+                    format!("expected WordWithReloc, got {:?}", other))),
+                Err(e) => return Err(proptest::test_runner::TestCaseError::fail(
+                    format!("encode_add_sub failed: {}", e))),
+            };
+            prop_assert_eq!(format!("{:?}", reloc.reloc_type), want_reloc);
+            prop_assert_eq!(reloc.symbol, sym);
+            prop_assert_eq!(reloc.addend, 0);
+            prop_assert_eq!(imm12_of(word), 0);     // linker fills imm12
+            prop_assert_eq!(sh_of(word), want_sh);  // tprel_hi12 sets sh
+            prop_assert_eq!(rn_of(word), rn);
+            prop_assert_eq!(rd_of(word), rd);
+        }
+
+        // 11. NEGATIVE CONTRACT: for 32-bit (W) shifted-register form, imm6 must
+        //     be 0..=31; a shift of 32..63 is UNDEFINED (ARMv8 ARM) and MUST be
+        //     rejected, not silently masked into the imm6 field.
+        #[test]
+        fn w_reg_shifted_form_rejects_shift_above_31(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            amount in 32u32..=63u32,
+            sk in 0u32..=2u32,
+        ) {
+            let kind = match sk { 0 => "lsl", 1 => "lsr", _ => "asr" };
+            let ops = vec![Operand::Reg(format!("w{}", rd)),
+                           Operand::Reg(format!("w{}", rn)),
+                           Operand::Reg(format!("w{}", rm)),
+                           Operand::Shift { kind: kind.into(), amount }];
+            prop_assert!(encode_add_sub(&ops, false, false).is_err());
         }
     }
 
