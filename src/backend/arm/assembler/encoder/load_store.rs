@@ -1391,3 +1391,288 @@ mod prop_encode_ldur_stur_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_ldp_stp_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: reference-encoding / field-placement (ARMv8-A Architecture
+    // Reference Manual, §C4.1.48 “LDP/STP (pair)”).
+    //
+    // Encoding:
+    //   opc[31:30] 101[29:27] V[26] idx[25:23] L[22] imm7[21:15] Rt2[14:10] Rn[9:5] Rt[4:0]
+    // where idx = 010 (signed offset), 011 (pre-index), 001 (post-index).
+    //
+    // imm7 is a SIGNED 7-bit field: range [-64, 63]. The actual address offset
+    // must be a multiple of the access size (scale = 1<<shift) and within
+    //   [-64 * scale, 63 * scale].
+    //
+    // Hand-derived golden encodings (independently derived from the ARM ARM
+    // field layout, NOT from this crate's formula):
+    //
+    //   stp x0, x1, [x2]       = 0xA9000440   (opc=10, idx=010, L=0, imm7=0, Rt2=1, Rn=2)
+    //   ldp x0, x1, [x2]       = 0xA9400440   (L=1)
+    //   stp w0, w1, [x2]       = 0x29000440   (opc=00, 32-bit)
+    //   stp x0, x1, [x2, #16]  = 0xA9010440   (imm7=2, signed offset)
+    //   stp x0, x1, [x2, #16]! = 0xA9810440   (idx=011, pre-index)
+    //   stp x0, x1, [x2], #16  = 0xA8810440   (idx=001, post-index)
+    //   stp d0, d1, [x2]       = 0x6D000440   (opc=01, V=1)
+    //   stp s0, s1, [x2]       = 0x2D000440   (opc=00, V=1)
+    //   stp q0, q1, [x2]       = 0xAD000440   (opc=10, V=1)
+
+    const GOLDEN_STP_X0_X1_X2_0: u32 = 0xA9000440;
+    const GOLDEN_LDP_X0_X1_X2_0: u32 = 0xA9400440;
+    const GOLDEN_STP_W0_W1_X2_0: u32 = 0x29000440;
+    const GOLDEN_STP_X0_X1_X2_16: u32 = 0xA9010440;
+    const GOLDEN_STP_PRE_16: u32 = 0xA9810440;
+    const GOLDEN_STP_POST_16: u32 = 0xA8810440;
+    const GOLDEN_STP_D0_D1_X2_0: u32 = 0x6D000440;
+    const GOLDEN_STP_S0_S1_X2_0: u32 = 0x2D000440;
+    const GOLDEN_STP_Q0_Q1_X2_0: u32 = 0xAD000440;
+
+    fn gp_reg(prefix: char, num: u32) -> Operand {
+        Operand::Reg(format!("{}{}", prefix, num))
+    }
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    prop_compose! {
+        fn arb_reg_num()(n in 0u32..=30u32) -> u32 { n }
+    }
+
+    // Register-class prefix for LDP/STP operands: GP (x,w) and FP/SIMD (d,s,q).
+    prop_compose! {
+        fn arb_prefix()(idx in 0usize..5usize) -> char {
+            ['x', 'w', 'd', 's', 'q'][idx]
+        }
+    }
+
+    // Scale (1<<shift) per register class: x/zr -> 8, w -> 4, s -> 4, d -> 8, q -> 16.
+    fn scale_of(prefix: char) -> i64 {
+        match prefix {
+            'x' | 'd' => 8,
+            'w' | 's' => 4,
+            'q' => 16,
+            _ => 8,
+        }
+    }
+
+    proptest! {
+        // Property 1 — full-word field layout vs golden (signed offset form).
+        // For `stp xRt1, xRt2, [xRn]` the word must equal the golden
+        // `stp x0, x1, [x2]` offset additively by Rt[4:0], Rt2[14:10], Rn[9:5].
+        #[test]
+        fn prop_signed_offset_layout(
+            rt1 in arb_reg_num(),
+            rt2 in arb_reg_num(),
+            rn in arb_reg_num(),
+        ) {
+            let ops = vec![
+                gp_reg('x', rt1),
+                gp_reg('x', rt2),
+                Operand::Mem { base: format!("x{}", rn), offset: 0 },
+            ];
+            let w = word(encode_ldp_stp(&ops, false));
+            let expected = (GOLDEN_STP_X0_X1_X2_0 as i64
+                + (rt1 as i64)
+                + (((rt2 as i64) - 1) << 10)
+                + (((rn as i64) - 2) << 5)) as u32;
+            prop_assert_eq!(w, expected);
+        }
+
+        // Property 2 — differential: load vs store differ ONLY in L bit 22.
+        // stp opc=10/L=0 vs ldp opc=10/L=1, so load ^ store == 0x0040_0000.
+        #[test]
+        fn prop_load_xor_store_is_l_bit22(
+            rt1 in arb_reg_num(),
+            rt2 in arb_reg_num(),
+            rn in arb_reg_num(),
+            off_units in -64i64..=63i64,
+        ) {
+            let offset = off_units * 8; // 64-bit GP scale
+            let ops = vec![
+                gp_reg('x', rt1),
+                gp_reg('x', rt2),
+                Operand::Mem { base: format!("x{}", rn), offset },
+            ];
+            let load = word(encode_ldp_stp(&ops, true));
+            let store = word(encode_ldp_stp(&ops, false));
+            prop_assert_eq!(load ^ store, GOLDEN_LDP_X0_X1_X2_0 ^ GOLDEN_STP_X0_X1_X2_0);
+            prop_assert_eq!(load ^ store, 0x0040_0000u32);
+        }
+
+        // Property 3 — opc[31:30] and V[26] track register class.
+        //   xN -> opc=10, V=0 ; wN -> opc=00, V=0 ; dN -> opc=01, V=1 ; qN -> opc=10, V=1.
+        #[test]
+        fn prop_opc_and_v_track_reg_class(prefix in arb_prefix()) {
+            // Use the exact golden operands (rt1=0, rt2=1, base=x2) so the
+            // full-word cross-check is a direct equality.
+            let ops = vec![
+                gp_reg(prefix, 0),
+                gp_reg(prefix, 1),
+                Operand::Mem { base: "x2".to_string(), offset: 0 },
+            ];
+            let w = word(encode_ldp_stp(&ops, false));
+            let (exp_opc, exp_v) = match prefix {
+                'x' => (0b10u32, 0u32),
+                'w' => (0b00u32, 0u32),
+                'd' => (0b01u32, 1u32),
+                's' => (0b00u32, 1u32),
+                'q' => (0b10u32, 1u32),
+                _ => unreachable!(),
+            };
+            prop_assert_eq!((w >> 30) & 0b11, exp_opc);
+            prop_assert_eq!((w >> 26) & 1, exp_v);
+            // Cross-check against the hand-derived goldens for each class.
+            let golden = match prefix {
+                'x' => GOLDEN_STP_X0_X1_X2_0,
+                'w' => GOLDEN_STP_W0_W1_X2_0,
+                'd' => GOLDEN_STP_D0_D1_X2_0,
+                's' => GOLDEN_STP_S0_S1_X2_0,
+                'q' => GOLDEN_STP_Q0_Q1_X2_0,
+                _ => unreachable!(),
+            };
+            prop_assert_eq!(w, golden);
+        }
+
+        // Property 4 — index form occupies bits [25:23]: pre=011, signed=010, post=001.
+        #[test]
+        fn prop_index_form_bits(prefix in arb_prefix(), off_units in -64i64..=63i64) {
+            let scale = scale_of(prefix);
+            let offset = off_units * scale;
+            let signed_ops = vec![gp_reg(prefix, 0), gp_reg(prefix, 1),
+                Operand::Mem { base: "x2".to_string(), offset }];
+            let pre_ops = vec![gp_reg(prefix, 0), gp_reg(prefix, 1),
+                Operand::MemPreIndex { base: "x2".to_string(), offset }];
+            let post_ops = vec![gp_reg(prefix, 0), gp_reg(prefix, 1),
+                Operand::MemPostIndex { base: "x2".to_string(), offset }];
+            let signed = word(encode_ldp_stp(&signed_ops, false));
+            let pre = word(encode_ldp_stp(&pre_ops, false));
+            let post = word(encode_ldp_stp(&post_ops, false));
+            prop_assert_eq!((signed >> 23) & 0b111, 0b010u32);
+            prop_assert_eq!((pre >> 23) & 0b111, 0b011u32);
+            prop_assert_eq!((post >> 23) & 0b111, 0b001u32);
+            // Only bits [25:23] should differ between the three forms.
+            prop_assert_eq!(pre ^ signed, 0b001u32 << 23);
+            prop_assert_eq!(post ^ signed, 0b011u32 << 23);
+        }
+
+        // Property 5 — imm7 sign-extends back to the scaled offset within the
+        // valid 7-bit signed range. Field [21:15], 7-bit two's-complement.
+        #[test]
+        fn prop_imm7_sign_extended_equals_scaled_offset(
+            off_units in -64i64..=63i64,
+            prefix in arb_prefix(),
+        ) {
+            let scale = scale_of(prefix);
+            let offset = off_units * scale;
+            let ops = vec![
+                gp_reg(prefix, 0),
+                gp_reg(prefix, 1),
+                Operand::Mem { base: "x2".to_string(), offset },
+            ];
+            let w = word(encode_ldp_stp(&ops, false));
+            let field = ((w >> 15) & 0x7F) as i32;
+            let sx = if field & 0x40 != 0 { field | (!0x7F) } else { field };
+            prop_assert_eq!(sx, off_units as i32);
+        }
+
+        // Property 6 — error contract: fewer than 3 operands is rejected.
+        #[test]
+        fn prop_too_few_operands_errors(n in 0usize..3) {
+            let ops: Vec<Operand> = (0..n)
+                .map(|i| gp_reg('x', i as u32))
+                .collect();
+            let r = encode_ldp_stp(&ops, true);
+            prop_assert!(r.is_err(), "expected error, got {:?}", r);
+        }
+
+        // Property 7 — NEGATIVE CONTRACT (expected to FAIL: silent wrapping).
+        // imm7 is a SIGNED 7-bit field. For a 64-bit GP register the scaled
+        // offset must lie in [-512, 504] (i.e. off_units in [-64, 63]). An
+        // offset strictly outside this range is not representable and the
+        // assembler MUST reject it. Instead the implementation does
+        //   imm7 = ((*offset >> shift) as i32) & 0x7F
+        // silently wrapping, e.g. #512 -> imm7=0x40 -> -64 -> encodes #-512,
+        // and #-520 -> imm7=0x3F -> +63 -> encodes #+504.
+        #[test]
+        fn prop_out_of_range_offset_is_rejected(
+            excess in 1u32..2000u32,
+            negative in any::<bool>(),
+        ) {
+            let offset = if negative {
+                -512i64 - excess as i64
+            } else {
+                504i64 + excess as i64
+            };
+            let ops = vec![
+                gp_reg('x', 0),
+                gp_reg('x', 1),
+                Operand::Mem { base: "x2".to_string(), offset },
+            ];
+            let r = encode_ldp_stp(&ops, true);
+            prop_assert!(
+                r.is_err(),
+                "offset {} is outside the LDP/STP imm7 range [-512, 504] \
+                 (64-bit GP, step 8) and must be rejected, but the encoder \
+                 returned {:?}",
+                offset, r
+            );
+        }
+
+        // Property 8 — NEGATIVE CONTRACT (expected to FAIL: silent rounding).
+        // The LDP/STP immediate MUST be a multiple of the access size
+        // (scale = 1<<shift). An unaligned offset (e.g. #1 for 64-bit regs)
+        // is not representable and must be rejected. Instead the right-shift
+        // `offset >> shift` silently floors it (e.g. #1 -> imm7=0 -> #0).
+        #[test]
+        fn prop_unaligned_offset_is_rejected(prefix in arb_prefix()) {
+            let scale = scale_of(prefix);
+            // A small positive offset that is NOT a multiple of the scale.
+            let offset = scale + 1;
+            let ops = vec![
+                gp_reg(prefix, 0),
+                gp_reg(prefix, 1),
+                Operand::Mem { base: "x2".to_string(), offset },
+            ];
+            let r = encode_ldp_stp(&ops, true);
+            prop_assert!(
+                r.is_err(),
+                "offset {} is not a multiple of the LDP/STP access size {} \
+                 and must be rejected, but the encoder returned {:?}",
+                offset, scale, r
+            );
+        }
+    }
+
+    // Golden cross-check (no inputs): pre/post/signed index forms with
+    // offset #16 must match the hand-derived ARMv8 goldens exactly.
+    #[test]
+    fn golden_pre_post_index_forms() {
+        let pre_ops = vec![
+            gp_reg('x', 0),
+            gp_reg('x', 1),
+            Operand::MemPreIndex { base: "x2".to_string(), offset: 16 },
+        ];
+        assert_eq!(word(encode_ldp_stp(&pre_ops, false)), GOLDEN_STP_PRE_16);
+        let post_ops = vec![
+            gp_reg('x', 0),
+            gp_reg('x', 1),
+            Operand::MemPostIndex { base: "x2".to_string(), offset: 16 },
+        ];
+        assert_eq!(word(encode_ldp_stp(&post_ops, false)), GOLDEN_STP_POST_16);
+        let signed_ops = vec![
+            gp_reg('x', 0),
+            gp_reg('x', 1),
+            Operand::Mem { base: "x2".to_string(), offset: 16 },
+        ];
+        assert_eq!(word(encode_ldp_stp(&signed_ops, false)), GOLDEN_STP_X0_X1_X2_16);
+    }
+}
