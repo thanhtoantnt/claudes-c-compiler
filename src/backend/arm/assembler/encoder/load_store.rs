@@ -1092,3 +1092,149 @@ mod prop_ldr_str_auto_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_ldr_str_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: reference-encoding / field-placement (ARMv8-A Architecture
+    // Reference Manual, §C4.1.64 “LDR/STR (immediate, unsigned offset)” and
+    // §C4.1.66 “LDR/STR (immediate, pre/post-index)”).
+    //
+    // We anchor field positions to *hand-derived* golden encodings (not this
+    // crate's own formula), so each property is an independent check that the
+    // function places fields where the ARM ARM mandates.
+    //
+    //   ldr x0,[x1]      = 0xF9400020  (unsigned offset; opc=01; [25:24]=01)
+    //   str x0,[x1]      = 0xF9000020  (unsigned offset; opc=00; [25:24]=01)
+    //   ldr x0,[x1,#8]!  = 0xF8408C20  (pre-index;  imm9=8; [25:24]=00; [11:10]=11)
+    //   ldr x0,[x1],#8   = 0xF8408420  (post-index; imm9=8; [25:24]=00; [11:10]=01)
+    //
+    // GP field layout (V=0):
+    //   size[31:30] | 111[29:27] | V[26] | {01 unscaled-off | 00 idx} | opc[23:22]
+    //   | imm12[21:10] (or imm9[20:12] + idx-marker[11:10]) | Rn[9:5] | Rt[4:0]
+
+    const GOLDEN_LDR_X0_X1_0: u32 = 0xF9400020;
+    const GOLDEN_STR_X0_X1_0: u32 = 0xF9000020;
+    const GOLDEN_PRE_X0_X1_8: u32 = 0xF8408C20;
+    const GOLDEN_POST_X0_X1_8: u32 = 0xF8408420;
+
+    fn gp_xreg(num: u32) -> Operand {
+        Operand::Reg(format!("x{}", num))
+    }
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    prop_compose! {
+        fn arb_reg_num()(n in 0u32..=30u32) -> u32 { n }
+    }
+
+    proptest! {
+        // Property 1 — unsigned-offset field layout.
+        // For `ldr xRt,[xRn,#(imm12*8)]` the word must equal the golden
+        // `ldr x0,[x1,#0]` offset additively by Rt[4:0], Rn[9:5], imm12[21:10].
+        #[test]
+        fn prop_unsigned_offset_layout(
+            rt in arb_reg_num(),
+            rn in arb_reg_num(),
+            imm12 in 0u32..4096u32,
+        ) {
+            let offset = (imm12 as i64) * 8; // align = 1 << size = 8 for size=0b11
+            let ops = vec![gp_xreg(rt), Operand::Mem { base: format!("x{}", rn), offset }];
+            let w = word(encode_ldr_str(&ops, true, 0b11, false, false));
+            // golden `ldr x0,[x1]` is rt=0, Rn=1, imm12=0; offset by field deltas.
+            let expected = (GOLDEN_LDR_X0_X1_0 as i64
+                + (rt as i64)
+                + (((rn as i64) - 1) << 5)
+                + ((imm12 as i64) << 10)) as u32;
+            prop_assert_eq!(w, expected);
+        }
+
+        // Property 2 — load vs store differ ONLY in opc bit 22 (0x0040_0000).
+        #[test]
+        fn prop_load_xor_store_is_opc_bit22(
+            rt in arb_reg_num(),
+            rn in arb_reg_num(),
+            imm12 in 0u32..4096u32,
+        ) {
+            let offset = (imm12 as i64) * 8;
+            let ops = vec![gp_xreg(rt), Operand::Mem { base: format!("x{}", rn), offset }];
+            let load  = word(encode_ldr_str(&ops, true,  0b11, false, false));
+            let store = word(encode_ldr_str(&ops, false, 0b11, false, false));
+            prop_assert_eq!(load ^ store, GOLDEN_LDR_X0_X1_0 ^ GOLDEN_STR_X0_X1_0);
+            prop_assert_eq!(load ^ store, 0x0040_0000);
+        }
+
+        // Property 3 — the explicit `size` parameter lands in bits [31:30].
+        #[test]
+        fn prop_size_param_in_top_two_bits(size in 0u32..4u32) {
+            let ops = vec![gp_xreg(0), Operand::Mem { base: "x1".to_string(), offset: 0 }];
+            let w = word(encode_ldr_str(&ops, true, size, false, false));
+            prop_assert_eq!((w >> 30) & 0b11, size);
+        }
+
+        // Property 4 — pre/post-index layout vs golden.
+        // imm9 occupies [20:12]; the idx-marker [11:10] is 11 (pre) vs 01 (post).
+        // Restricted to non-negative imm9 to keep the golden arithmetic additive.
+        #[test]
+        fn prop_pre_post_index_layout(
+            rt in arb_reg_num(),
+            rn in arb_reg_num(),
+            imm9 in 0i32..=255i32,
+        ) {
+            // pre-index: golden is rt=0, rn=1, imm9=8
+            {
+                let ops = vec![gp_xreg(rt), Operand::MemPreIndex { base: format!("x{}", rn), offset: imm9 as i64 }];
+                let w = word(encode_ldr_str(&ops, true, 0b11, false, false));
+                let expected = (GOLDEN_PRE_X0_X1_8 as i64
+                    + (rt as i64)
+                    + (((rn as i64) - 1) << 5)
+                    + (((imm9 as i64) - 8) << 12)) as u32;
+                prop_assert_eq!(w, expected);
+            }
+            // post-index
+            {
+                let ops = vec![gp_xreg(rt), Operand::MemPostIndex { base: format!("x{}", rn), offset: imm9 as i64 }];
+                let w = word(encode_ldr_str(&ops, true, 0b11, false, false));
+                let expected = (GOLDEN_POST_X0_X1_8 as i64
+                    + (rt as i64)
+                    + (((rn as i64) - 1) << 5)
+                    + (((imm9 as i64) - 8) << 12)) as u32;
+                prop_assert_eq!(w, expected);
+            }
+        }
+
+        // Property 5 — NEGATIVE CONTRACT.
+        // For the [base,#imm] form the encodable range is the UNION of the
+        // unsigned-offset field (imm12*8 ∈ [0, 32760]) and the unscaled imm9
+        // ([-256, 255]). An offset strictly outside [-256, 32760] cannot be
+        // represented by EITHER encoding, so the encoder MUST return Err
+        // rather than silently truncating the immediate to 9 bits.
+        #[test]
+        fn prop_out_of_range_offset_is_rejected(
+            excess in 1u32..2000u32,
+            negative in any::<bool>(),
+        ) {
+            let offset = if negative {
+                -256i64 - excess as i64
+            } else {
+                32760i64 + excess as i64
+            };
+            let ops = vec![gp_xreg(0), Operand::Mem { base: "x1".to_string(), offset }];
+            let r = encode_ldr_str(&ops, true, 0b11, false, false);
+            prop_assert!(
+                r.is_err(),
+                "offset {} is outside the LDR/STR immediate encodable range \
+                 [-256, 32760] and must be rejected, but the encoder returned {:?}",
+                offset, r
+            );
+        }
+    }
+}
