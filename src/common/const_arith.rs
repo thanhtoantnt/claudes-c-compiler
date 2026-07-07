@@ -546,6 +546,104 @@ pub fn bitnot_const(val: IrConst) -> Option<IrConst> {
     }
 }
 
+#[cfg(test)]
+mod bitnot_const_pbt {
+    use super::bitnot_const;
+    use crate::ir::reexports::IrConst;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn integer_bitnot_matches_native_width(choice in 0u8..3, value in any::<i128>()) {
+            let constant = match choice {
+                0 => IrConst::I128(value),
+                1 => IrConst::I64(value as i64),
+                _ => IrConst::I32(value as i32),
+            };
+
+            let inverted = bitnot_const(constant).expect("integer constants support bitwise not");
+
+            match inverted {
+                IrConst::I128(actual) => prop_assert_eq!(actual, !value),
+                IrConst::I64(actual) => prop_assert_eq!(actual, !(value as i64)),
+                IrConst::I32(actual) => prop_assert_eq!(actual, !(value as i32)),
+                other => prop_assert!(false, "unexpected bitnot integer variant: {:?}", other),
+            }
+        }
+
+        #[test]
+        fn integer_bitnot_is_an_involution(choice in 0u8..3, value in any::<i128>()) {
+            let constant = match choice {
+                0 => IrConst::I128(value),
+                1 => IrConst::I64(value as i64),
+                _ => IrConst::I32(value as i32),
+            };
+
+            let once = bitnot_const(constant).expect("integer constants support bitwise not");
+            let twice = bitnot_const(once).expect("bitnot result supports bitwise not");
+
+            match twice {
+                IrConst::I128(actual) => prop_assert_eq!(actual, value),
+                IrConst::I64(actual) => prop_assert_eq!(actual, value as i64),
+                IrConst::I32(actual) => prop_assert_eq!(actual, value as i32),
+                other => prop_assert!(false, "unexpected double-bitnot integer variant: {:?}", other),
+            }
+        }
+
+        #[test]
+        fn sub_int_bitnot_promotes_to_i32(choice in 0u8..2, value in any::<i16>()) {
+            let constant = if choice == 0 {
+                IrConst::I8(value as i8)
+            } else {
+                IrConst::I16(value)
+            };
+
+            let inverted = bitnot_const(constant).expect("sub-int constants support bitwise not");
+
+            match inverted {
+                IrConst::I32(actual) => {
+                    let expected = if choice == 0 {
+                        !(value as i8 as i32)
+                    } else {
+                        !(value as i32)
+                    };
+                    prop_assert_eq!(actual, expected);
+                }
+                other => prop_assert!(false, "sub-int bitnot should promote to I32, got {:?}", other),
+            }
+        }
+
+        #[test]
+        fn bitnot_matches_twos_complement_negation_identity(choice in 0u8..3, value in any::<i128>()) {
+            let constant = match choice {
+                0 => IrConst::I128(value),
+                1 => IrConst::I64(value as i64),
+                _ => IrConst::I32(value as i32),
+            };
+
+            let inverted = bitnot_const(constant).expect("integer constants support bitwise not");
+
+            match inverted {
+                IrConst::I128(actual) => prop_assert_eq!(actual, value.wrapping_neg().wrapping_sub(1)),
+                IrConst::I64(actual) => prop_assert_eq!(actual, (value as i64).wrapping_neg().wrapping_sub(1)),
+                IrConst::I32(actual) => prop_assert_eq!(actual, (value as i32).wrapping_neg().wrapping_sub(1)),
+                other => prop_assert!(false, "unexpected bitnot identity variant: {:?}", other),
+            }
+        }
+
+        #[test]
+        fn non_integer_constants_do_not_support_bitnot(choice in 0u8..3, bits in any::<u64>(), bytes in any::<[u8; 16]>()) {
+            let constant = match choice {
+                0 => IrConst::F32(f32::from_bits(bits as u32)),
+                1 => IrConst::F64(f64::from_bits(bits)),
+                _ => IrConst::LongDouble(f64::from_bits(bits), bytes),
+            };
+
+            prop_assert!(bitnot_const(constant).is_none());
+        }
+    }
+}
+
 /// Check if an AST expression is a zero literal (0 or cast of 0).
 /// Used for offsetof pattern detection: `&((type*)0)->member`.
 pub fn is_zero_expr(expr: &crate::frontend::parser::ast::Expr) -> bool {
