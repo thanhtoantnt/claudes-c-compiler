@@ -1985,4 +1985,124 @@ mod tests {
             );
         }
     }
+
+    // ── encode_mvn (MVN = ORN Rd, XZR, Rm) ────────────────────────────────
+    // ARMv8 logical (shifted register): sf opc 01010 shift N Rm imm6 Rn Rd
+    // MVN aliases ORN with Rn hardwired to XZR (11111) and N (bit 21) = 1.
+    //   opc = 01 (ORN), fixed op (bits 28:24) = 01010, Rn field = 11111.
+    // Reuses sf_of/opc_of/opcode5_of/shift_type_of/shift_amt_of/rm_of/rn_of/
+    // rd_of/n21_of/expect_word/xreg from the sections above.
+
+    proptest! {
+        // 1. MVN Xd/Wd, Xm/Wm (no shift): every fixed field and every register
+        //    field lands exactly where the ARMv8 spec dictates. Because MVN
+        //    aliases ORN Rd, XZR, Rm, Rn (bits 9:5) must be hardwired to 11111
+        //    and N (bit 21) must be 1 (distinguishing ORN from ORR).
+        #[test]
+        fn mvn_field_placement(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+            is_64 in any::<bool>(),
+        ) {
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rm_op = if is_64 { xreg(rm) } else { Operand::Reg(format!("w{}", rm)) };
+            let ops = vec![rd_op, rm_op];
+            let w = expect_word(encode_mvn(&ops));
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(opc_of(w), 0b01);          // ORN opc
+            prop_assert_eq!(opcode5_of(w), 0b01010);   // logical shifted register
+            prop_assert_eq!(n21_of(w), 1);             // N=1 (ORN, not ORR)
+            prop_assert_eq!(rn_of(w), 0b11111);        // Rn hardwired to XZR
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(shift_type_of(w), 0);
+            prop_assert_eq!(shift_amt_of(w), 0);
+        }
+
+        // 2. sf (bit 31) tracks register width: W -> 0, X -> 1.
+        #[test]
+        fn mvn_sf_tracks_width(
+            n in 0u32..=30,
+            is_w in any::<bool>(),
+        ) {
+            let r = if is_w { Operand::Reg(format!("w{}", n)) } else { xreg(n) };
+            let ops = vec![r.clone(), r];
+            let w = expect_word(encode_mvn(&ops));
+            prop_assert_eq!(sf_of(w), if is_w { 0 } else { 1 });
+        }
+
+        // 3. Shifted register: all four shift kinds map to the 2-bit shift field,
+        //    and for X registers the imm6 amount (0..=63) is placed verbatim. The
+        //    MVN alias signature (opc=01, N=1, Rn=11111) is preserved regardless
+        //    of the shift operand.
+        #[test]
+        fn mvn_shift_mapping(
+            rd in 0u32..=30, rm in 0u32..=30,
+            sk in 0u32..=3u32,
+            amount in 0u32..=63u32,
+        ) {
+            let (kind, want) = match sk {
+                0 => ("lsl", 0u32), 1 => ("lsr", 1u32),
+                2 => ("asr", 2u32), _ => ("ror", 3u32),
+            };
+            let ops = vec![xreg(rd), xreg(rm),
+                           Operand::Shift { kind: kind.into(), amount }];
+            let w = expect_word(encode_mvn(&ops));
+            prop_assert_eq!(opcode5_of(w), 0b01010);
+            prop_assert_eq!(shift_type_of(w), want);
+            prop_assert_eq!(shift_amt_of(w), amount);
+            prop_assert_eq!(n21_of(w), 1);
+            prop_assert_eq!(rn_of(w), 0b11111);
+            prop_assert_eq!(opc_of(w), 0b01);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 4. ALGEBRAIC ALIAS ORACLE: MVN is defined as ORN Rd, XZR, Rm. The
+        //    encoding of `mvn Rd, Rm [, shift]` must therefore be bit-identical
+        //    to `orn Rd, (XZR|WZR), Rm [, shift]`, for both widths and with or
+        //    without a shift. This is the defining equivalence of the alias.
+        #[test]
+        fn mvn_equals_orn_rn_xzr(
+            rd in 0u32..=30, rm in 0u32..=30,
+            is_64 in any::<bool>(),
+            shifted in any::<bool>(),
+            sk in 0u32..=3u32,
+            amount in 0u32..=63u32,
+        ) {
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rm_op = if is_64 { xreg(rm) } else { Operand::Reg(format!("w{}", rm)) };
+            let zr_op = if is_64 { Operand::Reg("xzr".into()) }
+                        else { Operand::Reg("wzr".into()) };
+            let shift = Operand::Shift {
+                kind: match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" }.into(),
+                amount,
+            };
+            let mvn_ops = if shifted { vec![rd_op.clone(), rm_op.clone(), shift.clone()] }
+                          else { vec![rd_op.clone(), rm_op.clone()] };
+            let orn_ops = if shifted { vec![rd_op, zr_op, rm_op, shift] }
+                          else { vec![rd_op, zr_op, rm_op] };
+            let w_mvn = expect_word(encode_mvn(&mvn_ops));
+            let w_orn = expect_word(encode_orn(&orn_ops));
+            prop_assert_eq!(w_mvn, w_orn);
+        }
+
+        // 5. NEGATIVE CONTRACT: for the 32-bit (W) shifted-register form, imm6
+        //    must be 0..=31; a shift of 32..63 is UNDEFINED (ARMv8 ARM, C4.1.4:
+        //    for sf=0 the shift amount must be 0..31) and MUST be rejected, not
+        //    silently masked into the imm6 field via `& 0x3F`.
+        #[test]
+        fn mvn_w_reg_rejects_shift_above_31(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+            amount in 32u32..=63u32,
+            sk in 0u32..=3u32,
+        ) {
+            let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+            let ops = vec![Operand::Reg(format!("w{}", rd)),
+                           Operand::Reg(format!("w{}", rm)),
+                           Operand::Shift { kind: kind.into(), amount }];
+            prop_assert!(encode_mvn(&ops).is_err());
+        }
+    }
 }
