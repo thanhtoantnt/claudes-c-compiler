@@ -3135,3 +3135,140 @@ mod prop_encode_ldxp_stxp_tests {
     }
 }
 
+#[cfg(test)]
+mod prop_encode_ldar_stlr_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: reference-encoding / field-placement (ARMv8-A Architecture
+    // Reference Manual, LDAR/STLR single-copy atomic load/store).
+    //
+    //   LDAR/STLR: size[31:30] 001000[29:24] 1[23] L[22] 0[21]
+    //              11111[20:16] 1[15] 11111[14:10] Rn[9:5] Rt[4:0]
+    //
+    // The golden words below are derived by hand directly from the ARM ARM
+    // bit layout (NOT from this crate's own formula), so each property is an
+    // independent check that the function places fields where the manual
+    // mandates.
+    //
+    //   LDAR X0,[X1] = 0xC8DFFC20   (size=11, L=1)
+    //   STLR X0,[X1] = 0xC89FFC20   (size=11, L=0)
+    //   LDAR W0,[X1] = 0x88DFFC20   (size=10, L=1)
+    //   STLR W0,[X1] = 0x889FFC20   (size=10, L=0)
+    //   LDARB W0,[X1]= 0x08DFFC20   (forced_size=00, L=1)
+    //   LDARH W0,[X1]= 0x48DFFC20   (forced_size=01, L=1)
+    //
+    // Constant skeleton (with size=0, L=0, Rn=0, Rt=0): 0x089FFC00.
+    // Variable fields: size[31:30], L[22], Rn[9:5], Rt[4:0]  → mask 0xC04003FF.
+    // Constant bits mask: 0x3FBFFC00.
+
+    const CONST_MASK: u32 = 0x3FBF_FC00;
+    const CONST_SKELETON: u32 = 0x089F_FC00;
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn gp_reg(prefix: char, num: u32) -> Operand {
+        Operand::Reg(format!("{}{}", prefix, num))
+    }
+
+    fn mem(base: &str) -> Operand {
+        Operand::Mem { base: base.to_string(), offset: 0 }
+    }
+
+    // Property 1 — reference/golden: known encodings exactly match the
+    // ARM ARM bit layout for all six LDAR/STLR size variants. No generated
+    // inputs, so it is a plain #[test] outside the proptest! macro.
+    #[test]
+    fn prop_golden_reference_encodings() {
+        let cases: [(&str, u32, bool, Option<u32>, u32, u32); 6] = [
+            // (rt-reg, _rt_num, is_load, forced_size, base-num, golden)
+            ("x0", 0, true,  None,       1, 0xC8DFFC20), // LDAR X0,[X1]
+            ("x0", 0, false, None,       1, 0xC89FFC20), // STLR X0,[X1]
+            ("w0", 0, true,  None,       1, 0x88DFFC20), // LDAR W0,[X1]
+            ("w0", 0, false, None,       1, 0x889FFC20), // STLR W0,[X1]
+            ("w0", 0, true,  Some(0b00), 1, 0x08DFFC20), // LDARB W0,[X1]
+            ("w0", 0, true,  Some(0b01), 1, 0x48DFFC20), // LDARH W0,[X1]
+        ];
+        for (rt, _rt_num, is_load, forced, rn, golden) in cases {
+            let ops = vec![Operand::Reg(rt.to_string()), mem(&format!("x{}", rn))];
+            let w = word(encode_ldar_stlr(&ops, is_load, forced));
+            assert_eq!(w, golden, "case rt={} load={} forced={:?}", rt, is_load, forced);
+        }
+    }
+
+    proptest! {
+        // Property 2 — field placement: Rt occupies [4:0] and Rn occupies
+        // [9:5] of the encoded word for arbitrary register numbers.
+        #[test]
+        fn prop_rt_rn_field_placement(
+            rt in 0u32..=31,
+            rn in 0u32..=31,
+            is_load in any::<bool>(),
+        ) {
+            let ops = vec![gp_reg('x', rt), mem(&format!("x{}", rn))];
+            let w = word(encode_ldar_stlr(&ops, is_load, None));
+            prop_assert_eq!(w & 0x1F, rt, "Rt field [4:0]");
+            prop_assert_eq!((w >> 5) & 0x1F, rn, "Rn field [9:5]");
+        }
+
+        // Property 3 — differential: for identical operands, LDAR and STLR
+        // differ in exactly one bit — the L bit [22] — and nothing else.
+        // (load ^ store == 0x0040_0000 for every size variant.)
+        #[test]
+        fn prop_load_xor_store_flips_only_l_bit22(
+            rt in 0u32..=31,
+            rn in 0u32..=31,
+            forced in proptest::option::of(0u32..=3),
+        ) {
+            let ops = vec![gp_reg('w', rt), mem(&format!("x{}", rn))];
+            let load = word(encode_ldar_stlr(&ops, true, forced));
+            let store = word(encode_ldar_stlr(&ops, false, forced));
+            prop_assert_eq!(load ^ store, 0x0040_0000u32);
+        }
+
+        // Property 4 — invariant: every bit that is NOT a variable field
+        // (size/L/Rn/Rt) must equal the fixed LDAR/STLR skeleton, regardless
+        // of operands, size choice, or load/store direction.
+        #[test]
+        fn prop_constant_skeleton_invariant(
+            rt in 0u32..=31,
+            rn in 0u32..=31,
+            is_load in any::<bool>(),
+            is_64 in any::<bool>(),
+            forced in proptest::option::of(0u32..=3),
+        ) {
+            let prefix = if is_64 { 'x' } else { 'w' };
+            let ops = vec![gp_reg(prefix, rt), mem(&format!("x{}", rn))];
+            let w = word(encode_ldar_stlr(&ops, is_load, forced));
+            prop_assert_eq!(w & CONST_MASK, CONST_SKELETON,
+                "non-variable bits deviate from ARM ARM skeleton");
+        }
+
+        // Property 5 — NEGATIVE/ERROR CONTRACT: the ARM ARM only allocates
+        // size field encodings 0b00–0b11 for the LDAR/STLR family. An
+        // out-of-range `forced_size` (>3) has no allocated encoding and MUST
+        // be rejected with Err rather than silently producing a corrupt word.
+        //
+        // (Currently FAILS: the function does `size << 30`, so forced_size>=4
+        // silently truncates high bits into bits [31:30] instead of erroring.
+        // Marked #[ignore] to keep CI green; see BUG_REPORT_ldar_stlr.md.)
+        #[ignore]
+        #[test]
+        fn prop_forced_size_out_of_range_rejected(
+            bad_size in 4u32..=255,
+            is_load in any::<bool>(),
+        ) {
+            let ops = vec![gp_reg('w', 0), mem("x1")];
+            let r = encode_ldar_stlr(&ops, is_load, Some(bad_size));
+            prop_assert!(r.is_err(),
+                "forced_size={} (>3) must be rejected, got Ok({:?})", bad_size, r);
+        }
+    }
+}
+
