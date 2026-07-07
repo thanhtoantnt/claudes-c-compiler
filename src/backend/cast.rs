@@ -434,3 +434,113 @@ mod classify_cast_properties {
 
 
 }
+
+#[cfg(test)]
+mod classify_cast_with_f128_focused_properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        fn arb_non_f128_type()(idx in 0usize..13) -> IrType {
+            match idx {
+                0 => IrType::I8,
+                1 => IrType::I16,
+                2 => IrType::I32,
+                3 => IrType::I64,
+                4 => IrType::I128,
+                5 => IrType::U8,
+                6 => IrType::U16,
+                7 => IrType::U32,
+                8 => IrType::U64,
+                9 => IrType::U128,
+                10 => IrType::F32,
+                11 => IrType::F64,
+                _ => IrType::Ptr,
+            }
+        }
+    }
+
+    prop_compose! {
+        fn arb_integer_or_ptr_type()(idx in 0usize..11) -> IrType {
+            match idx {
+                0 => IrType::I8,
+                1 => IrType::I16,
+                2 => IrType::I32,
+                3 => IrType::I64,
+                4 => IrType::I128,
+                5 => IrType::U8,
+                6 => IrType::U16,
+                7 => IrType::U32,
+                8 => IrType::U64,
+                9 => IrType::U128,
+                _ => IrType::Ptr,
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn non_native_f128_reduces_to_f64_semantics(from_ty in arb_non_f128_type(), to_ty in arb_non_f128_type()) {
+            prop_assume!(from_ty != IrType::F128 && to_ty != IrType::F128);
+
+            prop_assert_eq!(
+                classify_cast_with_f128(from_ty, to_ty, false),
+                classify_cast(from_ty, to_ty)
+            );
+            prop_assert_eq!(
+                classify_cast_with_f128(IrType::F128, to_ty, false),
+                classify_cast(IrType::F64, to_ty)
+            );
+            prop_assert_eq!(
+                classify_cast_with_f128(from_ty, IrType::F128, false),
+                classify_cast(from_ty, IrType::F64)
+            );
+        }
+
+        #[test]
+        fn native_f128_to_integer_or_ptr_classifies_by_destination_signedness(to_ty in arb_integer_or_ptr_type()) {
+            let actual = classify_cast_with_f128(IrType::F128, to_ty, true);
+            let expected = if to_ty.is_unsigned() || to_ty == IrType::Ptr {
+                CastKind::F128ToUnsigned { to_ty }
+            } else {
+                CastKind::F128ToSigned { to_ty }
+            };
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn native_integer_or_ptr_to_f128_classifies_by_source_signedness(from_ty in arb_integer_or_ptr_type()) {
+            let actual = classify_cast_with_f128(from_ty, IrType::F128, true);
+            let expected = if from_ty.is_unsigned() {
+                CastKind::UnsignedToF128 { from_ty }
+            } else {
+                CastKind::SignedToF128 { from_ty }
+            };
+
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn native_f128_float_edges_use_softfloat_widen_and_narrow(from_f32 in any::<bool>(), to_f32 in any::<bool>()) {
+            let from_ty = if from_f32 { IrType::F32 } else { IrType::F64 };
+            let to_ty = if to_f32 { IrType::F32 } else { IrType::F64 };
+
+            prop_assert_eq!(
+                classify_cast_with_f128(from_ty, IrType::F128, true),
+                CastKind::FloatToF128 { from_f32 }
+            );
+            prop_assert_eq!(
+                classify_cast_with_f128(IrType::F128, to_ty, true),
+                CastKind::F128ToFloat { to_f32 }
+            );
+        }
+
+        #[test]
+        fn identical_types_are_noop_even_when_f128_is_native(ty in arb_non_f128_type()) {
+            prop_assert_eq!(classify_cast_with_f128(ty, ty, true), CastKind::Noop);
+            prop_assert_eq!(classify_cast_with_f128(IrType::F128, IrType::F128, true), CastKind::Noop);
+            prop_assert_eq!(classify_cast_with_f128(IrType::F128, IrType::F128, false), CastKind::Noop);
+        }
+    }
+}
