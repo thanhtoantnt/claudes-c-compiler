@@ -3289,4 +3289,96 @@ mod tests {
             println!("  rm field = {} (== 31 means XZR, not SP)", rm_of(w));
         }
     }
+
+    // ── Field extractors for the data-processing (3-source) format ──────────
+    // MSUB/MADD: sf 00 11011 000 Rm o1 Ra Rn Rd
+    fn m_sf(w: u32) -> u32 { (w >> 31) & 1 }
+    fn m_rm(w: u32) -> u32 { (w >> 16) & 0x1F }
+    fn m_o1(w: u32) -> u32 { (w >> 15) & 1 } // bit 15: 1 = MSUB, 0 = MADD
+    fn m_ra(w: u32) -> u32 { (w >> 10) & 0x1F }
+    fn m_rn(w: u32) -> u32 { (w >> 5) & 0x1F }
+    fn m_rd(w: u32) -> u32 { w & 0x1F }
+
+    proptest! {
+        // Reference oracle: ARMv8 fixed-format spec. MSUB encodes as
+        //   sf 00 11011 000 Rm 1 Ra Rn Rd   (Rd = Ra - Rn*Rm)
+        // Every fixed field and every register field must land exactly where
+        // the architecture manual dictates. Register 31 == XZR, a legal data-
+        // processing operand (MNEG == MSUB ... , XZR), so 0..=31 is the full range.
+        #[test]
+        fn msub_full_field_placement(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            ra in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm), xreg(ra)];
+            let w = expect_word(encode_msub(&ops));
+            prop_assert_eq!(m_sf(w), 1);                       // 64-bit (X regs)
+            prop_assert_eq!((w >> 21) & 0x3FF, 0b0011011000);   // op=00,11011,o0=000
+            prop_assert_eq!(m_o1(w), 1);                       // MSUB bit (15) set
+            prop_assert_eq!(m_rm(w), rm);
+            prop_assert_eq!(m_ra(w), ra);
+            prop_assert_eq!(m_rn(w), rn);
+            prop_assert_eq!(m_rd(w), rd);
+        }
+
+        // Differential oracle: MSUB and MADD are the two members of the
+        // data-processing (3-source) class sharing this opcode; they differ in
+        // precisely one bit (bit 15). MSUB must set it, MADD must clear it.
+        #[test]
+        fn msub_differs_from_madd_only_in_bit15(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            ra in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm), xreg(ra)];
+            let ms = expect_word(encode_msub(&ops));
+            let ma = expect_word(encode_madd(&ops));
+            prop_assert_eq!(ms ^ ma, 1u32 << 15); // exactly one bit differs
+            prop_assert_eq!(m_o1(ms), 1);
+            prop_assert_eq!(m_o1(ma), 0);
+        }
+
+        // Width contract: the sf bit (31) tracks the destination register's
+        // width only — Xd -> sf=1, Wd -> sf=0. (This encoder ignores the width
+        // of Rn/Rm/Ra, matching its documented behavior.)
+        #[test]
+        fn msub_sf_tracks_rd_width(
+            n in 0u32..=30,
+            rd_is_x in any::<bool>(),
+        ) {
+            let rd = if rd_is_x { xreg(n) } else { Operand::Reg(format!("w{}", n)) };
+            let ops = vec![rd, xreg(0), xreg(1), xreg(2)];
+            let w = expect_word(encode_msub(&ops));
+            prop_assert_eq!(m_sf(w), if rd_is_x { 1 } else { 0 });
+        }
+
+        // Purity: encoding is a pure function of its operands, so repeated
+        // calls with identical input must yield byte-identical output.
+        #[test]
+        fn msub_is_deterministic(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            ra in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm), xreg(ra)];
+            let a = expect_word(encode_msub(&ops));
+            let b = expect_word(encode_msub(&ops));
+            prop_assert_eq!(a, b);
+        }
+
+        // Negative/error contract: MSUB requires exactly 4 register operands.
+        // Fewer must be rejected with Err rather than silently producing a
+        // mis-encoded word from a missing (zeroed) register field.
+        #[test]
+        fn msub_missing_operands_return_err(n in 0usize..=3) {
+            let mut ops = vec![xreg(0), xreg(1), xreg(2), xreg(3)];
+            ops.truncate(n);
+            prop_assert!(encode_msub(&ops).is_err(),
+                "encode_msub with {} operands should error", n);
+        }
+    }
 }
