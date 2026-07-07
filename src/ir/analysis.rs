@@ -374,3 +374,149 @@ impl CfgAnalysis {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::collections::VecDeque;
+
+    fn graph_strategy(max_blocks: usize, max_row_len: usize) -> impl Strategy<Value = Vec<Vec<usize>>> {
+        (0..=max_blocks).prop_flat_map(move |num_blocks| {
+            prop::collection::vec(
+                prop::collection::vec(0..max_blocks.max(1), 0..=max_row_len),
+                num_blocks,
+            )
+            .prop_map(move |rows| {
+                rows.into_iter()
+                    .map(|row| {
+                        if num_blocks == 0 {
+                            Vec::new()
+                        } else {
+                            row.into_iter().map(|x| x % num_blocks).collect()
+                        }
+                    })
+                    .collect()
+            })
+        })
+    }
+
+    fn reachable_from_zero(succs: &FlatAdj, num_blocks: usize) -> Vec<bool> {
+        let mut reachable = vec![false; num_blocks];
+        if num_blocks == 0 {
+            return reachable;
+        }
+
+        let mut queue = VecDeque::new();
+        reachable[0] = true;
+        queue.push_back(0);
+
+        while let Some(node) = queue.pop_front() {
+            for &succ in succs.row(node) {
+                let succ = succ as usize;
+                if !reachable[succ] {
+                    reachable[succ] = true;
+                    queue.push_back(succ);
+                }
+            }
+        }
+
+        reachable
+    }
+
+    fn expected_rpo(num_blocks: usize, succs: &FlatAdj) -> Vec<usize> {
+        fn dfs(node: usize, succs: &FlatAdj, visited: &mut [bool], postorder: &mut Vec<usize>) {
+            visited[node] = true;
+            for &succ in succs.row(node) {
+                let succ = succ as usize;
+                if !visited[succ] {
+                    dfs(succ, succs, visited, postorder);
+                }
+            }
+            postorder.push(node);
+        }
+
+        if num_blocks == 0 {
+            return Vec::new();
+        }
+
+        let mut visited = vec![false; num_blocks];
+        let mut postorder = Vec::with_capacity(num_blocks);
+        dfs(0, succs, &mut visited, &mut postorder);
+        postorder.reverse();
+        postorder
+    }
+
+    fn dedup_rows(rows: &[Vec<usize>]) -> Vec<Vec<usize>> {
+        rows.iter()
+            .map(|row| {
+                let mut deduped = Vec::new();
+                for &succ in row {
+                    if !deduped.contains(&succ) {
+                        deduped.push(succ);
+                    }
+                }
+                deduped
+            })
+            .collect()
+    }
+
+    proptest! {
+        #[test]
+        fn empty_graph_returns_empty_rpo(_unit in Just(())) {
+            let succs = FlatAdj::from_vecs_usize(&[]);
+            prop_assert_eq!(compute_reverse_postorder(0, &succs), Vec::<usize>::new());
+        }
+
+        #[test]
+        fn rpo_matches_reference_dfs_on_random_graphs(rows in graph_strategy(8, 8)) {
+            let num_blocks = rows.len();
+            let succs = FlatAdj::from_vecs_usize(&rows);
+            prop_assert_eq!(compute_reverse_postorder(num_blocks, &succs), expected_rpo(num_blocks, &succs));
+        }
+
+        #[test]
+        fn rpo_lists_each_reachable_block_exactly_once(rows in graph_strategy(8, 8)) {
+            let num_blocks = rows.len();
+            let succs = FlatAdj::from_vecs_usize(&rows);
+            let rpo = compute_reverse_postorder(num_blocks, &succs);
+            let reachable = reachable_from_zero(&succs, num_blocks);
+
+            prop_assert!(rpo.iter().all(|&node| node < num_blocks));
+            prop_assert_eq!(rpo.len(), reachable.iter().filter(|&&seen| seen).count());
+
+            let mut seen = vec![false; num_blocks];
+            for &node in &rpo {
+                prop_assert!(reachable[node]);
+                prop_assert!(!seen[node]);
+                seen[node] = true;
+            }
+
+            for node in 0..num_blocks {
+                prop_assert_eq!(seen[node], reachable[node]);
+            }
+        }
+
+        #[test]
+        fn rpo_is_insensitive_to_duplicate_successors(rows in graph_strategy(8, 8)) {
+            let num_blocks = rows.len();
+            let succs = FlatAdj::from_vecs_usize(&rows);
+            let deduped = FlatAdj::from_vecs_usize(&dedup_rows(&rows));
+
+            prop_assert_eq!(compute_reverse_postorder(num_blocks, &succs), compute_reverse_postorder(num_blocks, &deduped));
+        }
+
+        #[test]
+        fn non_empty_graphs_start_with_entry_block(rows in graph_strategy(8, 8)) {
+            let num_blocks = rows.len();
+            let succs = FlatAdj::from_vecs_usize(&rows);
+            let rpo = compute_reverse_postorder(num_blocks, &succs);
+
+            if num_blocks == 0 {
+                prop_assert!(rpo.is_empty());
+            } else {
+                prop_assert_eq!(rpo.first().copied(), Some(0));
+            }
+        }
+    }
+}
