@@ -702,3 +702,182 @@ mod proptest_svc {
         }
     }
 }
+
+// ── Property-based tests for encode_msr ───────────────────────────────────
+// encode_msr has two instruction shapes:
+//
+//   (A) MSR (immediate) PState fields:
+//         msr daifset, #imm -> 0xD503_4000 | ((imm & 0xF) << 8) | (0b110 << 5) | 0x1F
+//         msr daifclr,  #imm -> 0xD503_4000 | ((imm & 0xF) << 8) | (0b111 << 5) | 0x1F
+//         msr spsel,    #imm -> 0xD500_4000 | ((imm & 0xF) << 8) | (0b101 << 5) | 0x1F
+//       The 4-bit immediate occupies CRm (bits[11:8]); op2 sits at bits[7:5];
+//       Rt field (bits[4:0]) is hard-wired to 0b11111.
+//
+//   (B) MSR (register):
+//         msr <sysreg>, Xt  -> 0xD500_0000 | (sysenc << 5) | Rt
+//       where <sysenc> is either a table entry (e.g. sctlr_el1 -> 0xC080) or is
+//       derived generically from s<op0>_<op1>_c<CRn>_c<CRm>_<op2> via
+//       sysreg_encoding(). Bit 21 (the L/read bit) must be 0 for a write.
+//
+// Oracle: exact-word reconstruction for every branch (reference oracle),
+// plus a differential check against sysreg_encoding() for generic names.
+#[cfg(test)]
+mod proptest_msr {
+    use super::encode_msr;
+    use super::sysreg_encoding;
+    use crate::backend::arm::assembler::encoder::EncodeResult;
+    use crate::backend::arm::assembler::encoder::parse_reg_num;
+    use crate::backend::arm::assembler::parser::Operand;
+    use proptest::prelude::*;
+
+    /// Helper: encode an operand slice for MSR and unwrap the resulting word.
+    fn encode_word(operands: &[Operand]) -> u32 {
+        match encode_msr(operands).expect("MSR operands must encode") {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected EncodeResult::Word, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        // 1. Error contract: the first operand MUST be an Operand::Symbol naming
+        //    the system register. Anything else is rejected with Err.
+        #[test]
+        fn msr_rejects_non_symbol_first_operand(kind in 0u8..4) {
+            let operands: Vec<Operand> = match kind {
+                0 => vec![],
+                1 => vec![Operand::Reg("x0".to_string())],
+                2 => vec![Operand::Imm(7)],
+                _ => vec![Operand::SymbolOffset("foo".to_string(), 4)],
+            };
+            prop_assert!(
+                encode_msr(&operands).is_err(),
+                "expected Err for first operand kind {}: {:?}",
+                kind, operands
+            );
+        }
+
+        // 2. daifset / daifclr immediate: exact-word oracle for any i64. The
+        //    immediate is masked to its low 4 bits before placement in CRm.
+        #[test]
+        fn msr_daif_immediate_word(imm in any::<i64>(), field in 0u8..2) {
+            let (name, op2): (&str, u32) = if field == 0 {
+                ("daifset", 0b110)
+            } else {
+                ("daifclr", 0b111)
+            };
+            let word = encode_word(&[
+                Operand::Symbol(name.to_string()),
+                Operand::Imm(imm),
+            ]);
+            let crm = ((imm as u32) & 0xF) << 8;
+            let expected = 0xd503_4000u32 | crm | (op2 << 5) | 0x1F;
+            prop_assert_eq!(word, expected);
+            // Rt field is hard-wired to 0b11111 for the immediate form.
+            prop_assert_eq!(word & 0x1F, 0x1F);
+        }
+
+        // 3. spsel immediate form: distinct base 0xD500_4000 (op1=0) and
+        //    op2=0b101. Same CRm masking as daifset/daifclr.
+        #[test]
+        fn msr_spsel_immediate_word(imm in any::<i64>()) {
+            let word = encode_word(&[
+                Operand::Symbol("spsel".to_string()),
+                Operand::Imm(imm),
+            ]);
+            let crm = ((imm as u32) & 0xF) << 8;
+            let expected = 0xd500_4000u32 | crm | (0b101u32 << 5) | 0x1F;
+            prop_assert_eq!(word, expected);
+        }
+
+        // 4. Register form: Rt round-trips into bits[4:0] for every valid
+        //    general-purpose register, and the L/read bit (bit 21) is always 0
+        //    (this is a write). Uses a known table sysreg (sctlr_el1).
+        #[test]
+        fn msr_register_rt_roundtrips(reg_num in 0u32..=31u32) {
+            let reg = format!("x{}", reg_num);
+            let word = encode_word(&[
+                Operand::Symbol("sctlr_el1".to_string()),
+                Operand::Reg(reg.clone()),
+            ]);
+            let expected_rt = parse_reg_num(&reg).expect("valid gp register");
+            prop_assert_eq!(word & 0x1F, expected_rt);
+            // Bit 21 = 0 -> MSR write (L=0). MRS would set this bit.
+            prop_assert_eq!(word & (1u32 << 21), 0);
+            // High opcode bits [31:22] fixed for MSR register form.
+            prop_assert_eq!(word >> 22, 0x354);
+        }
+
+        // 5. Register form: injectivity of the Rt field. Distinct registers
+        //    with a fixed sysreg yield distinct encoded words.
+        #[test]
+        fn msr_distinct_registers_distinct_words(a in 0u32..=31u32, b in 0u32..=31u32) {
+            prop_assume!(a != b);
+            let wa = encode_word(&[
+                Operand::Symbol("sctlr_el1".to_string()),
+                Operand::Reg(format!("x{}", a)),
+            ]);
+            let wb = encode_word(&[
+                Operand::Symbol("sctlr_el1".to_string()),
+                Operand::Reg(format!("x{}", b)),
+            ]);
+            prop_assert_ne!(wa, wb);
+        }
+
+        // 6. Generic sysreg differential: for any in-range (op0,op1,CRn,CRm,op2),
+        //    the name s<op0>_<op1>_c<CRn>_c<CRm>_<op2> is parsed and the encoded
+        //    word matches the independently-computed sysreg_encoding() value.
+        #[test]
+        fn msr_generic_sysreg_matches_sysreg_encoding(
+            op0 in 0u32..=3u32,
+            op1 in 0u32..=7u32,
+            crn in 0u32..=15u32,
+            crm in 0u32..=15u32,
+            op2 in 0u32..=7u32,
+        ) {
+            let name = format!("s{}_{}_c{}_c{}_{}", op0, op1, crn, crm, op2);
+            let rt = 5u32;
+            let word = encode_word(&[
+                Operand::Symbol(name.clone()),
+                Operand::Reg("x5".to_string()),
+            ]);
+            let sysenc = sysreg_encoding(op0, op1, crn, crm, op2);
+            let expected = 0xd500_0000u32 | (sysenc << 5) | rt;
+            prop_assert_eq!(word, expected);
+            // The sysreg encoding lives in bits[20:5]; Rt is untouched.
+            prop_assert_eq!((word >> 5) & 0xFFFF, sysenc);
+        }
+    }
+
+    // Deterministic companions covering edge cases proptest may not hit.
+    #[test]
+    fn msr_immediate_extremes_and_register_spsel() {
+        // Immediate masking at i64 extremes (low 4 bits only).
+        for imm in [i64::MIN, -1i64, 0, 0xF, 0x10, 0xFF, i64::MAX] {
+            let w = encode_word(&[
+                Operand::Symbol("daifset".to_string()),
+                Operand::Imm(imm),
+            ]);
+            assert_eq!(w & 0x1F00, (((imm as u32) & 0xF) << 8));
+            assert_eq!(w & 0x1F, 0x1F);
+        }
+
+        // spsel with a *register* operand falls through to the register form
+        // (sysreg encoding 0xC210), NOT the immediate form.
+        let w = encode_word(&[
+            Operand::Symbol("spsel".to_string()),
+            Operand::Reg("x5".to_string()),
+        ]);
+        assert_eq!(w, 0xd500_0000u32 | (0xc210u32 << 5) | 5);
+
+        // Case-insensitivity: SCTLR_EL1 == sctlr_el1.
+        let upper = encode_word(&[
+            Operand::Symbol("SCTLR_EL1".to_string()),
+            Operand::Reg("x9".to_string()),
+        ]);
+        let lower = encode_word(&[
+            Operand::Symbol("sctlr_el1".to_string()),
+            Operand::Reg("x9".to_string()),
+        ]);
+        assert_eq!(upper, lower);
+    }
+}
