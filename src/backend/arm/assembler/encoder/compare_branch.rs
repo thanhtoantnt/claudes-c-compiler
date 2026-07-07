@@ -485,3 +485,149 @@ mod prop_ccmp_ccmn_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_tbz_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ---- Opcode constants for the TBZ / TBNZ instruction class ----
+    // Fixed-1 bits [30:25] = 0b011011.
+    const OPCODE: u32 = 0b011011u32 << 25; // == 0x3600_0000
+    const OPCODE_MASK: u32 = 0x7E00_0000;  // bits [30:25]
+    // The imm14 branch-offset field [18:5] is filled in by the linker, so the
+    // encoder must leave it zero. This is the only always-zero region.
+    const FIXED_ZERO: u32 = 0x0007_FFE0;   // bits [18:5]
+
+    fn word_of(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::WordWithReloc { word, .. }) => word,
+            other => panic!("expected WordWithReloc, got {:?}", other),
+        }
+    }
+
+    fn reloc_of(r: Result<EncodeResult, String>) -> Relocation {
+        match r {
+            Ok(EncodeResult::WordWithReloc { reloc, .. }) => reloc,
+            other => panic!("expected WordWithReloc, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand], is_nz: bool) -> u32 {
+        word_of(encode_tbz(ops, is_nz))
+    }
+
+    prop_compose! {
+        fn arb_reg()(n in 0u32..=30u32, is_64 in any::<bool>()) -> (String, u32) {
+            let name = if is_64 { format!("x{}", n) } else { format!("w{}", n) };
+            (name, n)
+        }
+    }
+
+    /// Generate a symbol-like operand together with the (symbol, addend) the
+    /// encoder is expected to forward into the relocation.
+    prop_compose! {
+        fn arb_sym_operand()(
+            sym in "[a-z][a-z0-9_]{0,7}",
+            has_off in any::<bool>(),
+            off in -4096i64..=4096i64,
+        ) -> (Operand, String, i64) {
+            if has_off {
+                (Operand::SymbolOffset(sym.clone(), off), sym, off)
+            } else {
+                (Operand::Symbol(sym.clone()), sym.clone(), 0)
+            }
+        }
+    }
+
+    proptest! {
+        // Property A — full structural / field-placement oracle.
+        // Verifies the fixed opcode bits, the always-zero imm14 gap, and the
+        // position+mask of every populated field (b5, op, b40, Rt).
+        #[test]
+        fn prop_opcode_structure_and_fields(
+            (rt_name, rt_num) in arb_reg(),
+            bit in 0i64..=63i64, // valid AArch64 bit position
+            (sym_op, _sym, _off) in arb_sym_operand(),
+            is_nz in any::<bool>(),
+        ) {
+            let ops = vec![Operand::Reg(rt_name), Operand::Imm(bit), sym_op];
+            let word = enc(&ops, is_nz);
+
+            // Fixed opcode bits [30:25] = 0b011011.
+            prop_assert_eq!(word & OPCODE_MASK, OPCODE);
+            // Linker-reserved imm14 field must be zero in the encoder output.
+            prop_assert_eq!(word & FIXED_ZERO, 0u32);
+            // op bit [24]: TBNZ => 1, TBZ => 0.
+            prop_assert_eq!((word >> 24) & 1, if is_nz { 1 } else { 0 });
+            // b5 [31] is bit 5 of the immediate.
+            prop_assert_eq!((word >> 31) & 1, ((bit as u32) >> 5) & 1);
+            // b40 [23:19] is the low 5 bits of the immediate.
+            prop_assert_eq!((word >> 19) & 0x1F, (bit as u32) & 0x1F);
+            // Rt field [4:0].
+            prop_assert_eq!(word & 0x1F, rt_num);
+        }
+
+        // Property B — differential: TBZ and TBNZ differ ONLY in bit 24 (op).
+        #[test]
+        fn prop_tbz_xor_tbnz_is_bit24(
+            (rt_name, _) in arb_reg(),
+            bit in 0i64..=63i64,
+            sym in "[a-z][a-z0-9_]{0,7}",
+        ) {
+            let ops = vec![Operand::Reg(rt_name), Operand::Imm(bit),
+                           Operand::Symbol(sym)];
+            prop_assert_eq!(enc(&ops, false) ^ enc(&ops, true), 1u32 << 24);
+        }
+
+        // Property C — differential: register width is irrelevant. The TBZ
+        // format has no sf bit (bit 31 is reused for b5), so x{N} and w{N}
+        // must encode to identical words.
+        #[test]
+        fn prop_width_independent(
+            n in 0u32..=30u32,
+            bit in 0i64..=63i64,
+            sym in "[a-z][a-z0-9_]{0,7}",
+            is_nz in any::<bool>(),
+        ) {
+            let ops64 = vec![Operand::Reg(format!("x{}", n)), Operand::Imm(bit),
+                             Operand::Symbol(sym.clone())];
+            let ops32 = vec![Operand::Reg(format!("w{}", n)), Operand::Imm(bit),
+                             Operand::Symbol(sym)];
+            prop_assert_eq!(enc(&ops64, is_nz), enc(&ops32, is_nz));
+        }
+
+        // Property D — round-trip: for a valid bit position the split (b5,b40)
+        // reconstructs the original bit number: (b5<<5) | b40 == bit.
+        #[test]
+        fn prop_bit_round_trips(
+            (rt_name, _) in arb_reg(),
+            bit in 0i64..=63i64,
+            sym in "[a-z][a-z0-9_]{0,7}",
+            is_nz in any::<bool>(),
+        ) {
+            let ops = vec![Operand::Reg(rt_name), Operand::Imm(bit),
+                           Operand::Symbol(sym)];
+            let word = enc(&ops, is_nz);
+            let b5 = (word >> 31) & 1;
+            let b40 = (word >> 19) & 0x1F;
+            prop_assert_eq!((b5 << 5) | b40, bit as u32);
+        }
+
+        // Property E — relocation contract: the result carries a TstBr14
+        // relocation whose symbol and addend exactly mirror the input operand.
+        #[test]
+        fn prop_reloc_is_tstbr14_with_symbol(
+            (rt_name, _) in arb_reg(),
+            bit in 0i64..=63i64,
+            (sym_op, sym, off) in arb_sym_operand(),
+            is_nz in any::<bool>(),
+        ) {
+            let ops = vec![Operand::Reg(rt_name), Operand::Imm(bit), sym_op];
+            let reloc = reloc_of(encode_tbz(&ops, is_nz));
+            prop_assert!(matches!(reloc.reloc_type, RelocType::TstBr14));
+            prop_assert_eq!(reloc.symbol, sym);
+            prop_assert_eq!(reloc.addend, off);
+        }
+    }
+}
