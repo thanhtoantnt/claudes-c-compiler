@@ -1852,3 +1852,137 @@ pub(crate) fn encode_neon_scalar_qshrn(operands: &[Operand], u_bit: u32, is_roun
 }
 
 // ── NEON addp (integer pairwise add) — already handled in three-same as addp ──
+
+#[cfg(test)]
+mod movi_pbt_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Arrangements where MOVI accepts any 8-bit immediate.
+    const SIMPLE_ARRS: &[&str] = &["8b", "16b", "4h", "8h", "2s", "4s"];
+    const WIDE_SIMPLE: &[&str] = &["16b", "4s", "8h"];
+
+    fn movi_ops(rd: u32, arr: &str, imm: i64) -> Vec<Operand> {
+        vec![
+            Operand::RegArrangement { reg: format!("v{}", rd), arrangement: arr.to_string() },
+            Operand::Imm(imm),
+        ]
+    }
+
+    fn encode(rd: u32, arr: &str, imm: i64) -> Result<u32, String> {
+        match encode_neon_movi(&movi_ops(rd, arr, imm)) {
+            Ok(EncodeResult::Word(w)) => Ok(w),
+            Ok(other) => Err(format!("unexpected non-Word result: {:?}", other)),
+            Err(e) => Err(e),
+        }
+    }
+
+    // Reconstruct the encoded 8-bit immediate: abc at bits 18-16, defgh at bits 9-5.
+    fn reconstruct_imm8(word: u32) -> u32 {
+        let abc = (word >> 16) & 0x7;
+        let defgh = (word >> 5) & 0x1F;
+        (abc << 5) | defgh
+    }
+
+    proptest! {
+        // 1. The Rd field (bits 4-0) always equals the source register number.
+        #[test]
+        fn prop_rd_field_preserved(rd in 0u32..32u32, imm8 in 0u32..256u32) {
+            for &arr in SIMPLE_ARRS {
+                let word = encode(rd, arr, imm8 as i64).expect("encode should succeed");
+                prop_assert_eq!(word & 0x1F, rd, "Rd mismatch for arr {}", arr);
+            }
+        }
+
+        // 2. The 8-bit immediate round-trips through abc/defgh for every simple form.
+        #[test]
+        fn prop_imm8_roundtrip(rd in 0u32..32u32, imm8 in 0u32..256u32) {
+            for &arr in SIMPLE_ARRS {
+                let word = encode(rd, arr, imm8 as i64).expect("encode should succeed");
+                prop_assert_eq!(reconstruct_imm8(word), imm8, "imm8 roundtrip for arr {}", arr);
+            }
+        }
+
+        // 3. Fixed ISA fields are correct per arrangement: Q bit, bit31==0, cmode.
+        #[test]
+        fn prop_fixed_fields_per_arrangement(rd in 0u32..32u32, imm8 in 0u32..256u32) {
+            for &arr in SIMPLE_ARRS {
+                let word = encode(rd, arr, imm8 as i64).expect("encode should succeed");
+                // bit 31 is always 0 for AArch64 MOVI.
+                prop_assert_eq!((word >> 31) & 1, 0u32, "bit31 for arr {}", arr);
+                // Q (bit 30) selects the wide register arrangement.
+                let expected_q = if WIDE_SIMPLE.contains(&arr) { 1u32 } else { 0u32 };
+                prop_assert_eq!((word >> 30) & 1, expected_q, "Q for arr {}", arr);
+                // cmode (bits 15-12) is arrangement-dependent.
+                let expected_cmode: u32 = match arr {
+                    "8b" | "16b" => 0b1110,
+                    "4h" | "8h" => 0b1000,
+                    "2s" | "4s" => 0b0000,
+                    _ => unreachable!(),
+                };
+                prop_assert_eq!((word >> 12) & 0xF, expected_cmode, "cmode for arr {}", arr);
+            }
+        }
+
+        // 4. .2d byte-pattern contract (differential oracle):
+        //    Ok iff every byte of the 64-bit immediate is 0x00 or 0xFF;
+        //    when Ok, the reconstructed imm8 equals the byte mask, and Q=op=1 (bits31-28=0110).
+        #[test]
+        fn prop_2d_byte_pattern_contract(v in any::<u64>(), rd in 0u32..32u32) {
+            // Independent re-implementation of the validity predicate.
+            let is_valid = {
+                let mut x = v;
+                let mut ok = true;
+                while x != 0 {
+                    let b = x & 0xFF;
+                    if b != 0 && b != 0xFF { ok = false; break; }
+                    x >>= 8;
+                }
+                ok
+            };
+
+            let res = encode(rd, "2d", v as i64);
+            prop_assert_eq!(res.is_ok(), is_valid);
+
+            if let Ok(word) = res {
+                let mut mask = 0u32;
+                for i in 0..8 {
+                    if (v >> (i * 8)) & 0xFF == 0xFF {
+                        mask |= 1 << i;
+                    }
+                }
+                prop_assert_eq!(reconstruct_imm8(word), mask, "2d imm8 mask");
+                // .2d is Q=1, op=1: bits 31-28 == 0110.
+                prop_assert_eq!((word >> 28) & 0xF, 0b0110u32, "2d top nibble");
+            }
+        }
+
+        // 5. Error contracts: too few operands, unsupported arrangements, invalid LSL shift.
+        #[test]
+        fn prop_error_contracts(rd in 0u32..32u32, imm8 in 0u32..256u32, amt in 1u32..32u32) {
+            // Too few operands (destination only, no immediate).
+            let dest_only = encode_neon_movi(&[Operand::RegArrangement {
+                reg: format!("v{}", rd),
+                arrangement: "8b".to_string(),
+            }]);
+            prop_assert!(dest_only.is_err(), "missing immediate must error");
+
+            // Unsupported arrangements (not in the match arms).
+            for &arr in &["1d", "2h", "1q"] {
+                let r = encode_neon_movi(&movi_ops(rd, arr, imm8 as i64));
+                prop_assert!(r.is_err(), "arrangement {} must be rejected", arr);
+            }
+
+            // .2s/.4s only accept LSL shift amounts in {0,8,16,24}; anything else errors.
+            prop_assume!(!matches!(amt, 0 | 8 | 16 | 24));
+            let ops = vec![
+                Operand::RegArrangement { reg: format!("v{}", rd), arrangement: "2s".to_string() },
+                Operand::Imm(imm8 as i64),
+                Operand::Shift { kind: "lsl".to_string(), amount: amt },
+            ];
+            let r = encode_neon_movi(&ops);
+            prop_assert!(r.is_err(), "unsupported LSL #{} must error", amt);
+        }
+    }
+}
+

@@ -63,3 +63,18 @@ Module `pbt_encode_shift_imm` (5 properties, all PASS, 256 cases each via propte
 - `shift_imm_rejects_invalid_operands` — Negative/error contract: missing operands, non-imm third operand, invalid register all rejected.
 
 No bugs found. `encode_shift_imm` is a correct, thin wrapper over `encode_i`.
+
+## PBT coverage: `encode_neon_movi` (src/backend/arm/assembler/encoder/neon.rs)
+
+Module `movi_pbt_tests` (5 properties, all PASS, 256 cases each via proptest):
+
+- `prop_rd_field_preserved` — Invariant: the Rd field (bits 4-0) of the encoded word always equals the source register number, across all valid arrangements.
+- `prop_imm8_roundtrip` — Round-trip oracle: the 8-bit immediate reconstructs exactly from `abc` (bits 18-16) and `defgh` (bits 9-5) for every byte/halfword/word form (`.8b`/`.16b`/`.4h`/`.8h`/`.2s`/`.4s`).
+- `prop_fixed_fields_per_arrangement` — ISA spec check: bit 31 is always 0, the Q bit (bit 30) selects the wide arrangement, and cmode (bits 15-12) matches the per-arrangement constant (`1110`/`1000`/`0000`).
+- `prop_2d_byte_pattern_contract` — Differential oracle: `.2d` returns Ok iff every byte of the 64-bit immediate is `0x00` or `0xFF`; when Ok, the reconstructed imm8 equals the byte-mask and bits 31-28 are `0110` (Q=1, op=1).
+- `prop_error_contracts` — Negative/error contract: missing immediate, unsupported arrangements (`.1d`/`.2h`/`.1q`), and invalid `.2s` LSL shift amounts (not in `{0,8,16,24}`) all return Err.
+
+No bugs found. `encode_neon_movi` correctly implements the AArch64 SIMD modified-immediate encoding across all four arrangement classes.
+
+Verification:
+- `cargo test --lib movi_pbt_tests`
