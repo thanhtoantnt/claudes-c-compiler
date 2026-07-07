@@ -1845,4 +1845,144 @@ mod tests {
         result &= if is_64 { u64::MAX } else { 0xFFFFFFFF };
         result
     }
+
+    // ── encode_shift (LSL/LSR/ASR/ROR; immediate + register forms) ────────
+    // ARMv8 immediate form (alias encodings):
+    //   LSL #imm -> UBFM: sf 10 100110 N immr imms Rn Rd  (immr=(-imm)%w, imms=w-1-imm)
+    //   LSR #imm -> UBFM: sf 10 100110 N immr imms Rn Rd  (immr=imm, imms=w-1)
+    //   ASR #imm -> SBFM: sf 00 100110 N immr imms Rn Rd  (immr=imm, imms=w-1)
+    //   ROR #imm -> EXTR: sf 00 100111 N 0 Rm imms Rn Rd  (Rm=Rn, imms=imm)
+    // ARMv8 register form (data-processing, 2 sources):
+    //   sf 0 S=0 11010110 Rm opcode Rn Rd   where opcode = 0010(op2), op2 = shift_type
+    fn opcode2src_of(w: u32) -> u32 { (w >> 10) & 0x3F } // bits 15:10
+
+    proptest! {
+        // 1. Immediate BFM form (LSL/LSR/ASR): for an in-range shift amount every
+        //    fixed field (sf, opc, 100110, N) and every variable field (immr,
+        //    imms, Rn, Rd) lands exactly where the ARMv8 ARM dictates.
+        #[test]
+        fn shift_immediate_bfm_field_placement(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            st in 0u32..=2u32,        // 0=lsl, 1=lsr, 2=asr
+            imm in 0u32..=63u32,
+            is_64 in any::<bool>(),
+        ) {
+            let width = if is_64 { 64 } else { 32 };
+            prop_assume!(imm < width);
+            // lsr/asr #0 is the lsl-only MOV alias boundary; keep imm>=1 for them.
+            if st != 0 { prop_assume!(imm >= 1); }
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rn_op = if is_64 { xreg(rn) } else { Operand::Reg(format!("w{}", rn)) };
+            let ops = vec![rd_op, rn_op, Operand::Imm(imm as i64)];
+            let w = expect_word(encode_shift(&ops, st));
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(opcode6_of(w), 0b100110);     // BFM fixed op (bits 28:23)
+            prop_assert_eq!(n22_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+            match st {
+                0 => { // LSL -> UBFM (opc=10)
+                    prop_assert_eq!(opc_of(w), 0b10);
+                    prop_assert_eq!(immr_of(w), (width - imm) % width);
+                    prop_assert_eq!(imms_of(w), width - 1 - imm);
+                }
+                1 => { // LSR -> UBFM (opc=10)
+                    prop_assert_eq!(opc_of(w), 0b10);
+                    prop_assert_eq!(immr_of(w), imm);
+                    prop_assert_eq!(imms_of(w), width - 1);
+                }
+                _ => { // ASR -> SBFM (opc=00)
+                    prop_assert_eq!(opc_of(w), 0b00);
+                    prop_assert_eq!(immr_of(w), imm);
+                    prop_assert_eq!(imms_of(w), width - 1);
+                }
+            }
+        }
+
+        // 2. ROR immediate form -> EXTR: every fixed field (sf, opc=00, 100111,
+        //    N, bit21=0) and variable field (Rm==Rn, imms=imm, Rn, Rd) is placed
+        //    per the ARMv8 ARM for in-range rotation amounts.
+        #[test]
+        fn shift_immediate_ror_extr_field_placement(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            imm in 1u32..=63u32,
+            is_64 in any::<bool>(),
+        ) {
+            let width = if is_64 { 64 } else { 32 };
+            prop_assume!(imm < width);
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rn_op = if is_64 { xreg(rn) } else { Operand::Reg(format!("w{}", rn)) };
+            let ops = vec![rd_op, rn_op, Operand::Imm(imm as i64)];
+            let w = expect_word(encode_shift(&ops, 0b11));
+            // EXTR: sf 00 100111 N 0 Rm imms Rn Rd
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(opc_of(w), 0b00);
+            prop_assert_eq!(opcode6_of(w), 0b100111);     // EXTR fixed op (bits 28:23)
+            prop_assert_eq!(n22_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(n21_of(w), 0);                // bit 21 = 0
+            prop_assert_eq!(rm_of(w), rn);                // Rm == Rn for ROR
+            prop_assert_eq!(imms_of(w), imm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 3. Register form (data-processing, 2 sources): every fixed field
+        //    (sf, bits30:29=0S, 11010, bit21=0) and variable field (Rm, opcode,
+        //    Rn, Rd) is placed per the ARMv8 ARM for all four shift kinds.
+        #[test]
+        fn shift_register_form_field_placement(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            st in 0u32..=3u32,       // 0=lsl,1=lsr,2=asr,3=ror
+            is_64 in any::<bool>(),
+        ) {
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rn_op = if is_64 { xreg(rn) } else { Operand::Reg(format!("w{}", rn)) };
+            let rm_op = if is_64 { xreg(rm) } else { Operand::Reg(format!("w{}", rm)) };
+            let ops = vec![rd_op, rn_op, rm_op];
+            let w = expect_word(encode_shift(&ops, st));
+            // sf 0 S=0 11010110 Rm opcode Rn Rd
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(opc_of(w), 0b00);            // bits 30:29 = 0S, S=0
+            prop_assert_eq!(opcode5_of(w), 0b11010);     // fixed op (bits 28:24)
+            prop_assert_eq!(n21_of(w), 0);               // bit 21 = 0
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(opcode2src_of(w), 0b0010_00 | st); // opcode = 0010(op2)
+        }
+
+        // 4. NEGATIVE CONTRACT: the immediate shift amount has a finite legal
+        //    range (0..width-1 for LSL, 1..width-1 for ROR; ARMv8 ARM). A shift
+        //    amount strictly greater than the maximum, or negative, is UNDEFINED
+        //    and MUST be rejected with Err (as GAS/LLVM do) — never silently
+        //    wrapped via `*imm as u32` + modular arithmetic into a bogus word.
+        #[test]
+        fn shift_immediate_rejects_out_of_range(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            st in 0u32..=3u32,
+            is_64 in any::<bool>(),
+            over in 1u32..=200u32,
+            neg in any::<bool>(),
+        ) {
+            let width = if is_64 { 64 } else { 32 };
+            let imm: i64 = if neg {
+                -(over as i64)
+            } else {
+                (width + over) as i64   // strictly above width-1 for every kind
+            };
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rn_op = if is_64 { xreg(rn) } else { Operand::Reg(format!("w{}", rn)) };
+            let ops = vec![rd_op, rn_op, Operand::Imm(imm)];
+            prop_assert!(
+                encode_shift(&ops, st).is_err(),
+                "expected Err for out-of-range immediate shift {} (width={}, st={})",
+                imm, width, st
+            );
+        }
+    }
 }
