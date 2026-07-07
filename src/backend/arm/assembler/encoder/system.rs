@@ -881,3 +881,139 @@ mod proptest_msr {
         assert_eq!(upper, lower);
     }
 }
+
+// ── Property-based tests for sysreg_encoding ─────────────────────────────
+// sysreg_encoding packs the five AArch64 system-register addressing fields
+// into the 16-bit "system register encoding" used by MRS/MSR:
+//
+//     op0[15:14] | op1[13:11] | CRn[10:7] | CRm[6:3] | op2[2:0]
+//
+// Each field is masked to its declared width (op0&3, op1&7, CRn&0xF,
+// CRm&0xF, op2&7) before being shifted into place, so the fields occupy
+// pairwise-disjoint bit ranges and together span exactly bits[15:0].
+//
+// Oracle: field-extraction round-trip. Rather than reproducing the function
+// body, we extract each field back out of the result with its declared
+// (mask, shift) and assert it equals the masked input. This independently
+// pins both the masking and the placement of every field.
+#[cfg(test)]
+mod proptest_sysreg {
+    use super::sysreg_encoding;
+    use proptest::prelude::*;
+
+    proptest! {
+        // 1. Bounding: the output of an AArch64 sysreg encoding is always a
+        //    16-bit value (bits[15:0]), regardless of how large the inputs are.
+        #[test]
+        fn sysreg_output_fits_in_16_bits(
+            op0 in any::<u32>(),
+            op1 in any::<u32>(),
+            crn in any::<u32>(),
+            crm in any::<u32>(),
+            op2 in any::<u32>(),
+        ) {
+            let enc = sysreg_encoding(op0, op1, crn, crm, op2);
+            prop_assert!(enc <= 0xFFFF, "encoding must fit in 16 bits, got {:#x}", enc);
+        }
+
+        // 2. Masking invariance: the high bits of each input are ignored.
+        //    Encoding the raw inputs equals encoding each input masked down to
+        //    its legal width.
+        #[test]
+        fn sysreg_ignores_high_bits_of_inputs(
+            op0 in any::<u32>(),
+            op1 in any::<u32>(),
+            crn in any::<u32>(),
+            crm in any::<u32>(),
+            op2 in any::<u32>(),
+        ) {
+            let raw = sysreg_encoding(op0, op1, crn, crm, op2);
+            let masked = sysreg_encoding(op0 & 3, op1 & 7, crn & 0xF, crm & 0xF, op2 & 7);
+            prop_assert_eq!(raw, masked);
+        }
+
+        // 3. Field-extraction oracle: every field round-trips back out of the
+        //    result at its declared (shift, mask). This is the inverse of the
+        //    packing and pins both placement and width for all five fields.
+        #[test]
+        fn sysreg_each_field_roundtrips_at_expected_position(
+            op0 in any::<u32>(),
+            op1 in any::<u32>(),
+            crn in any::<u32>(),
+            crm in any::<u32>(),
+            op2 in any::<u32>(),
+        ) {
+            let enc = sysreg_encoding(op0, op1, crn, crm, op2);
+            prop_assert_eq!((enc >> 14) & 0x3, op0 & 0x3, "op0 field at [15:14]");
+            prop_assert_eq!((enc >> 11) & 0x7, op1 & 0x7, "op1 field at [13:11]");
+            prop_assert_eq!((enc >> 7)  & 0xF, crn & 0xF, "CRn field at [10:7]");
+            prop_assert_eq!((enc >> 3)  & 0xF, crm & 0xF, "CRm field at [6:3]");
+            prop_assert_eq!(enc         & 0x7, op2 & 0x7, "op2 field at [2:0]");
+        }
+
+        // 4. Injectivity over legal ranges: distinct (op0,op1,CRn,CRm,op2)
+        //    tuples — each already within its field width — yield distinct
+        //    encodings. Holds precisely because the fields occupy disjoint
+        //    bits; a collision would reveal an overlap bug.
+        #[test]
+        fn sysreg_injective_over_valid_ranges(
+            a0 in 0u32..=3, a1 in 0u32..=7, acn in 0u32..=15, acm in 0u32..=15, a2 in 0u32..=7,
+            b0 in 0u32..=3, b1 in 0u32..=7, bcn in 0u32..=15, bcm in 0u32..=15, b2 in 0u32..=7,
+        ) {
+            let a = (a0, a1, acn, acm, a2);
+            let b = (b0, b1, bcn, bcm, b2);
+            prop_assume!(a != b);
+            let wa = sysreg_encoding(a0, a1, acn, acm, a2);
+            let wb = sysreg_encoding(b0, b1, bcn, bcm, b2);
+            prop_assert_ne!(wa, wb);
+        }
+
+        // 5. Bit-field isolation: mutating exactly one field changes only that
+        //    field's bits in the output and leaves every other bit untouched,
+        //    and the mutated bits equal the new value masked. Parametrised over
+        //    which of the five fields is mutated.
+        #[test]
+        fn sysreg_changing_one_field_isolates_to_its_bits(
+            op0 in any::<u32>(),
+            op1 in any::<u32>(),
+            crn in any::<u32>(),
+            crm in any::<u32>(),
+            op2 in any::<u32>(),
+            delta in any::<u32>(),
+            field in 0u8..5,
+        ) {
+            let base = sysreg_encoding(op0, op1, crn, crm, op2);
+            let (n0, n1, ncn, ncm, n2) = match field {
+                0 => (delta, op1, crn, crm, op2),
+                1 => (op0, delta, crn, crm, op2),
+                2 => (op0, op1, delta, crm, op2),
+                3 => (op0, op1, crn, delta, op2),
+                _ => (op0, op1, crn, crm, delta),
+            };
+            let changed = sysreg_encoding(n0, n1, ncn, ncm, n2);
+            let (mask, shift): (u32, u32) = match field {
+                0 => (0x3, 14),
+                1 => (0x7, 11),
+                2 => (0xF, 7),
+                3 => (0xF, 3),
+                _ => (0x7, 0),
+            };
+            // Bits outside the mutated field must be identical.
+            prop_assert_eq!(changed & !(mask << shift), base & !(mask << shift));
+            // The mutated field's bits equal the new (masked) value.
+            prop_assert_eq!((changed >> shift) & mask, delta & mask);
+        }
+    }
+
+    // Deterministic companion: the canonical reference encoding for SCTLR_EL1
+    // is s3_0_c1_c0_0 -> sysreg_encoding(3, 0, 1, 0, 0). The ARM ARM value is
+    // 0xC080 (the table entry used by encode_mrs/encode_msr for sctlr_el1):
+    // bits[15:14]=op0=3, bits[10:7]=CRn=1.
+    #[test]
+    fn sysreg_known_canonical_values() {
+        assert_eq!(sysreg_encoding(3, 0, 1, 0, 0), 0xC080, "SCTLR_EL1");
+        assert_eq!(sysreg_encoding(2, 0, 0, 0, 0), 0x8000, "lowest op0 bit");
+        assert_eq!(sysreg_encoding(3, 7, 0xF, 0xF, 7), 0xFFFF, "all-ones saturates to 16 bits");
+        assert_eq!(sysreg_encoding(0, 0, 0, 0, 0), 0, "all-zero inputs");
+    }
+}
