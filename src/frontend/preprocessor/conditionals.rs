@@ -810,3 +810,167 @@ impl<'a> ExprParser<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::eval_const_expr;
+    use proptest::prelude::*;
+
+    fn expr_strategy() -> impl Strategy<Value = String> {
+        let atom = prop_oneof![
+            Just("0".to_string()),
+            Just("1".to_string()),
+            Just("42".to_string()),
+            Just("0U".to_string()),
+            Just("0x10".to_string()),
+            Just("0x8000000000000000".to_string()),
+            Just("07".to_string()),
+            Just("3ULL".to_string()),
+            Just("'a'".to_string()),
+            Just(r"'\n'".to_string()),
+            Just(r"'\0'".to_string()),
+            Just("true".to_string()),
+            Just("false".to_string()),
+        ];
+
+        atom.prop_recursive(3, 96, 16, |inner| {
+            prop_oneof![
+                inner.clone().prop_map(|expr| format!("({})", expr)),
+                (prop_oneof![
+                    Just("!".to_string()),
+                    Just("+".to_string()),
+                    Just("-".to_string()),
+                    Just("~".to_string()),
+                ], inner.clone())
+                .prop_map(|(op, expr)| format!("{}{}", op, expr)),
+                (inner.clone(), prop_oneof![
+                    Just(" && ".to_string()),
+                    Just(" || ".to_string()),
+                    Just(" + ".to_string()),
+                    Just(" - ".to_string()),
+                    Just(" * ".to_string()),
+                    Just(" / ".to_string()),
+                    Just(" % ".to_string()),
+                    Just(" << ".to_string()),
+                    Just(" >> ".to_string()),
+                    Just(" & ".to_string()),
+                    Just(" | ".to_string()),
+                    Just(" ^ ".to_string()),
+                    Just(" == ".to_string()),
+                    Just(" != ".to_string()),
+                    Just(" < ".to_string()),
+                    Just(" > ".to_string()),
+                    Just(" <= ".to_string()),
+                    Just(" >= ".to_string()),
+                ], inner.clone())
+                .prop_map(|(lhs, op, rhs)| format!("({}{}{})", lhs, op, rhs)),
+                (inner.clone(), inner.clone(), inner.clone())
+                    .prop_map(|(cond, then_expr, else_expr)| {
+                        format!("({} ? {} : {})", cond, then_expr, else_expr)
+                    }),
+            ]
+        })
+    }
+
+    fn identifier_strategy() -> impl Strategy<Value = String> {
+        let first = prop_oneof![
+            Just('a'),
+            Just('b'),
+            Just('c'),
+            Just('x'),
+            Just('y'),
+            Just('z'),
+            Just('_'),
+            Just('A'),
+            Just('B'),
+            Just('C'),
+        ];
+        let rest = prop::collection::vec(
+            prop_oneof![
+                Just('a'),
+                Just('b'),
+                Just('c'),
+                Just('x'),
+                Just('y'),
+                Just('z'),
+                Just('_'),
+                Just('0'),
+                Just('1'),
+                Just('2'),
+                Just('3'),
+                Just('4'),
+                Just('5'),
+                Just('6'),
+                Just('7'),
+                Just('8'),
+                Just('9'),
+                Just('A'),
+                Just('B'),
+                Just('C'),
+            ],
+            0..8,
+        );
+
+        (first, rest)
+            .prop_map(|(head, tail)| std::iter::once(head).chain(tail).collect())
+            .prop_filter("exclude reserved truth literals", |ident| ident != "true" && ident != "false")
+    }
+
+    fn known_condition_strategy() -> impl Strategy<Value = (String, bool)> {
+        prop_oneof![
+            Just(("0".to_string(), false)),
+            Just(("1".to_string(), true)),
+            Just(("42".to_string(), true)),
+            Just(("0x10".to_string(), true)),
+            Just(("07".to_string(), true)),
+            Just(("true".to_string(), true)),
+            Just(("false".to_string(), false)),
+            Just((r"'\0'".to_string(), false)),
+            Just((r"'\n'".to_string(), true)),
+        ]
+    }
+
+    // Oracle: Algebraic — Metamorphic (outer parentheses and whitespace)
+    // Stronger considered:
+    //   - State Machine (3): rejected — eval_const_expr is pure and has no lifecycle state
+    //   - Differential (7): rejected — no second implementation of the same evaluator contract
+    // Weaker available: Invariant, Reference, Crash-Only
+    proptest! {
+        #[test]
+        fn eval_const_expr_preserves_outer_parens_and_whitespace(expr in expr_strategy()) {
+            let baseline = eval_const_expr(&expr);
+            let decorated = format!(" \t(  {}  )\n", expr);
+            prop_assert_eq!(eval_const_expr(&decorated), baseline);
+        }
+    }
+
+    // Oracle: Reference — Unknown identifiers evaluate to false
+    // Stronger considered:
+    //   - State Machine (3): rejected — no state transitions or lifecycle
+    //   - Differential (7): rejected — no independent evaluator implementation
+    // Weaker available: Crash-Only
+    proptest! {
+        #[test]
+        fn eval_const_expr_treats_bare_identifiers_as_false(ident in identifier_strategy()) {
+            prop_assert!(!eval_const_expr(&ident));
+        }
+    }
+
+    // Oracle: Reference — Ternary branch selection for known conditions
+    // Stronger considered:
+    //   - State Machine (3): rejected — the function is stateless
+    //   - Differential (7): rejected — there is no alternate implementation to compare
+    // Weaker available: Metamorphic, Invariant, Crash-Only
+    proptest! {
+        #[test]
+        fn eval_const_expr_selects_ternary_branch((cond, cond_truth) in known_condition_strategy(), then_expr in expr_strategy(), else_expr in expr_strategy()) {
+            let ternary = format!("({} ? {} : {})", cond, then_expr, else_expr);
+            let expected = if cond_truth {
+                eval_const_expr(&then_expr)
+            } else {
+                eval_const_expr(&else_expr)
+            };
+            prop_assert_eq!(eval_const_expr(&ternary), expected);
+        }
+    }
+}

@@ -1,68 +1,136 @@
-# Property Ledger: `src/frontend/lexer/scan.rs`
+# Property Ledger: `src/frontend/preprocessor/conditionals.rs`
 
-## `Lexer::tokenize` preserves token kinds across skipped regions
+## `eval_const_expr` preserves truth value under redundant outer parentheses and whitespace
 - Tier: 3
-- Rationale: The lexer contract explicitly says it skips ASCII whitespace, line markers, line comments, and block comments before dispatching on the next token. A metamorphic property that compares token kind sequences before and after inserting only skipped regions exercises the real skip logic more strongly than a shallow unit example. Stronger considered: state machine (rejected — no explicit lifecycle/state transitions), differential (rejected — no second implementation). Evidence: `src/frontend/lexer/README.md:144`, `src/frontend/lexer/README.md:156`, `src/frontend/lexer/README.md:161`, `src/frontend/lexer/README.md:165`, `src/frontend/lexer/scan.rs:76`, `src/frontend/lexer/scan.rs:127`.
-- Test file: `src/frontend/lexer/scan.rs`
-- Status: approved
+- Rationale: The README documents `eval_const_expr` as a recursive-descent parser for C preprocessor constant expressions, and the implementation trims whitespace before parsing. Wrapping a valid expression in extra parentheses and whitespace should not change the truth value. Stronger considered: state machine (rejected — `eval_const_expr` is pure and has no lifecycle/state), differential (rejected — no independent evaluator implementation). Evidence: `src/frontend/preprocessor/README.md:277-294`, `src/frontend/preprocessor/conditionals.rs:246-259`.
+- Test file: `src/frontend/preprocessor/conditionals.rs`
+- Status: passing
 - Counterexample: (none)
 
 ```property
-function: frontend::lexer::Lexer::tokenize
+function: frontend::preprocessor::eval_const_expr
 oracle: algebraic.metamorphic
 predicate:
   quantifier: forall
-  vars: [fragments, separators]
-  relation:
-    op: eq
-    lhs: lex_kinds(join_with_separators(fragments, separators))
-    rhs: lex_kinds(fragments.join(" "))
+  vars: [expr]
+  body: 'eval_const_expr(&format!(" \\t(  {}  )\\n", expr)) == eval_const_expr(&expr)'
 generators:
-  fragments: { gen: list, elem: { gen: oneof, options: [{ gen: const, value: "foo" }, { gen: const, value: "bar" }, { gen: const, value: "_x" }, { gen: const, value: "$d" }, { gen: const, value: "int" }, { gen: const, value: "return" }, { gen: const, value: "42" }, { gen: const, value: "0x1f" }, { gen: const, value: "3.14" }, { gen: const, value: "+" }, { gen: const, value: "-" }, { gen: const, value: "*" }, { gen: const, value: "=" }, { gen: const, value: "==" }, { gen: const, value: "&&" }, { gen: const, value: "..." }, { gen: const, value: "->" }, { gen: const, value: "(" }, { gen: const, value: ")" }, { gen: const, value: ";" }] }, minLen: 1, maxLen: 12 }
-  separators: { gen: list, elem: { gen: oneof, options: [{ gen: const, value: " " }, { gen: const, value: "\t" }, { gen: const, value: "\n" }, { gen: const, value: "/*c*/" }, { gen: const, value: "//c\n" }, { gen: const, value: "\n# 1 \"marker.c\"\n" }] }, minLen: 0, maxLen: 11 }
-evidence: src/frontend/lexer/README.md:144-165, src/frontend/lexer/scan.rs:76, src/frontend/lexer/scan.rs:127
+  expr:
+    gen: recursive
+    depth: 3
+    maxSize: 96
+    branchFactor: 16
+    base:
+      gen: oneof
+      options:
+        - { gen: const, value: "0" }
+        - { gen: const, value: "1" }
+        - { gen: const, value: "42" }
+        - { gen: const, value: "0U" }
+        - { gen: const, value: "0x10" }
+        - { gen: const, value: "0x8000000000000000" }
+        - { gen: const, value: "07" }
+        - { gen: const, value: "3ULL" }
+        - { gen: const, value: "'a'" }
+        - { gen: const, value: "'\\n'" }
+        - { gen: const, value: "'\\0'" }
+        - { gen: const, value: "true" }
+        - { gen: const, value: "false" }
+evidence: src/frontend/preprocessor/README.md:277-294, src/frontend/preprocessor/conditionals.rs:250-259
 ```
 
-## `Lexer::set_gnu_extensions` controls bare GNU keyword recognition
+## `eval_const_expr` treats bare identifiers as false
 - Tier: 4
-- Rationale: The lexer README explicitly documents that bare `typeof` and `asm` are keywords only when `gnu_extensions` is enabled, while `__typeof__` and `__asm__` remain keywords in strict mode. This is a direct spec table, so a reference oracle is appropriate. Stronger considered: differential (rejected — no second implementation), algebraic (rejected — this is a finite closed mapping, not an inverse/idempotence/metamorphic law). Evidence: `src/frontend/lexer/README.md:332`, `src/frontend/lexer/README.md:334`, `src/frontend/lexer/README.md:336`.
-- Test file: `src/frontend/lexer/scan.rs`
-- Status: approved
+- Rationale: The implementation's `parse_primary` maps undefined identifiers to `0`, except for the two special literals `true` and `false`. This is a direct negative/reference contract from the code and README, and it is stronger than a crash-only check because the output is fully specified. Stronger considered: state machine (rejected — pure function), differential (rejected — no second implementation). Evidence: `src/frontend/preprocessor/README.md:271-275`, `src/frontend/preprocessor/conditionals.rs:795-804`.
+- Test file: `src/frontend/preprocessor/conditionals.rs`
+- Status: passing
 - Counterexample: (none)
 
 ```property
-function: frontend::lexer::Lexer::set_gnu_extensions
+function: frontend::preprocessor::eval_const_expr
 oracle: reference
 predicate:
   quantifier: forall
-  vars: [word, gnu_extensions]
-  relation:
-    op: eq
-    lhs: lex_single_token_kind(word, gnu_extensions)
-    rhs: expected_keyword_kind(word, gnu_extensions)
+  vars: [ident]
+  body: '!eval_const_expr(&ident)'
 generators:
-  word: { gen: oneof, options: [{ gen: const, value: "typeof" }, { gen: const, value: "asm" }, { gen: const, value: "__typeof__" }, { gen: const, value: "__asm__" }] }
-  gnu_extensions: { gen: bool }
-evidence: src/frontend/lexer/README.md:332-336
+  ident:
+    gen: string
+    minLen: 1
+    maxLen: 8
+    alphabet: [a-zA-Z0-9_]
+    first: [a-zA-Z_]
+evidence: src/frontend/preprocessor/README.md:271-275, src/frontend/preprocessor/conditionals.rs:795-804
 ```
 
-## `Lexer::tokenize` emits one trailing EOF with monotonic spans
-- Tier: 3
-- Rationale: `tokenize()` is documented as repeatedly calling `next_token()` until `Eof`, and every token carries a byte-offset `Span`. This invariant checks the real lexer over generated valid token/comment fragments and catches missing EOF, duplicate EOF, out-of-bounds spans, and non-monotonic source locations. Stronger considered: state machine (rejected — no explicit public state lifecycle), differential (rejected — no independent lexer implementation), round-trip/idempotence (rejected — lexer has no serializer/in-place normalizer). Evidence: `src/frontend/lexer/README.md:132`, `src/frontend/lexer/README.md:135`, `src/frontend/lexer/README.md:287`.
-- Test file: `src/frontend/lexer/scan.rs`
-- Status: approved
+## `eval_const_expr` selects the correct ternary branch for known conditions
+- Tier: 4
+- Rationale: The parser implements `?:` in `parse_ternary`, and the README lists ternary expressions as supported. For a condition whose truth value is already known from a sourced literal, the result should match the corresponding branch. Stronger considered: state machine (rejected — no lifecycle/state), differential (rejected — no alternative evaluator). Evidence: `src/frontend/preprocessor/README.md:277-294`, `src/frontend/preprocessor/conditionals.rs:481-490`.
+- Test file: `src/frontend/preprocessor/conditionals.rs`
+- Status: passing
 - Counterexample: (none)
 
 ```property
-function: frontend::lexer::Lexer::tokenize
-oracle: algebraic.invariant
+function: frontend::preprocessor::eval_const_expr
+oracle: reference
 predicate:
   quantifier: forall
-  vars: [source_fragments]
-  relation:
-    op: holds
-    expr: has_single_trailing_eof_and_monotonic_in_bounds_spans(Lexer::new(source_fragments.concat(), 0).tokenize())
+  vars: [cond_case, then_expr, else_expr]
+  body: '{ let (cond, cond_truth) = cond_case; eval_const_expr(&format!("({} ? {} : {})", cond, then_expr, else_expr)) == (if cond_truth { eval_const_expr(&then_expr) } else { eval_const_expr(&else_expr) }) }'
 generators:
-  source_fragments: { gen: list, elem: { gen: oneof, options: [{ gen: const, value: "foo" }, { gen: const, value: "$bar" }, { gen: const, value: "int" }, { gen: const, value: "return" }, { gen: const, value: "42" }, { gen: const, value: "0x2a" }, { gen: const, value: "3.0" }, { gen: const, value: "\"s\"" }, { gen: const, value: "'c'" }, { gen: const, value: "+" }, { gen: const, value: "-" }, { gen: const, value: "*" }, { gen: const, value: "/" }, { gen: const, value: "%" }, { gen: const, value: "=" }, { gen: const, value: "==" }, { gen: const, value: "&&" }, { gen: const, value: "||" }, { gen: const, value: "..." }, { gen: const, value: "->" }, { gen: const, value: "(" }, { gen: const, value: ")" }, { gen: const, value: "{" }, { gen: const, value: "}" }, { gen: const, value: ";" }, { gen: const, value: " " }, { gen: const, value: "\t" }, { gen: const, value: "\n" }, { gen: const, value: "/*c*/" }, { gen: const, value: "//c\n" }, { gen: const, value: "\n# 7 \"marker.c\"\n" }] }, minLen: 0, maxLen: 64 }
-evidence: src/frontend/lexer/README.md:132-135,287
+  cond_case:
+    gen: oneof
+    options:
+      - { gen: const, value: ["0", false] }
+      - { gen: const, value: ["1", true] }
+      - { gen: const, value: ["42", true] }
+      - { gen: const, value: ["0x10", true] }
+      - { gen: const, value: ["07", true] }
+      - { gen: const, value: ["true", true] }
+      - { gen: const, value: ["false", false] }
+      - { gen: const, value: ["'\\0'", false] }
+      - { gen: const, value: ["'\\n'", true] }
+  then_expr:
+    gen: recursive
+    depth: 3
+    maxSize: 96
+    branchFactor: 16
+    base:
+      gen: oneof
+      options:
+        - { gen: const, value: "0" }
+        - { gen: const, value: "1" }
+        - { gen: const, value: "42" }
+        - { gen: const, value: "0U" }
+        - { gen: const, value: "0x10" }
+        - { gen: const, value: "0x8000000000000000" }
+        - { gen: const, value: "07" }
+        - { gen: const, value: "3ULL" }
+        - { gen: const, value: "'a'" }
+        - { gen: const, value: "'\\n'" }
+        - { gen: const, value: "'\\0'" }
+        - { gen: const, value: "true" }
+        - { gen: const, value: "false" }
+  else_expr:
+    gen: recursive
+    depth: 3
+    maxSize: 96
+    branchFactor: 16
+    base:
+      gen: oneof
+      options:
+        - { gen: const, value: "0" }
+        - { gen: const, value: "1" }
+        - { gen: const, value: "42" }
+        - { gen: const, value: "0U" }
+        - { gen: const, value: "0x10" }
+        - { gen: const, value: "0x8000000000000000" }
+        - { gen: const, value: "07" }
+        - { gen: const, value: "3ULL" }
+        - { gen: const, value: "'a'" }
+        - { gen: const, value: "'\\n'" }
+        - { gen: const, value: "'\\0'" }
+        - { gen: const, value: "true" }
+        - { gen: const, value: "false" }
+evidence: src/frontend/preprocessor/README.md:283-294, src/frontend/preprocessor/conditionals.rs:481-490, src/frontend/preprocessor/conditionals.rs:795-804
 ```

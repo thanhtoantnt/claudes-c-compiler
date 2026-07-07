@@ -642,3 +642,51 @@ impl IrConst {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn to_f64_matches_rust_cast_for_integers() {
+        proptest!(|(v in any::<i128>())| {
+            let c = IrConst::I128(v);
+            let got = c.to_f64().expect("integer constants should convert to f64");
+            prop_assert_eq!(got.to_bits(), (v as f64).to_bits());
+        });
+    }
+
+    #[test]
+    fn to_f64_matches_rust_cast_for_f32() {
+        proptest!(|(v in any::<f32>())| {
+            let c = IrConst::F32(v);
+            let got = c.to_f64().expect("f32 constants should convert to f64");
+            prop_assert_eq!(got.to_bits(), (v as f64).to_bits());
+        });
+    }
+
+    #[test]
+    fn to_f64_is_identity_for_f64() {
+        proptest!(|(v in any::<f64>())| {
+            let c = IrConst::F64(v);
+            let got = c.to_f64().expect("f64 constants should convert to f64");
+            prop_assert_eq!(got.to_bits(), v.to_bits());
+        });
+    }
+
+    #[test]
+    fn to_f64_returns_stored_value_for_long_double() {
+        proptest!(|(v in any::<f64>(), bytes in any::<[u8; 16]>())| {
+            let c = IrConst::LongDouble(v, bytes);
+            let got = c.to_f64().expect("long double constants should convert to f64");
+            prop_assert_eq!(got.to_bits(), v.to_bits());
+        });
+    }
+
+    #[test]
+    fn to_f64_maps_zero_to_positive_zero() {
+        let got = IrConst::Zero.to_f64().expect("zero constant should convert to f64");
+        assert_eq!(got.to_bits(), 0.0f64.to_bits());
+    }
+}
