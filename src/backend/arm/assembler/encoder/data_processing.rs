@@ -2573,4 +2573,152 @@ mod tests {
             prop_assert!(encode_sbc(&imm_third, false).is_err());
         }
     }
+
+    // ── encode_bic (BIC = AND with N=1, i.e. AND NOT) ──────────────────────
+    // ARMv8 logical (shifted register): sf opc shift 01010 N Rm imm6 Rn Rd
+    //   BIC = opc=00, N=1 (bit 21). Distinct from AND (opc=00,N=0), ORR (01,0),
+    //   EOR (10,0), ORN (01,1), EON (10,1), BICS (11,1).
+    // ARMv8 logical (immediate): sf opc 100100 N immr imms Rn Rd
+    //   BIC #imm is an alias of AND #~imm (opc=00).
+    // NEON vector: 0 Q 0 01110 01 1 Rm 000111 Rn Rd.
+    // Reuses sf_of/opc_of/opcode5_of/opcode6_of/n21_of/shift_type_of/
+    // shift_amt_of/immr_of/imms_of/rm_of/rn_of/rd_of/expect_word/xreg from above.
+    fn q_of(w: u32) -> u32 { (w >> 30) & 1 }  // NEON Q (quadword) bit
+    fn b31_of(w: u32) -> u32 { (w >> 31) & 1 }
+    fn b29_of(w: u32) -> u32 { (w >> 29) & 1 }
+    fn op5_28_of(w: u32) -> u32 { (w >> 24) & 0x1F } // bits 28:24 (NEON fixed op)
+    fn op2_23_of(w: u32) -> u32 { (w >> 22) & 0x3 }  // bits 23:22 (NEON size/op)
+    fn fixed6_of(w: u32) -> u32 { (w >> 10) & 0x3F } // bits 15:10 (NEON fixed 000111)
+    fn neonreg(n: u32, arr: &str) -> Operand {
+        Operand::RegArrangement { reg: format!("v{}", n), arrangement: arr.into() }
+    }
+
+    proptest! {
+        // 1. REGISTER-FORM FIELD PLACEMENT: BIC Xd, Xn, Xm (no shift), both widths.
+        //    Every fixed and variable field lands per the ARMv8 spec: opc=00
+        //    (bits 30:29, same family as AND), fixed op 01010 (bits 28:24), N=1
+        //    (bit 21, distinguishing BIC from AND), zero shift, and Rm/Rn/Rd placed.
+        #[test]
+        fn bic_register_form_field_placement(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            is_64 in any::<bool>(),
+        ) {
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rn_op = if is_64 { xreg(rn) } else { Operand::Reg(format!("w{}", rn)) };
+            let rm_op = if is_64 { xreg(rm) } else { Operand::Reg(format!("w{}", rm)) };
+            let ops = vec![rd_op, rn_op, rm_op];
+            let w = expect_word(encode_bic(&ops));
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(opc_of(w), 0b00);          // AND-family (BIC)
+            prop_assert_eq!(opcode5_of(w), 0b01010);   // logical shifted register
+            prop_assert_eq!(n21_of(w), 1);             // N=1 marks the NOT variants
+            prop_assert_eq!(shift_type_of(w), 0);
+            prop_assert_eq!(shift_amt_of(w), 0);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 2. REGISTER-FORM SHIFT MAPPING: the four shift kinds map to the 2-bit
+        //    shift field (lsl=00,lsr=01,asr=10,ror=11) and, for X registers,
+        //    imm6 (0..=63) is placed verbatim. The N=1 signature is preserved
+        //    regardless of the shift operand (so BIC never degrades to AND).
+        #[test]
+        fn bic_register_form_shift_mapping(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            sk in 0u32..=3u32, amount in 0u32..=63u32,
+        ) {
+            let (kind, want) = match sk {
+                0 => ("lsl", 0u32), 1 => ("lsr", 1u32),
+                2 => ("asr", 2u32), _ => ("ror", 3u32),
+            };
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm),
+                           Operand::Shift { kind: kind.into(), amount }];
+            let w = expect_word(encode_bic(&ops));
+            prop_assert_eq!(opc_of(w), 0b00);
+            prop_assert_eq!(opcode5_of(w), 0b01010);
+            prop_assert_eq!(n21_of(w), 1);
+            prop_assert_eq!(shift_type_of(w), want);
+            prop_assert_eq!(shift_amt_of(w), amount); // 0..63 verbatim (X register)
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 3. ALGEBRAIC / DIFFERENTIAL ORACLE: BIC Xd, Xn, #imm is defined as
+        //    AND Xd, Xn, #(~imm) (the immediate is bitwise-inverted, then
+        //    encoded as an AND bitmask immediate). Therefore encode_bic with
+        //    #imm MUST produce a bit-identical word to encode_logical (opc=00,
+        //    i.e. AND) with #(~imm), and the two succeed or fail together for
+        //    every immediate (a value is encodable as BIC iff ~value is encodable
+        //    as AND). This is the defining equivalence of the alias.
+        #[test]
+        fn bic_immediate_equals_and_of_inverted(
+            rd in 0u32..=30, rn in 0u32..=30,
+            imm64 in any::<u64>(), is_64 in any::<bool>(),
+        ) {
+            let mask = if is_64 { u64::MAX } else { 0xFFFF_FFFF };
+            let eff = imm64 & mask;                 // value the encoder actually sees
+            let inv = (!eff) & mask;                // ~value in the active width
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rn_op = if is_64 { xreg(rn) } else { Operand::Reg(format!("w{}", rn)) };
+            let bic_ops = vec![rd_op.clone(), rn_op.clone(), Operand::Imm(eff as i64)];
+            let and_ops = vec![rd_op, rn_op, Operand::Imm(inv as i64)];
+            let bic = encode_bic(&bic_ops);
+            let and = encode_logical(&and_ops, 0b00); // opc=00 => AND
+            // Encodability is identical: BIC accepts iff AND accepts the inverse.
+            prop_assert_eq!(bic.is_ok(), and.is_ok());
+            if let (Ok(b), Ok(a)) = (bic, and) {
+                let bw = match b { EncodeResult::Word(x) => x, _ => unreachable!() };
+                let aw = match a { EncodeResult::Word(x) => x, _ => unreachable!() };
+                prop_assert_eq!(bw, aw);
+                // opc=00 immediate-family fixed field and placed registers.
+                prop_assert_eq!(opcode6_of(bw), 0b100100);
+                prop_assert_eq!(rn_of(bw), rn);
+                prop_assert_eq!(rd_of(bw), rd);
+            }
+        }
+
+        // 4. NEON VECTOR FORM: BIC Vd.T, Vn.T, Vm.T (T in {8b, 16b}). The Q bit
+        //    (bit 30) selects 128-bit (16b) vs 64-bit (8b); bits 31 and 29 are 0;
+        //    the fixed NEON logical opcode 01110 sits at bits 28:24 with size/op
+        //    01 at bits 23:22, N=1 at bit 21, fixed 000111 at bits 15:10, and the
+        //    three vector registers are placed in Rm/Rn/Rd.
+        #[test]
+        fn bic_neon_vector_form_fields(
+            rd in 0u32..=31, rn in 0u32..=31, rm in 0u32..=31,
+            big in any::<bool>(),
+        ) {
+            let arr = if big { "16b" } else { "8b" };
+            let ops = vec![neonreg(rd, arr), neonreg(rn, arr), neonreg(rm, arr)];
+            let w = expect_word(encode_bic(&ops));
+            prop_assert_eq!(b31_of(w), 0);
+            prop_assert_eq!(q_of(w), if big { 1 } else { 0 });
+            prop_assert_eq!(b29_of(w), 0);
+            prop_assert_eq!(op5_28_of(w), 0b01110);
+            prop_assert_eq!(op2_23_of(w), 0b01);
+            prop_assert_eq!(n21_of(w), 1);
+            prop_assert_eq!(fixed6_of(w), 0b000111);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 5. NEGATIVE CONTRACT: for the 32-bit (W) shifted-register form, imm6
+        //    must be 0..=31; a shift of 32..63 is UNDEFINED (ARMv8 ARM, C4.1.4:
+        //    for sf=0 the shift amount must be 0..31) and MUST be rejected, not
+        //    silently masked into the imm6 field via `& 0x3F`.
+        #[test]
+        fn bic_w_register_rejects_shift_above_31(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            amount in 32u32..=63u32, sk in 0u32..=3u32,
+        ) {
+            let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+            let ops = vec![Operand::Reg(format!("w{}", rd)),
+                           Operand::Reg(format!("w{}", rn)),
+                           Operand::Reg(format!("w{}", rm)),
+                           Operand::Shift { kind: kind.into(), amount }];
+            prop_assert!(encode_bic(&ops).is_err());
+        }
+    }
 }
