@@ -991,3 +991,89 @@ fn get_symbol(operands: &[Operand], idx: usize) -> Result<(String, i64), String>
 fn sf_bit(is_64: bool) -> u32 {
     if is_64 { 1 } else { 0 }
 }
+
+#[cfg(test)]
+mod parse_reg_num_props {
+    use super::parse_reg_num;
+    use proptest::prelude::*;
+
+    /// Every AArch64 register-bank prefix accepted by `parse_reg_num`.
+    fn reg_prefix() -> impl Strategy<Value = char> {
+        prop_oneof![
+            Just('x'),
+            Just('w'),
+            Just('d'),
+            Just('s'),
+            Just('q'),
+            Just('v'),
+            Just('h'),
+            Just('b'),
+        ]
+    }
+
+    proptest! {
+        // === Oracle: reference / round-trip ===========================
+        // A numeric register `<prefix><n>` with n in [0,31] decodes to n,
+        // for every accepted bank prefix.
+        #[test]
+        fn valid_numeric_reg_round_trips(prefix in reg_prefix(), n in 0u32..=31u32) {
+            let name = format!("{prefix}{n}");
+            prop_assert_eq!(parse_reg_num(&name), Some(n));
+        }
+
+        // === Oracle: algebraic / invariance ===========================
+        // The 5-bit encoding field is shared across register banks (X/W/D/S/...),
+        // so the decoded number must be independent of which prefix is used.
+        #[test]
+        fn decoded_num_is_prefix_independent(n in 0u32..=31u32) {
+            let expected = parse_reg_num(&format!("x{n}"));
+            for p in ['w', 'd', 's', 'q', 'v', 'h', 'b'] {
+                prop_assert_eq!(parse_reg_num(&format!("{p}{n}")), expected);
+            }
+        }
+
+        // === Oracle: negative contract ================================
+        // AArch64 register numbers occupy a 5-bit field (0..=31). Values
+        // outside that range are NOT encodable and must be rejected
+        // (return None), never silently masked/truncated.
+        #[test]
+        fn out_of_range_reg_rejected(n in 32u32..100_000u32) {
+            prop_assert_eq!(parse_reg_num(&format!("x{n}")), None);
+        }
+
+        // A valid prefix followed by non-numeric text is not a register.
+        // (Uses 'v' so the result cannot collide with xzr/wsp/lr special cases.)
+        #[test]
+        fn non_numeric_suffix_rejected(suffix in "[a-zA-Z]{1,4}") {
+            prop_assert_eq!(parse_reg_num(&format!("v{suffix}")), None);
+        }
+
+        // === Oracle: determinism / case-insensitivity =================
+        // The parser lowercases its input, so upper-casing a valid register
+        // name must not change the decoded value.
+        #[test]
+        fn case_insensitive(prefix in reg_prefix(), n in 0u32..=31u32) {
+            let lower = format!("{prefix}{n}");
+            let upper = lower.to_uppercase();
+            prop_assert_eq!(parse_reg_num(&lower), parse_reg_num(&upper));
+        }
+    }
+
+    // Special (non-numeric) register names map to fixed 5-bit encodings.
+    #[test]
+    fn special_registers_fixed_encodings() {
+        for s in ["sp", "wsp", "xzr", "wzr"] {
+            assert_eq!(parse_reg_num(s), Some(31), "lowercase {s}");
+            assert_eq!(parse_reg_num(&s.to_uppercase()), Some(31), "uppercase {s}");
+        }
+        assert_eq!(parse_reg_num("lr"), Some(30));
+        assert_eq!(parse_reg_num("LR"), Some(30));
+    }
+
+    // Boundary between valid and out-of-range register numbers.
+    #[test]
+    fn range_boundary() {
+        assert_eq!(parse_reg_num("x31"), Some(31));
+        assert_eq!(parse_reg_num("x32"), None);
+    }
+}
