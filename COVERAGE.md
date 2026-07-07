@@ -114,3 +114,45 @@ None new. The two findings already documented for the sibling encoders also appl
   encodes as `sdiv x0,x1,xzr` with no error. See `pbt-out/bug_reports/encode_mul_sp_operand_silently_accepted_as_xzr.md`.
 - **BUG-2** — mixed-width operands (e.g. `sdiv x0,w1,x2`) are silently accepted; `sf` is derived
   solely from Rd. See the `encode_madd` BUG-2 note above.
+
+---
+
+# PBT Coverage — `encode_smull`
+
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_smull`
+**Result:** 5/5 properties pass. No *new* findings; one pre-existing finding (below) applies.
+
+## What the function does
+Encodes the `SMULL <Xd>,<Wn>,<Wm>` alias as `SMADDL <Xd>,<Wn>,<Wm>,<XZR>`:
+```
+word = (1u32 << 31) | (0b0011011001 << 21) | (rm << 16) | (0b011111 << 10) | (rn << 5) | rd
+```
+i.e. ARMv8-A `1 00 11011 001 Rm 0 Ra Rn Rd` with `sf = 1` (SMULL always yields a 64-bit
+result), `o0 = 0` (bit 15), and `Ra = XZR = 0b11111`. The `is_64` flags returned by
+`get_reg` are deliberately discarded — `sf` is hardcoded to `1`, which is correct for
+SMULL/SMADDL (a 32×32→64 multiply). Register numbers are range-checked by `parse_reg_num`
+(0–31), so no 5-bit field can overflow/truncate.
+(Manually verified vs. the ARM ARM: `smull x0,w1,w2` → `0x9B227C20`, fixed base `0x9B207C00`.)
+
+## Properties verified
+1. `smull_matches_armv8_reference` — every valid register triple (0–31 each) encodes to
+   exactly the spec SMADDL-with-XZR word `0x9B207C00 | (Rm<<16) | (Rn<<5) | Rd` (differential
+   oracle — strongest check).
+2. `smull_opcode_bits_constant` — all non-register bits are the constant `0x9B207C00`
+   regardless of register choice; spot-checks each fixed field (sf=1, bits30:29=00,
+   opcode=11011, class=001, o0=0, Ra=11111) against the spec.
+3. `smull_register_fields_isolated` — Rd→bits 4:0, Rn→bits 9:5, Rm→bits 20:16 are each placed
+   in their own 5-bit slot with no cross-field aliasing.
+4. `smull_deterministic` — identical operands always yield the identical word.
+5. `smull_rejects_invalid_operands` — <3 operands, a non-register operand, and an
+   out-of-range register number (`x32`..) all return `Err` (negative contract; no silent
+   truncation/wrapping).
+
+## Bugs Found
+None new. The SP/WSP→XZR silent aliasing already documented in **BUG-1** also applies to
+`encode_smull` (same shared `get_reg`→`parse_reg_num` path: `sp`/`wsp` map to field 31 =
+XZR/WZR). None of SMULL's operands (`Xd`, `Wn`, `Wm`) may be SP, so e.g. `smull x0, wsp, w2`
+is silently encoded as `smull x0, wzr, w2`. Not re-filed — see
+`pbt-out/bug_reports/encode_mul_sp_operand_silently_accepted_as_xzr.md`. (BUG-2 / mixed-width
+is *not* applicable: SMULL is by definition a mixed-width instruction — 32-bit sources, 64-bit
+destination — and `sf` is correctly hardcoded to 1.)
