@@ -1867,3 +1867,184 @@ mod prop_encode_ldnp_stnp_tests {
         assert_eq!(word(encode_ldnp_stnp(&ops, false)), 0xA8000440);
     }
 }
+
+#[cfg(test)]
+mod prop_encode_ldtr_sized_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: reference-encoding / field-placement (ARMv8-A Architecture
+    // Reference Manual, §C4.1.66 LDTR/STTR “Load/Store Register (simm9,
+    // unprivileged)”).
+    //
+    // Encoding (GP, V=0):
+    //   size[31:30] 111[29:27] V=0[26] 00[25:24] opc[23:22] 0[21]
+    //     imm9[20:12] 10[11:10] Rn[9:5] Rt[4:0]
+    //
+    // - opc=01 (load) / 00 (store); V is hard-wired 0 (GP only).
+    // - imm9 is a SIGNED 9-bit immediate: encodable range [-256, 255].
+    //
+    // Hand-derived golden encodings (built up directly from the ARM ARM
+    // field layout, NOT from this crate's bit-fiddling formula):
+    //
+    //   ldtr x0, [x1]      = 0xF8400820   (size=11, opc=01, imm9=0)
+    //   sttr x0, [x1]      = 0xF8000820   (opc=00)
+    //   ldtr x0, [x1, #8]  = 0xF8408820   (imm9=8 → <<12)
+    //   ldtr x0, [x1, #-1] = 0xF85FF820   (imm9=0x1FF = -1 in 9-bit 2's-comp)
+    //   ldtrb w0, [x1]     = 0x38400820   (size=00)
+    //
+    // No AArch64 cross-assembler (llvm-mc / aarch64-as) is available in this
+    // environment to objdump-verify; the relationship / field-placement
+    // properties below carry the independent-checking weight.
+
+    const GOLDEN_LDTR_X0_X1_0: u32 = 0xF8400820;
+    const GOLDEN_STTR_X0_X1_0: u32 = 0xF8000820;
+    const GOLDEN_LDTR_X0_X1_8: u32 = 0xF8408820;
+    const GOLDEN_LDTR_X0_X1_M1: u32 = 0xF85FF820;
+    const GOLDEN_LDTRB_W0_X1_0: u32 = 0x38400820;
+
+    fn gp_xreg(num: u32) -> Operand {
+        Operand::Reg(format!("x{}", num))
+    }
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    prop_compose! {
+        fn arb_reg_num()(n in 0u32..=30u32) -> u32 { n }
+    }
+
+    proptest! {
+        // Property 1 — full-word field layout vs golden.
+        // For `ldtr xRt,[xRn,#off]` with off in [0,255] (inside the imm9 range,
+        // so no masking aliasing), the word equals the golden `ldtr x0,[x1,#0]`
+        // offset additively by Rt[4:0], Rn[9:5], and imm9[20:12].
+        #[test]
+        fn prop_gp_layout_matches_golden(
+            rt in arb_reg_num(),
+            rn in arb_reg_num(),
+            off in 0i64..=255i64,
+        ) {
+            let ops = vec![gp_xreg(rt), Operand::Mem { base: format!("x{}", rn), offset: off }];
+            let w = word(encode_ldtr_sized(&ops, true, 0b11));
+            let expected = (GOLDEN_LDTR_X0_X1_0 as i64
+                + (rt as i64)
+                + (((rn as i64) - 1) << 5)
+                + (off << 12)) as u32;
+            prop_assert_eq!(w, expected);
+        }
+
+        // Property 2 — differential: load vs store differ ONLY in opc bit 22.
+        // ldtr opc=01, sttr opc=00, so load ^ store == 0x0040_0000 for any size.
+        #[test]
+        fn prop_load_xor_store_is_opc_bit22(
+            rt in arb_reg_num(),
+            rn in arb_reg_num(),
+            off in -256i64..=255i64,
+            size in 0u32..4u32,
+        ) {
+            let ops = vec![gp_xreg(rt), Operand::Mem { base: format!("x{}", rn), offset: off }];
+            let load  = word(encode_ldtr_sized(&ops, true,  size));
+            let store = word(encode_ldtr_sized(&ops, false, size));
+            prop_assert_eq!(load ^ store, GOLDEN_LDTR_X0_X1_0 ^ GOLDEN_STTR_X0_X1_0);
+            prop_assert_eq!(load ^ store, 0x0040_0000);
+        }
+
+        // Property 3 — the explicit `size` parameter lands in bits [31:30],
+        // matching the mnemonic-derived size (ldtrb=00, ldtrh=01, ldtr(W)=10,
+        // ldtr(X)=11). Golden cross-check for size=00 (ldtrb).
+        #[test]
+        fn prop_size_param_in_top_two_bits(size in 0u32..4u32) {
+            let ops = vec![gp_xreg(0), Operand::Mem { base: "x1".to_string(), offset: 0 }];
+            let w = word(encode_ldtr_sized(&ops, true, size));
+            prop_assert_eq!((w >> 30) & 0b11, size);
+        }
+
+        // Property 4 — imm9 field [20:12], sign-extended back to i32, equals
+        // the input offset for every imm9 in the valid range [-256, 255].
+        // Also pins the three documented golden offsets exactly.
+        #[test]
+        fn prop_imm9_field_sign_extended_equals_input(off in -256i64..=255i64) {
+            let ops = vec![gp_xreg(0), Operand::Mem { base: "x1".to_string(), offset: off }];
+            let w = word(encode_ldtr_sized(&ops, true, 0b11));
+            let field = ((w >> 12) & 0x1FF) as i32;
+            let sx = if field & 0x100 != 0 { field | (!0x1FF) } else { field };
+            prop_assert_eq!(sx, off as i32);
+            if off == 0   { prop_assert_eq!(w, GOLDEN_LDTR_X0_X1_0); }
+            if off == 8   { prop_assert_eq!(w, GOLDEN_LDTR_X0_X1_8); }
+            if off == -1  { prop_assert_eq!(w, GOLDEN_LDTR_X0_X1_M1); }
+        }
+
+        // Property 5 — NEGATIVE CONTRACT (expected to FAIL: silent truncation).
+        // The 9-bit imm9 is a SIGNED immediate covering [-256, 255]. An offset
+        // strictly outside that range cannot be represented by LDTR/STTR and the
+        // encoder MUST return Err. Instead the implementation does
+        //   imm9_enc = (imm9 as u32) & 0x1FF
+        // silently wrapping out-of-range offsets (#256 -> #0, #-257 -> #-1),
+        // emitting a wrong instruction word with no diagnostic.
+        #[test]
+        fn prop_out_of_range_imm9_is_rejected(
+            excess in 1u32..2000u32,
+            negative in any::<bool>(),
+        ) {
+            let offset = if negative {
+                -256i64 - excess as i64
+            } else {
+                255i64 + excess as i64
+            };
+            let ops = vec![gp_xreg(0), Operand::Mem { base: "x1".to_string(), offset }];
+            let r = encode_ldtr_sized(&ops, true, 0b11);
+            prop_assert!(
+                r.is_err(),
+                "offset {} is outside the LDTR/STTR imm9 range [-256, 255] \
+                 and must be rejected, but the encoder returned {:?}",
+                offset, r
+            );
+        }
+
+        // Property 6 — error contract: arity < 2 or a non-Mem second operand
+        // (pre/post-index, register offset, immediate, symbol) is rejected.
+        #[test]
+        fn prop_error_contract(
+            nregs in 0u8..2u8,
+            bad_kind in 0u8..4u8,
+        ) {
+            let bad = match bad_kind {
+                0 => Operand::MemPreIndex { base: "x1".to_string(), offset: 0 },
+                1 => Operand::MemPostIndex { base: "x1".to_string(), offset: 0 },
+                2 => Operand::Imm(7),
+                _ => Operand::Symbol("foo".to_string()),
+            };
+            let ops: Vec<Operand> = if nregs == 0 {
+                Vec::new()
+            } else {
+                vec![gp_xreg(0), bad]
+            };
+            let r = encode_ldtr_sized(&ops, true, 0b11);
+            prop_assert!(r.is_err(), "expected error for ops={:?}, got {:?}", ops, r);
+        }
+    }
+
+    // Golden cross-check (no inputs): the two base forms + ldtrb must match
+    // the hand-derived ARMv8 encodings exactly, including V=0 / [25:24]=00.
+    #[test]
+    fn golden_ldtr_sttr_encodings() {
+        let ops = vec![
+            gp_xreg(0),
+            Operand::Mem { base: "x1".to_string(), offset: 0 },
+        ];
+        assert_eq!(word(encode_ldtr_sized(&ops, true, 0b11)), GOLDEN_LDTR_X0_X1_0);
+        assert_eq!(word(encode_ldtr_sized(&ops, false, 0b11)), GOLDEN_STTR_X0_X1_0);
+        // ldtrb (size=00) — note Rt=Rt regardless of Wn/Xn (get_reg ignores width here).
+        let ops_b = vec![
+            Operand::Reg("w0".to_string()),
+            Operand::Mem { base: "x1".to_string(), offset: 0 },
+        ];
+        assert_eq!(word(encode_ldtr_sized(&ops_b, true, 0b00)), GOLDEN_LDTRB_W0_X1_0);
+    }
+}
