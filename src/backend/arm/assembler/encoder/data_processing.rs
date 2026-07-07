@@ -3607,4 +3607,117 @@ mod tests {
             prop_assert!(encode_smull(&ops).is_err());
         }
     }
+
+    // ── encode_umull: UMULL Xd, Wn, Wm -> UMADDL Xd, Wn, Wm, XZR ──────────────
+    // ARMv8 UMADDL reference with Ra = XZR (31):
+    //   bit 31 = 1 (sf)            bits 30:29 = 00
+    //   bits 28:24 = 11011         bits 23:21 = 101   (UMADDL class; SMADDL is 001)
+    //   bits 20:16 = Rm            bit 15 = 0
+    //   bits 14:10 = Ra (= 11111)   bits 9:5 = Rn   bits 4:0 = Rd
+    //   => fixed base word 0x9BA07C00 | (Rm<<16) | (Rn<<5) | Rd
+    fn umull_ref(rd: u32, rn: u32, rm: u32) -> u32 {
+        0x9BA07C00u32 | (rm << 16) | (rn << 5) | rd
+    }
+
+    proptest! {
+        // 1. Differential/reference: every valid register triple encodes to
+        //    exactly the ARMv8 UMADDL (Ra=XZR) word. Oracle: reference model
+        //    derived independently from the ARM ARM bit layout.
+        #[test]
+        fn umull_matches_reference(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_umull(&ops));
+            prop_assert_eq!(w, umull_ref(rd, rn, rm));
+        }
+
+        // 2. All non-register bits are the constant UMADDL+XZR opcode, and
+        //    every fixed field matches the spec: op3=101 (NOT SMADDL's 001).
+        #[test]
+        fn umull_opcode_bits_constant(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_umull(&ops));
+            let reg_mask = 0x001F0000u32 | 0x000003E0u32 | 0x0000001Fu32; // 0x001F03FF
+            prop_assert_eq!(w & !reg_mask, 0x9BA07C00u32);
+            prop_assert_eq!((w >> 31) & 1, 1);                 // sf = 1 (always 64-bit)
+            prop_assert_eq!((w >> 29) & 0x3, 0b00);            // bits 30:29
+            prop_assert_eq!((w >> 24) & 0x1F, 0b11011);       // opcode
+            prop_assert_eq!((w >> 21) & 0x7, 0b101);          // class = UMADDL
+            prop_assert_eq!((w >> 15) & 1, 0);                // o0 = 0 (additive)
+            prop_assert_eq!((w >> 10) & 0x1F, 0b11111);       // Ra = XZR = 31
+        }
+
+        // 3. Each register is placed in exactly its 5-bit field and changing
+        //    it perturbs only that field: Rd -> 4:0, Rn -> 9:5, Rm -> 20:16.
+        #[test]
+        fn umull_register_fields_isolated(
+            rd in 0u32..=31, rn in 0u32..=31, rm in 0u32..=31,
+            rd2 in 0u32..=31, rn2 in 0u32..=31, rm2 in 0u32..=31,
+        ) {
+            let base = expect_word(encode_umull(&[xreg(rd), xreg(rn), xreg(rm)]));
+            // Rd -> bits 4:0
+            let w = expect_word(encode_umull(&[xreg(rd2), xreg(rn), xreg(rm)]));
+            let diff = base ^ w;
+            prop_assert_eq!(diff & !0x0000001Fu32, 0);
+            prop_assert_eq!(diff & 0x1F, rd ^ rd2);
+            // Rn -> bits 9:5
+            let w = expect_word(encode_umull(&[xreg(rd), xreg(rn2), xreg(rm)]));
+            let diff = base ^ w;
+            prop_assert_eq!(diff & !0x000003E0u32, 0);
+            prop_assert_eq!((diff >> 5) & 0x1F, rn ^ rn2);
+            // Rm -> bits 20:16
+            let w = expect_word(encode_umull(&[xreg(rd), xreg(rn), xreg(rm2)]));
+            let diff = base ^ w;
+            prop_assert_eq!(diff & !0x001F0000u32, 0);
+            prop_assert_eq!((diff >> 16) & 0x1F, rm ^ rm2);
+        }
+
+        // 4. Differential vs SMULL: signed vs unsigned long multiply share the
+        //    entire encoding except op3 (bits 23:21). UMULL=101, SMULL=001, so
+        //    the words differ by exactly one bit: bit 23 (0x00800000).
+        #[test]
+        fn umull_vs_smull_differs_only_in_op3(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let u = expect_word(encode_umull(&ops));
+            let s = expect_word(encode_smull(&ops));
+            prop_assert_eq!(u ^ s, 0x00800000u32);
+            prop_assert_eq!((u >> 23) & 1, 1);   // UMADDL op3 MSB (101) set
+            prop_assert_eq!((s >> 23) & 1, 0);   // SMADDL op3 MSB (001) clear
+        }
+
+        // 5. Negative / error contract: UMULL requires exactly 3 register
+        //    operands; too few operands, a non-register operand anywhere, and
+        //    out-of-range register numbers (> 31) are all rejected with Err
+        //    (no silent truncation, no panic).
+        #[test]
+        fn umull_rejects_invalid_operands(
+            n in 0u32..=2u32,                      // too few operands
+            bad in 32u32..=4096u32,               // out-of-range register
+            pos in 0u32..=2u32,                   // which operand is non-register
+        ) {
+            // Too few operands -> Err
+            let ops: Vec<Operand> = (0..n).map(|i| xreg(i % 31)).collect();
+            prop_assert!(encode_umull(&ops).is_err());
+
+            // A non-register operand anywhere -> Err
+            let mut ops = vec![xreg(0), xreg(1), xreg(2)];
+            ops[pos as usize] = Operand::Imm(7);
+            prop_assert!(encode_umull(&ops).is_err());
+
+            // Out-of-range register number -> Err (parse_reg_num caps at 31)
+            let ops = vec![Operand::Reg(format!("x{}", bad)), xreg(1), xreg(2)];
+            prop_assert!(encode_umull(&ops).is_err());
+        }
+    }
 }
