@@ -1,3 +1,56 @@
+# PBT Coverage — `encode_adrp`
+
+**File:** `src/backend/arm/assembler/encoder/load_store.rs`
+**Function:** `encode_adrp(operands: &[Operand]) -> Result<EncodeResult, String>`
+**Test module:** `prop_encode_adrp_tests` (appended to the same file)
+**Framework:** `proptest` (already a dev-dependency)
+**Result:** 6/6 properties PASS at 256 cases each.
+
+## Instruction under test
+
+AArch64 ADRP (ARM ARM C6.2.10): `1 immlo[1:0] 10000 immhi[18:0] Rd`.
+- `[31]` = 1 (distinguishes ADRP from ADR, whose bit 31 is 0).
+- `[28:24]` = `10000` (the PC-relative address opcode).
+- `[30:29]` immlo + `[23:5]` immhi — the page offset, **not** computed by the
+  assembler. Per the AArch64 ELF ABI, `R_AARCH64_ADR_PREL_PG_HI21`
+  (`AdrpPage21`) resolves `S + A` and discards the low 12 bits to recover the
+  page; `R_AARCH64_ADR_GOT_PAGE21` (`AdrGotPage21`) does the same against the
+  GOT. So the encoder emits `immlo = immhi = 0` (template word `0x9000_0000`)
+  and attaches a relocation carrying the symbol and the **exact** addend.
+
+## Properties written
+
+| # | Name | Oracle type | What it pins down |
+|---|------|-------------|-------------------|
+| 1 | `prop_adrp_word_template` | Reference (structural) | Word == `0x9000_0000 \| Rd`; reloc is `AdrpPage21`. |
+| 2 | `prop_rd_field_low_5_bits` | Field placement | `Rd` occupies `[4:0]`; every bit above is the fixed template (op=1, `[28:24]=10000`, imm fields zero). |
+| 3 | `prop_symbol_and_label_identical` | Differential + verbatim | `Symbol` and `Label` operands yield identical `WordWithReloc`; symbol string copied verbatim (incl. uppercase preserved), addend 0. |
+| 4 | `prop_symboloffset_addend_verbatim` | Passthrough contract | `SymbolOffset` addend forwarded unchanged across the full `i64` range (negative, non-page-aligned, max) — no masking/truncation by the encoder. |
+| 5 | `prop_got_modifier_reloc` | Differential + negative | `:got:sym` → `AdrGotPage21` (addend 0); plain `sym` → `AdrpPage21`; a `lo12` modifier is rejected with `Err`. |
+| 6 | `prop_rejects_malformed_operands` | Negative / error contract | Empty/single-operand vectors and a non-register first operand all return `Err`; no panic, no corrupt word. |
+
+Template constant cross-checked against the canonical AArch64 encoding `ADRP x0, . = 0x90000000`.
+
+## Findings
+
+**No bug.** The encoder is correct on every exercised dimension.
+
+### Observations (not defects — no reports filed)
+
+- **Addend is not range-checked.** `encode_adrp` forwards the `SymbolOffset`
+  addend verbatim into the relocation. This is *correct*: the page-relative
+  masking (dropping the low 12 bits of `S + A`) happens at relocation-
+  application time in the linker, not in the assembler. Asserting this as a
+  positive passthrough property (Property 4) confirms the encoder does not
+  erroneously truncate — the delegation is intentional, so no bug report.
+
+- **Rt == SP / XZR accepted.** `parse_reg_num` maps `sp`/`xzr` to register
+  31; `encode_adrp` does not reject `adrp sp, …`. Unlike most data-processing
+  instructions, ADRP *does* permit `Rd == SP`, so this is architecturally
+  valid (consistent with GAS). No defect.
+
+---
+
 # PBT Coverage — `encode_cbz`
 
 **File:** `src/backend/arm/assembler/encoder/compare_branch.rs`

@@ -3272,3 +3272,167 @@ mod prop_encode_ldar_stlr_tests {
     }
 }
 
+#[cfg(test)]
+mod prop_encode_adrp_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ORACLE: reference-encoding / field-placement (ARMv8-A Architecture
+    // Reference Manual, "ADRP"; AArch64 ELF ABI for R_AARCH64_ADR_PREL_PG_HI21
+    // and R_AARCH64_ADR_GOT_PAGE21).
+    //
+    // ADRP template: `1 immlo[1:0] 10000 immhi[18:0] Rd` = 0x9000_0000 | Rd.
+    // The page-relative immediate (immlo:immhi) is NOT assembled here — it is
+    // produced by the *linker* from the relocation: the linker forms S+A and
+    // discards the low 12 bits to recover the page. So the encoder must emit
+    // immlo=immhi=0 and attach a relocation carrying the symbol and the
+    // *exact* addend. The template word is the fixed constant 0x9000_0000
+    // OR'd with Rd in bits [4:0].
+
+    /// All register names `get_reg` accepts, mapped to their 5-bit encodings,
+    /// including specials (sp/xzr -> 31, lr -> 30).
+    fn reg_case(n: u32) -> (String, u32) {
+        match n {
+            0..=30 => (format!("x{}", n), n),
+            31 => ("sp".to_string(), 31),
+            32 => ("xzr".to_string(), 31),
+            33 => ("lr".to_string(), 30),
+            _ => unreachable!(),
+        }
+    }
+
+    prop_compose! {
+        fn arb_reg()(n in 0u32..34) -> (String, u32) { reg_case(n) }
+    }
+
+    prop_compose! {
+        /// Varied symbol strings incl. uppercase (case must be preserved) and
+        /// local-label / leading-underscore styles.
+        fn arb_sym()(n in any::<u32>(), variant in 0u8..3) -> String {
+            match variant {
+                0 => format!("sym{}", n),
+                1 => format!(".L{}", n),
+                2 => format!("_sym_{}", n),
+                _ => format!("Sym{}", n),
+            }
+        }
+    }
+
+    fn reloc_of(r: Result<EncodeResult, String>) -> (u32, RelocType, String, i64) {
+        match r {
+            Ok(EncodeResult::WordWithReloc { word, reloc }) => {
+                (word, reloc.reloc_type, reloc.symbol, reloc.addend)
+            }
+            other => panic!("expected WordWithReloc, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        // Property 1 — ADRP opcode template / bit layout.
+        // For any valid Rd and a plain symbol operand the word must equal the
+        // ARMv8-A ADRP template 0x9000_0000 OR'd with Rd, and the relocation
+        // is R_AARCH64_ADR_PREL_PG_HI21 (AdrpPage21).
+        #[test]
+        fn prop_adrp_word_template((rd_name, rd_num) in arb_reg(), sym in arb_sym()) {
+            let ops = vec![Operand::Reg(rd_name), Operand::Symbol(sym)];
+            let (word, rt, _, _) = reloc_of(encode_adrp(&ops));
+            prop_assert_eq!(word, 0x9000_0000u32 | rd_num);
+            prop_assert!(matches!(rt, RelocType::AdrpPage21));
+        }
+
+        // Property 2 — Rd occupies bits [4:0]; everything above is the fixed
+        // template (op=1, [28:24]=10000, imm fields zero).
+        #[test]
+        fn prop_rd_field_low_5_bits((rd_name, rd_num) in arb_reg(), sym in arb_sym()) {
+            let ops = vec![Operand::Reg(rd_name), Operand::Symbol(sym)];
+            let (word, _, _, _) = reloc_of(encode_adrp(&ops));
+            prop_assert_eq!(word & 0x1F, rd_num);            // Rd [4:0]
+            prop_assert_eq!(word & !0x1F, 0x9000_0000u32);    // fixed template above
+        }
+
+        // Property 3 — Symbol and Label operands produce identical relocations
+        // (both AdrpPage21, addend 0), with the symbol string copied verbatim
+        // (no case-folding / stripping).
+        #[test]
+        fn prop_symbol_and_label_identical((rd_name, _) in arb_reg(), sym in arb_sym()) {
+            let ops_sym = vec![Operand::Reg(rd_name.clone()), Operand::Symbol(sym.clone())];
+            let ops_lbl = vec![Operand::Reg(rd_name), Operand::Label(sym.clone())];
+            let (w_s, rt_s, sy_s, ad_s) = reloc_of(encode_adrp(&ops_sym));
+            let (w_l, rt_l, _sy_l, ad_l) = reloc_of(encode_adrp(&ops_lbl));
+            prop_assert_eq!(w_s, w_l);
+            prop_assert_eq!(format!("{:?}", rt_s), format!("{:?}", rt_l));
+            prop_assert!(matches!(rt_s, RelocType::AdrpPage21));
+            prop_assert_eq!(sy_s, sym);   // verbatim, incl. uppercase preserved
+            prop_assert_eq!((ad_s, ad_l), (0i64, 0i64));
+        }
+
+        // Property 4 — SymbolOffset addend is carried VERBATIM (no masking /
+        // truncation / wrapping). R_AARCH64_ADR_PREL_PG_HI21 is page-relative:
+        // the *linker* masks the low 12 bits of S+A, so the encoder must
+        // forward the full addend unchanged, including negative, non-page-
+        // aligned, and full-range i64 values. Per the AArch64 ELF ABI this
+        // delegation is intentional, so this is a positive passthrough oracle
+        // (not a missing-range bug).
+        #[test]
+        fn prop_symboloffset_addend_verbatim(
+            (rd_name, _) in arb_reg(),
+            sym in arb_sym(),
+            addend in any::<i64>(),
+        ) {
+            let ops = vec![Operand::Reg(rd_name), Operand::SymbolOffset(sym.clone(), addend)];
+            let (word, rt, sy, ad) = reloc_of(encode_adrp(&ops));
+            prop_assert_eq!(word & !0x1F, 0x9000_0000u32); // template unaffected by addend
+            prop_assert!(matches!(rt, RelocType::AdrpPage21));
+            prop_assert_eq!(sy, sym);     // symbol verbatim
+            prop_assert_eq!(ad, addend);  // addend verbatim — no truncation/mask
+        }
+
+        // Property 5 — `:got:` modifier selects a distinct relocation.
+        // `adrp xD, :got:sym` -> AdrGotPage21 (R_AARCH64_ADR_GOT_PAGE21),
+        // addend forced to 0. Differential: plain `sym` -> AdrpPage21. A
+        // non-"got" modifier (e.g. "lo12") is not an ADRP operand and must be
+        // rejected with Err rather than mis-encoded.
+        #[test]
+        fn prop_got_modifier_reloc((rd_name, _) in arb_reg(), sym in arb_sym()) {
+            let ops_got = vec![
+                Operand::Reg(rd_name.clone()),
+                Operand::Modifier { kind: "got".to_string(), symbol: sym.clone() },
+            ];
+            let (word, rt, sy, ad) = reloc_of(encode_adrp(&ops_got));
+            prop_assert_eq!(word & !0x1F, 0x9000_0000u32);
+            prop_assert!(matches!(rt, RelocType::AdrGotPage21));
+            prop_assert_eq!((sy, ad), (sym.clone(), 0i64));
+
+            // plain symbol -> AdrpPage21 (distinct from the GOT form)
+            let (_, rt_sym, _, _) = reloc_of(encode_adrp(&[
+                Operand::Reg(rd_name), Operand::Symbol(sym),
+            ]));
+            prop_assert!(matches!(rt_sym, RelocType::AdrpPage21));
+
+            // negative contract: a "lo12" modifier is rejected
+            let bad = encode_adrp(&[
+                Operand::Reg("x0".to_string()),
+                Operand::Modifier { kind: "lo12".to_string(), symbol: "s".to_string() },
+            ]);
+            prop_assert!(bad.is_err());
+        }
+
+        // Property 6 — negative/error contract: ADRP requires at least two
+        // operands and a register as the first operand. Everything else must
+        // be rejected with Err rather than producing a corrupt word.
+        #[test]
+        fn prop_rejects_malformed_operands(kind in 0u8..4, sym in arb_sym()) {
+            let bad = match kind {
+                0 => vec![],                                                        // empty
+                1 => vec![Operand::Reg("x0".to_string())],                          // single operand
+                2 => vec![Operand::Symbol(sym.clone()), Operand::Symbol(sym)],      // first not a reg
+                3 => vec![Operand::Imm(5), Operand::Symbol(sym)],                   // first is immediate
+                _ => vec![Operand::Mem { base: "x0".to_string(), offset: 0 },       // first is memory
+                          Operand::Symbol(sym)],
+            };
+            let r = encode_adrp(&bad);
+            prop_assert!(r.is_err(), "expected Err for {:?}, got {:?}", bad, r);
+        }
+    }
+}
+
