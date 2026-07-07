@@ -318,3 +318,174 @@ pub(crate) fn encode_zbb_zexth(operands: &[Operand]) -> Result<EncodeResult, Str
     let rs1 = get_reg(operands, 1)?;
     Ok(EncodeResult::Word(encode_r(OP_OP_32, rd, 0b100, rs1, 0, 0b0000100)))
 }
+
+#[cfg(test)]
+mod pbt_encode_lui {
+    use super::*;
+    use proptest::prelude::*;
+
+    const OP_LUI_BITS: u32 = OP_LUI; // 0b0110111 = 0x37
+
+    /// Strategy yielding (register_name, expected_5bit_number) pairs covering
+    /// both the `xN` form and the ABI alias names accepted by `reg_num`.
+    fn reg_strategy() -> impl Strategy<Value = (String, u32)> {
+        let pairs: Vec<(String, u32)> = (0u32..=31)
+            .flat_map(|n| {
+                let mut v: Vec<(String, u32)> = vec![(format!("x{}", n), n)];
+                let abi: Option<&'static str> = match n {
+                    0 => Some("zero"), 1 => Some("ra"), 2 => Some("sp"), 3 => Some("gp"),
+                    4 => Some("tp"), 5 => Some("t0"), 6 => Some("t1"), 7 => Some("t2"),
+                    8 => Some("s0"), 9 => Some("s1"), 10 => Some("a0"), 11 => Some("a1"),
+                    12 => Some("a2"), 13 => Some("a3"), 14 => Some("a4"), 15 => Some("a5"),
+                    16 => Some("a6"), 17 => Some("a7"), 18 => Some("s2"), 19 => Some("s3"),
+                    20 => Some("s4"), 21 => Some("s5"), 22 => Some("s6"), 23 => Some("s7"),
+                    24 => Some("s8"), 25 => Some("s9"), 26 => Some("s10"), 27 => Some("s11"),
+                    28 => Some("t3"), 29 => Some("t4"), 30 => Some("t5"), 31 => Some("t6"),
+                    _ => None,
+                };
+                if let Some(a) = abi {
+                    v.push((a.to_string(), n));
+                }
+                if n == 8 {
+                    v.push(("fp".to_string(), n));
+                }
+                v
+            })
+            .collect();
+        proptest::sample::select(pairs)
+    }
+
+    proptest! {
+        // Oracle: Reference — `lui rd, imm` must produce a U-format word whose
+        // opcode field (bits[6:0]) is LUI, whose rd field (bits[11:7]) equals
+        // the destination register number, and whose imm field (bits[31:12])
+        // carries exactly the low 20 bits of the immediate (the assembler
+        // pre-shifts by 12; encode_u masks with 0xFFFFF000).
+        #[test]
+        fn lui_imm_encodes_opcode_rd_and_imm_fields(
+            (rd_name, rd_num) in reg_strategy(),
+            imm in any::<i64>()
+        ) {
+            let ops = [Operand::Reg(rd_name), Operand::Imm(imm)];
+            let w = match encode_lui(&ops).expect("lui imm must encode") {
+                EncodeResult::Word(w) => w,
+                other => panic!("expected Word, got {:?}", other),
+            };
+
+            prop_assert_eq!(w & 0x7F, OP_LUI_BITS, "opcode bits[6:0]");
+            prop_assert_eq!((w >> 7) & 0x1F, rd_num, "rd bits[11:7]");
+            prop_assert_eq!(
+                (w >> 12) & 0xFFFFF,
+                (imm as u32) & 0xFFFFF,
+                "imm[31:12] == low 20 bits of immediate"
+            );
+            // Cross-check against the raw U-format encoder used by the impl.
+            prop_assert_eq!(w, encode_u(OP_LUI, rd_num, (imm as u32) << 12));
+        }
+
+        // Oracle: Reference — GCC-style bare register numbers (Operand::Imm
+        // with value 0..=31) are accepted by get_reg as the destination.
+        #[test]
+        fn lui_accepts_bare_number_destination(
+            rd_num in 0u32..=31,
+            imm in any::<i64>()
+        ) {
+            let ops = [Operand::Imm(rd_num as i64), Operand::Imm(imm)];
+            let w = match encode_lui(&ops).expect("bare-number rd must encode") {
+                EncodeResult::Word(w) => w,
+                other => panic!("expected Word, got {:?}", other),
+            };
+            prop_assert_eq!(w & 0x7F, OP_LUI_BITS);
+            prop_assert_eq!((w >> 7) & 0x1F, rd_num);
+        }
+
+        // Oracle: Reference — `lui rd, symbol` (no %tprel_hi prefix) emits a
+        // WordWithReloc with a zeroed immediate field, Hi20 reloc type, zero
+        // addend, and the modifier-stripped symbol name.
+        #[test]
+        fn lui_symbol_emits_hi20_relocation(
+            (rd_name, rd_num) in reg_strategy(),
+            sym_body in "[%a-zA-Z_][%a-zA-Z0-9_]*"
+        ) {
+            let s = format!("%hi({})", sym_body);
+            let ops = [Operand::Reg(rd_name), Operand::Symbol(s.clone())];
+            let (word, reloc) = match encode_lui(&ops).expect("lui symbol must encode") {
+                EncodeResult::WordWithReloc { word, reloc } => (word, reloc),
+                other => panic!("expected WordWithReloc, got {:?}", other),
+            };
+
+            prop_assert_eq!(word & 0x7F, OP_LUI_BITS, "opcode");
+            prop_assert_eq!((word >> 7) & 0x1F, rd_num, "rd");
+            prop_assert_eq!(word & 0xFFFFF000, 0, "imm field must be zero");
+            prop_assert_eq!(word, encode_u(OP_LUI, rd_num, 0));
+            match reloc.reloc_type {
+                RelocType::Hi20 => {}
+                other => panic!("expected Hi20, got {:?}", other),
+            }
+            prop_assert_eq!(reloc.addend, 0);
+            prop_assert_eq!(&reloc.symbol, &extract_modifier_symbol(&s));
+            prop_assert_eq!(&reloc.symbol, &sym_body);
+        }
+
+        // Oracle: Reference — a `%tprel_hi(sym)` operand selects the TLS
+        // TprelHi20 relocation variant while still zeroing the immediate.
+        #[test]
+        fn lui_tprel_hi_symbol_emits_tprel_hi20_relocation(
+            (rd_name, _rd_num) in reg_strategy(),
+            sym_body in "[%a-zA-Z_][%a-zA-Z0-9_]*"
+        ) {
+            let s = format!("%tprel_hi({})", sym_body);
+            let ops = [Operand::Reg(rd_name), Operand::Symbol(s.clone())];
+            let reloc = match encode_lui(&ops).expect("lui tprel must encode") {
+                EncodeResult::WordWithReloc { word, reloc } => {
+                    prop_assert_eq!(word & 0xFFFFF000, 0);
+                    reloc
+                }
+                other => panic!("expected WordWithReloc, got {:?}", other),
+            };
+            match reloc.reloc_type {
+                RelocType::TprelHi20 => {}
+                other => panic!("expected TprelHi20, got {:?}", other),
+            }
+            prop_assert_eq!(reloc.addend, 0);
+            prop_assert_eq!(reloc.symbol, sym_body);
+        }
+
+        // Oracle: Negative/error contract — lui requires exactly (rd, imm|sym).
+        // A non-Imm/non-Symbol second operand, or a missing second operand,
+        // must yield the specific "lui: invalid operands" error; a missing or
+        // unparseable first register must also be rejected.
+        #[test]
+        fn lui_rejects_invalid_operands(
+            bad_second in prop::sample::select(vec![
+                Operand::Reg("a1".to_string()),
+                Operand::Label("foo".to_string()),
+                Operand::Mem { base: "sp".to_string(), offset: 0 },
+                Operand::MemSymbol { base: "sp".to_string(), symbol: "s".to_string(), modifier: "%lo".to_string() },
+                Operand::SymbolOffset("s".to_string(), 4),
+                Operand::FenceArg("iorw".to_string()),
+            ])
+        ) {
+            // Present but invalid second operand.
+            let ops = vec![Operand::Reg("a0".to_string()), bad_second.clone()];
+            let err = encode_lui(&ops).expect_err("bad 2nd operand must error");
+            prop_assert!(
+                err.contains("lui: invalid operands"),
+                "unexpected error message: {}",
+                err
+            );
+
+            // Missing second operand.
+            let ops = vec![Operand::Reg("a0".to_string())];
+            let err = encode_lui(&ops).expect_err("missing 2nd operand must error");
+            prop_assert!(err.contains("lui: invalid operands"), "got: {}", err);
+
+            // Missing first operand (different message, still an error).
+            prop_assert!(encode_lui(&[]).is_err());
+
+            // Invalid register name as first operand.
+            let ops = vec![Operand::Reg("x32".to_string()), Operand::Imm(1)];
+            prop_assert!(encode_lui(&ops).is_err());
+        }
+    }
+}
