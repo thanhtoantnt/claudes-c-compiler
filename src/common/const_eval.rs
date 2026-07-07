@@ -304,9 +304,54 @@ pub fn irconst_to_bits(val: &IrConst) -> (u64, bool) {
     (bits, true) // default to signed
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_integer_const() -> impl Strategy<Value = IrConst> {
+        prop_oneof![
+            any::<i8>().prop_map(IrConst::I8),
+            any::<i16>().prop_map(IrConst::I16),
+            any::<i32>().prop_map(IrConst::I32),
+            any::<i64>().prop_map(IrConst::I64),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn integer_consts_use_signed_numeric_value_as_bits(val in arb_integer_const()) {
+            let (bits, is_signed) = irconst_to_bits(&val);
+            prop_assert_eq!(bits, val.to_i64().unwrap() as u64);
+            prop_assert!(is_signed);
+        }
+
+        #[test]
+        fn f32_consts_cast_through_i64_before_bits(v in any::<f32>()) {
+            let (bits, is_signed) = irconst_to_bits(&IrConst::F32(v));
+            prop_assert_eq!(bits, v as i64 as u64);
+            prop_assert!(is_signed);
+        }
+
+        #[test]
+        fn f64_consts_cast_through_i64_before_bits(v in any::<f64>()) {
+            let (bits, is_signed) = irconst_to_bits(&IrConst::F64(v));
+            prop_assert_eq!(bits, v as i64 as u64);
+            prop_assert!(is_signed);
+        }
+
+        #[test]
+        fn bool_flag_is_always_true_for_supported_variants(val in prop_oneof![
+            arb_integer_const(),
+            any::<f32>().prop_map(IrConst::F32),
+            any::<f64>().prop_map(IrConst::F64),
+        ]) {
+            prop_assert!(irconst_to_bits(&val).1);
+        }
+    }
+}
+
 /// Evaluate a binary operation on constant operands with given type parameters.
-///
-/// This wraps `const_arith::eval_const_binop` with the C usual arithmetic
 /// conversion logic (C11 6.3.1.8). For shifts, only the LHS type determines
 /// the result type (C11 6.5.7); for other ops, use the wider of both types.
 ///
