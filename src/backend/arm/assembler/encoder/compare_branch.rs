@@ -784,3 +784,194 @@ mod prop_encode_branch_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_cond_branch_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ---- Opcode constants for the B.cond instruction class (ARM ARM C5.6.6) ----
+    // B.cond = 0101 0100 | imm19[23:5] | 0[4] | cond[3:0].
+    // The encoder hard-codes the top byte and relies on the linker (CondBr19)
+    // to fill the imm19 branch-offset field, which it must leave at zero.
+    const OPCODE: u32 = 0b0101_0100u32 << 24; // == 0x5400_0000
+    const OPCODE_MASK: u32 = 0xFF00_0000;     // bits [31:24]
+    const IMM19_MASK: u32 = 0x00FF_FFE0;      // bits [23:5] (linker-filled, must be zero)
+    const O0_BIT: u32 = 1u32 << 4;            // bit [4] (must be zero)
+
+    /// Canonical ARM condition-code table mirroring `encode_cond`.
+    const COND_TABLE: &[(&str, u32)] = &[
+        ("eq", 0), ("ne", 1), ("cs", 2), ("hs", 2), ("cc", 3), ("lo", 3),
+        ("mi", 4), ("pl", 5), ("vs", 6), ("vc", 7), ("hi", 8), ("ls", 9),
+        ("ge", 10), ("lt", 11), ("gt", 12), ("le", 13), ("al", 14), ("nv", 15),
+    ];
+
+    fn word_of(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::WordWithReloc { word, .. }) => word,
+            other => panic!("expected WordWithReloc, got {:?}", other),
+        }
+    }
+
+    fn reloc_of(r: Result<EncodeResult, String>) -> Relocation {
+        match r {
+            Ok(EncodeResult::WordWithReloc { reloc, .. }) => reloc,
+            other => panic!("expected WordWithReloc, got {:?}", other),
+        }
+    }
+
+    fn enc(cond: &str, op: &Operand) -> u32 {
+        word_of(encode_cond_branch(cond, &[op.clone()]))
+    }
+
+    /// Mirrors `get_symbol`'s forwarding table: every operand kind it accepts
+    /// and the (symbol, addend) the encoder must forward into the relocation.
+    fn accepted_operand_and_expected(
+        sym: String,
+        off: i64,
+        kind_idx: usize,
+    ) -> (Operand, String, i64) {
+        let cases: Vec<(Operand, String, i64)> = vec![
+            (Operand::Symbol(sym.clone()), sym.clone(), 0),
+            (Operand::Label(sym.clone()), sym.clone(), 0),
+            (Operand::SymbolOffset(sym.clone(), off), sym.clone(), off),
+            (Operand::Modifier { kind: "lo12".into(), symbol: sym.clone() }, sym.clone(), 0),
+            (Operand::ModifierOffset {
+                kind: "lo12".into(), symbol: sym.clone(), offset: off,
+            }, sym.clone(), off),
+            // The parser misclassifies symbol names colliding with register /
+            // condition / barrier names; `get_symbol` accepts them as symbols.
+            (Operand::Reg(sym.clone()), sym.clone(), 0),
+            (Operand::Cond(sym.clone()), sym.clone(), 0),
+            (Operand::Barrier(sym.clone()), sym.clone(), 0),
+        ];
+        cases[kind_idx].clone()
+    }
+
+    prop_compose! {
+        fn arb_accepted_symbol()(
+            s in "[a-z][a-z0-9_]{0,7}",
+            off in -8192i64..=8192i64,
+            kind_idx in 0usize..8usize,
+        ) -> (Operand, String, i64) {
+            accepted_operand_and_expected(s, off, kind_idx)
+        }
+    }
+
+    proptest! {
+        // Property A — full structural / field-placement oracle.
+        // The encoded word is fully determined: opcode byte 0x54 in [31:24],
+        // the imm19 branch offset [23:5] is left zero for the linker, o0 bit
+        // [4] is zero, and cond occupies [3:0].
+        #[test]
+        fn prop_opcode_structure_and_fields(
+            cond_idx in 0usize..COND_TABLE.len(),
+            (sym_op, _sym, _off) in arb_accepted_symbol(),
+        ) {
+            let (cond_name, cond_val) = COND_TABLE[cond_idx];
+            let word = enc(cond_name, &sym_op);
+
+            prop_assert_eq!(word & OPCODE_MASK, OPCODE);
+            prop_assert_eq!(word & IMM19_MASK, 0u32);
+            prop_assert_eq!(word & O0_BIT, 0u32);
+            prop_assert_eq!(word & 0xF, cond_val);
+            // The whole word is exactly opcode | cond — nothing else is set.
+            prop_assert_eq!(word, OPCODE | cond_val);
+        }
+
+        // Property B — condition-code mapping round-trips for every name in
+        // the canonical table (incl. aliases cs/hs, cc/lo and the nv/al edge).
+        #[test]
+        fn prop_cond_field_matches_table(
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let (cond_name, cond_val) = COND_TABLE[cond_idx];
+            let op = Operand::Symbol("target".into());
+            let word = enc(cond_name, &op);
+            prop_assert_eq!(word & 0xF, cond_val);
+        }
+
+        // Property C — alias equivalence (differential). The two spellings of
+        // carry-set (cs/hs) and carry-clear (cc/lo) must produce bit-identical
+        // words, since they encode the same condition.
+        #[test]
+        fn prop_aliases_encode_identically(
+            sym in "[a-z][a-z0-9_]{0,7}",
+        ) {
+            let op = Operand::Symbol(sym);
+            prop_assert_eq!(enc("cs", &op), enc("hs", &op));
+            prop_assert_eq!(enc("cc", &op), enc("lo", &op));
+        }
+
+        // Property D — relocation contract across every operand kind that
+        // `get_symbol` accepts: the result carries a CondBr19 relocation whose
+        // symbol & addend exactly mirror the input operand.
+        #[test]
+        fn prop_reloc_is_condbr19_with_symbol(
+            cond_idx in 0usize..COND_TABLE.len(),
+            (sym_op, exp_sym, exp_off) in arb_accepted_symbol(),
+        ) {
+            let cond_name = COND_TABLE[cond_idx].0;
+            let reloc = reloc_of(encode_cond_branch(cond_name, &[sym_op]));
+            prop_assert!(matches!(reloc.reloc_type, RelocType::CondBr19));
+            prop_assert_eq!(reloc.symbol, exp_sym);
+            prop_assert_eq!(reloc.addend, exp_off);
+        }
+
+        // Property E — classifier / negative contract. For an arbitrary
+        // lower-case token: if it is a known condition the encoder succeeds
+        // and yields cond == table value; otherwise it MUST return Err. No
+        // silent encoding of an unknown condition, and no rejection of a
+        // valid one (incl. case-folding done by encode_cond).
+        #[test]
+        fn prop_unknown_condition_rejected(
+            token in "[a-z]{0,4}",
+        ) {
+            let op = Operand::Symbol("target".into());
+            let res = encode_cond_branch(&token, &[op.clone()]);
+            let known = COND_TABLE.iter().find(|(n, _)| *n == token).map(|(_, v)| *v);
+            match (known, res) {
+                (Some(v), Ok(r)) => {
+                    prop_assert_eq!(word_of(Ok(r)) & 0xF, v);
+                }
+                (Some(_), Err(e)) => panic!("known cond '{}' rejected: {}", token, e),
+                (None, Ok(_)) => panic!("unknown cond '{}' accepted", token),
+                (None, Err(_)) => {}
+            }
+        }
+
+        // Property F — negative contract on the branch target: operand kinds
+        // that `get_symbol` does NOT accept must make encode_cond_branch return
+        // Err even when the condition itself is valid. No silent encoding of
+        // an invalid branch target.
+        #[test]
+        fn prop_rejects_non_symbol_operands(
+            idx in 0usize..13usize,
+        ) {
+            let rejected: Vec<Operand> = vec![
+                Operand::Imm(42),
+                Operand::Mem { base: "x0".into(), offset: 0 },
+                Operand::MemExpr {
+                    base: "x0".into(), expr: "foo".into(), writeback: false,
+                },
+                Operand::MemPreIndex { base: "x0".into(), offset: 8 },
+                Operand::MemPostIndex { base: "x0".into(), offset: 8 },
+                Operand::MemRegOffset {
+                    base: "x0".into(), index: "x1".into(), extend: None, shift: None,
+                },
+                Operand::Shift { kind: "lsl".into(), amount: 2 },
+                Operand::Extend { kind: "sxtw".into(), amount: 0 },
+                Operand::Expr("x + y".into()),
+                Operand::RegArrangement { reg: "v0".into(), arrangement: "16b".into() },
+                Operand::RegLane { reg: "v0".into(), elem_size: "s".into(), index: 2 },
+                Operand::RegList(vec![Operand::Reg("v0".into())]),
+                Operand::RegListIndexed { regs: vec![Operand::Reg("v0".into())], index: 0 },
+            ];
+            let op = rejected[idx].clone();
+            prop_assert!(
+                encode_cond_branch("eq", &[op]).is_err(),
+                "encode_cond_branch should reject this operand as a branch target"
+            );
+        }
+    }
+}
