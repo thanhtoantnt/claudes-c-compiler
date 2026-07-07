@@ -124,6 +124,19 @@ mod tests {
         })
     }
 
+    fn reference_decode_pua_byte(input: &[u8], pos: usize) -> (u8, usize) {
+        if pos + 2 < input.len() && input[pos] == 0xEE {
+            let b1 = input[pos + 1];
+            let b2 = input[pos + 2];
+            if b1 == 0x82 && (0x80..=0xBF).contains(&b2) {
+                return (b2, 3);
+            } else if b1 == 0x83 && (0x80..=0xBF).contains(&b2) {
+                return (0xC0 + (b2 - 0x80), 3);
+            }
+        }
+        (input[pos], 1)
+    }
+
     #[test]
     fn test_ascii_passthrough() {
         let bytes = b"hello world".to_vec();
@@ -205,30 +218,59 @@ mod tests {
     }
 
     proptest! {
-        // Oracle: Algebraic/Reference — valid UTF-8 is preserved exactly unless the
-        // input begins with a BOM, which is intentionally stripped.
+        // Oracle: Algebraic/Reference — every PUA-encoded byte sequence must
+        // decode back to the original byte and consume exactly three bytes.
         #[test]
-        fn valid_utf8_is_preserved(text in any::<String>().prop_filter("exclude leading BOM", |s| !s.starts_with('\u{FEFF}'))) {
-            let encoded = bytes_to_string(text.as_bytes().to_vec());
-            prop_assert_eq!(encoded, text);
+        fn embedded_pua_sequences_decode_to_original_byte(
+            byte in 0x80u8..=0xFF,
+            prefix in prop::collection::vec(any::<u8>(), 0..=32),
+            suffix in prop::collection::vec(any::<u8>(), 0..=32)
+        ) {
+            let mut input = prefix;
+            let pos = input.len();
+            let encoded = char::from_u32(PUA_BASE + (byte - 0x80) as u32).unwrap().to_string();
+            input.extend_from_slice(encoded.as_bytes());
+            input.extend_from_slice(&suffix);
+
+            let (decoded, consumed) = decode_pua_byte(&input, pos);
+            prop_assert_eq!((decoded, consumed), (byte, 3));
         }
 
-        // Oracle: Algebraic/Reference — bytes_to_string + decode_pua_byte is a
-        // round-trip for raw source bytes, modulo the documented BOM stripping.
+        // Oracle: Negative/error contract — byte triples that start with EE but
+        // do not match the documented PUA continuation bytes must be treated as
+        // ordinary raw bytes.
         #[test]
-        fn raw_bytes_roundtrip_through_pua_decoder(
-            bytes in prop::collection::vec(any::<u8>(), 0..=128)
-                .prop_filter("exclude literal PUA UTF-8 sequences", |bytes| !contains_literal_pua_utf8(bytes))
+        fn malformed_ee_sequences_are_passthrough(
+            (b1, b2) in (any::<u8>(), any::<u8>())
+                .prop_filter("exclude valid PUA encodings", |&(b1, b2)| {
+                    !((b1 == 0x82 || b1 == 0x83) && (0x80..=0xBF).contains(&b2))
+                }),
+            prefix in prop::collection::vec(any::<u8>(), 0..=32),
+            suffix in prop::collection::vec(any::<u8>(), 0..=32)
         ) {
-            let expected = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-                bytes[3..].to_vec()
-            } else {
-                bytes.clone()
-            };
+            let mut input = prefix;
+            let pos = input.len();
+            input.extend_from_slice(&[0xEE, b1, b2]);
+            input.extend_from_slice(&suffix);
 
-            let encoded = bytes_to_string(bytes);
-            let decoded = decode_all_pua_bytes(&encoded);
-            prop_assert_eq!(decoded, expected);
+            let (decoded, consumed) = decode_pua_byte(&input, pos);
+            prop_assert_eq!((decoded, consumed), (0xEE, 1));
+        }
+
+        // Oracle: Reference — the decoder must behave exactly like the documented
+        // byte-by-byte specification for arbitrary input windows.
+        #[test]
+        fn decode_pua_byte_matches_reference_decoder(
+            (input, pos) in prop::collection::vec(any::<u8>(), 1..=128)
+                .prop_flat_map(|input| {
+                    let len = input.len();
+                    (Just(input), 0..len)
+                })
+        ) {
+            prop_assert_eq!(
+                decode_pua_byte(&input, pos),
+                reference_decode_pua_byte(&input, pos)
+            );
         }
     }
 }
