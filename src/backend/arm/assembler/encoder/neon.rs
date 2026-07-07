@@ -2169,3 +2169,173 @@ mod dup_pbt_tests {
     }
 }
 
+#[cfg(test)]
+mod tbl_pbt_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Destination arrangements valid for TBL: only .8b (Q=0) and .16b (Q=1).
+    const DEST_ARRS: &[&str] = &["8b", "16b"];
+
+    // Build TBL Vd.<dest_arr>, { Vn0.<t>, Vn1.<t>, ... }, Vm.<t>.
+    // The table register list is constructed from a slice of register numbers;
+    // `rn_first+i` is wrapped to the 0..31 range so callers can pass large bases.
+    fn tbl_ops(rd: u32, dest_arr: &str, table_regs: &[u32], t_arr: &str, rm: u32) -> Vec<Operand> {
+        let regs: Vec<Operand> = table_regs
+            .iter()
+            .map(|r| Operand::RegArrangement {
+                reg: format!("v{}", r),
+                arrangement: t_arr.to_string(),
+            })
+            .collect();
+        vec![
+            Operand::RegArrangement { reg: format!("v{}", rd), arrangement: dest_arr.to_string() },
+            Operand::RegList(regs),
+            Operand::RegArrangement { reg: format!("v{}", rm), arrangement: t_arr.to_string() },
+        ]
+    }
+
+    fn encode_word(ops: &[Operand]) -> Result<u32, String> {
+        match encode_neon_tbl(ops) {
+            Ok(EncodeResult::Word(w)) => Ok(w),
+            Ok(other) => Err(format!("unexpected non-Word: {:?}", other)),
+            Err(e) => Err(e),
+        }
+    }
+
+    // ORACLE: reference encoding of TBL Vd.T, {Vn0..}, Vm.T.
+    //   0 Q 00 1110 000 Rm 0 len 0 00 Rn Rd   (op bit12 = 0 for TBL)
+    fn reference_word(rd: u32, dest_arr: &str, table_regs: &[u32], rm: u32) -> u32 {
+        let q: u32 = if dest_arr == "16b" { 1 } else { 0 };
+        let rn = table_regs[0];
+        let len = ((table_regs.len() as u32) - 1) & 0x3;
+        (q << 30) | (0b001110u32 << 24) | (rm << 16) | (len << 13) | (rn << 5) | rd
+    }
+
+    proptest! {
+        // 1. Constant ISA fields are correct for every valid encoding,
+        //    independent of registers / arrangement / table width.
+        #[test]
+        fn prop_fixed_fields(
+            rd in 0u32..32u32,
+            rm in 0u32..32u32,
+            rn_first in 0u32..32u32,
+            nregs in 1u32..5u32,
+            dest_q in 0u32..2u32,
+        ) {
+            let dest_arr = if dest_q == 1 { "16b" } else { "8b" };
+            let table_regs: Vec<u32> = (0..nregs).map(|i| (rn_first + i) & 0x1F).collect();
+            let w = encode_word(&tbl_ops(rd, dest_arr, &table_regs, "8b", rm)).expect("encodes");
+            prop_assert_eq!((w >> 31) & 1, 0u32, "bit31 must be 0");
+            prop_assert_eq!((w >> 24) & 0x3F, 0b001110u32, "bits[29:24] must be 001110");
+            prop_assert_eq!((w >> 21) & 0x7, 0u32, "bits[23:21] must be 000");
+            prop_assert_eq!((w >> 15) & 1, 0u32, "bit15 must be 0");
+            prop_assert_eq!((w >> 12) & 1, 0u32, "op bit12 must be 0 for TBL");
+            prop_assert_eq!((w >> 10) & 0x3, 0u32, "bits[11:10] must be 00");
+        }
+
+        // 2. Differential oracle: the encoder output exactly matches an
+        //    independent re-implementation of the TBL bit layout.
+        #[test]
+        fn prop_matches_reference_encoding(
+            rd in 0u32..32u32,
+            rm in 0u32..32u32,
+            rn_first in 0u32..32u32,
+            nregs in 1u32..5u32,
+            dest_arr_idx in 0usize..DEST_ARRS.len(),
+        ) {
+            let dest_arr = DEST_ARRS[dest_arr_idx];
+            let table_regs: Vec<u32> = (0..nregs).map(|i| (rn_first + i) & 0x1F).collect();
+            let ops = tbl_ops(rd, dest_arr, &table_regs, "8b", rm);
+            let w = encode_word(&ops).expect("encodes");
+            prop_assert_eq!(w, reference_word(rd, dest_arr, &table_regs, rm));
+        }
+
+        // 3. Rd (bits[4:0]), Rn = first table reg (bits[9:5]), and Rm (bits[20:16])
+        //    survive verbatim in their fields for table widths 1..=4.
+        #[test]
+        fn prop_register_fields_preserved(
+            rd in 0u32..32u32,
+            rm in 0u32..32u32,
+            rn_first in 0u32..32u32,
+            nregs in 1u32..5u32,
+        ) {
+            let table_regs: Vec<u32> = (0..nregs).map(|i| (rn_first + i) & 0x1F).collect();
+            let w = encode_word(&tbl_ops(rd, "8b", &table_regs, "8b", rm)).expect("encodes");
+            prop_assert_eq!(w & 0x1F, rd, "Rd");
+            prop_assert_eq!((w >> 5) & 0x1F, table_regs[0], "Rn (first table reg)");
+            prop_assert_eq!((w >> 16) & 0x1F, rm, "Rm");
+        }
+
+        // 4. The `len` field (bits[14:13]) encodes (num_regs - 1) for tables of 1..=4 registers.
+        #[test]
+        fn prop_len_field(
+            nregs in 1u32..5u32,
+            rd in 0u32..32u32,
+            rm in 0u32..32u32,
+            rn_first in 0u32..32u32,
+        ) {
+            let table_regs: Vec<u32> = (0..nregs).map(|i| (rn_first + i) & 0x1F).collect();
+            let w = encode_word(&tbl_ops(rd, "8b", &table_regs, "8b", rm)).expect("encodes");
+            prop_assert_eq!((w >> 13) & 0x3, (nregs - 1) & 0x3, "len field");
+        }
+
+        // 5. The Q bit (bit30) is 1 iff the destination arrangement is .16b.
+        #[test]
+        fn prop_q_bit(rd in 0u32..32u32, rm in 0u32..32u32, rn in 0u32..32u32) {
+            for &(arr, expected_q) in &[("8b", 0u32), ("16b", 1u32)] {
+                let w = encode_word(&tbl_ops(rd, arr, &[rn], "8b", rm)).expect("encodes");
+                prop_assert_eq!((w >> 30) & 1, expected_q, "Q for arr {}", arr);
+            }
+        }
+
+        // 6. Error contracts. Too-few-operands, a non-RegList second operand,
+        //    and an invalid register name inside the list all return Err.
+        #[test]
+        fn prop_error_contracts(rd in 0u32..32u32, rm in 0u32..32u32) {
+            // < 3 operands.
+            let too_few = encode_neon_tbl(&[Operand::RegArrangement {
+                reg: format!("v{}", rd),
+                arrangement: "8b".to_string(),
+            }]);
+            prop_assert!(too_few.is_err(), "<3 operands must error");
+
+            // Second operand is not a RegList.
+            let not_list = vec![
+                Operand::RegArrangement { reg: format!("v{}", rd), arrangement: "8b".to_string() },
+                Operand::RegArrangement { reg: format!("v{}", rm), arrangement: "8b".to_string() },
+                Operand::RegArrangement { reg: format!("v{}", rm), arrangement: "8b".to_string() },
+            ];
+            prop_assert!(encode_neon_tbl(&not_list).is_err(), "non-RegList 2nd operand must error");
+
+            // Invalid register name inside the list (parse_reg_num returns None).
+            let bad_reg = vec![
+                Operand::RegArrangement { reg: format!("v{}", rd), arrangement: "8b".to_string() },
+                Operand::RegList(vec![Operand::RegArrangement {
+                    reg: "bogus".to_string(),
+                    arrangement: "8b".to_string(),
+                }]),
+                Operand::RegArrangement { reg: format!("v{}", rm), arrangement: "8b".to_string() },
+            ];
+            prop_assert!(encode_neon_tbl(&bad_reg).is_err(), "invalid reg in list must error");
+        }
+
+        // 7. BUG: an empty table register list should return Err, but the current
+        //    implementation indexes `regs[0]` and panics with index-out-of-bounds.
+        //    We assert the graceful contract (no panic, returns Err).
+        #[test]
+        fn prop_empty_list_does_not_panic(rd in 0u32..32u32, rm in 0u32..32u32) {
+            let ops = vec![
+                Operand::RegArrangement { reg: format!("v{}", rd), arrangement: "8b".to_string() },
+                Operand::RegList(vec![]),
+                Operand::RegArrangement { reg: format!("v{}", rm), arrangement: "8b".to_string() },
+            ];
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| encode_neon_tbl(&ops)));
+            prop_assert!(result.is_ok(), "empty table list must not panic");
+            if let Ok(res) = result {
+                prop_assert!(res.is_err(), "empty table list must yield Err");
+            }
+        }
+    }
+}
+
