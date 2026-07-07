@@ -1,3 +1,25 @@
+# PBT Coverage: `encode_branch`
+
+**File:** `src/backend/arm/assembler/encoder/compare_branch.rs`
+**Function:** `encode_branch` (line 418)
+**Target:** AArch64 unconditional `B` (branch) encoder — `000101 imm26`, emits a `Jump26` relocation.
+
+## Properties (5)
+
+| # | Property | Oracle | Result |
+|---|----------|--------|--------|
+| 1 | `prop_opcode_structure_and_imm26_zero` — word is exactly `0x14000000`: opcode `0b000101` in bits [31:26], linker-reserved imm26 [25:0] zero | reference | ✅ PASS |
+| 2 | `prop_branch_vs_bl_differ_only_bit31` — `encode_branch` XOR `encode_bl` == `1 << 31` | differential | ✅ PASS |
+| 3 | `prop_reloc_is_jump26_primary_forms` — `Symbol`/`SymbolOffset` ⇒ `Jump26` reloc with exact symbol & addend | reference | ✅ PASS |
+| 4 | `prop_symbol_forwarding_all_accepted_kinds` — symbol/addend forwarded verbatim across every `get_symbol`-accepted operand kind (Symbol/Label/SymbolOffset/Modifier/ModifierOffset/Reg/Cond/Barrier) | reference | ✅ PASS |
+| 5 | `prop_rejects_non_symbol_operands` — Imm/Mem/MemExpr/MemRegOffset/Shift/Extend/Expr/RegArrangement/RegLane ⇒ `Err` | negative/error contract | ✅ PASS |
+
+## Findings
+
+None. `encode_branch` is a trivial relocation-emitting encoder: the opcode is a compile-time constant (`0x14000000`), the offset is left entirely to the linker (no immediate to mask/truncate), and the relocation metadata (type, symbol, addend) is forwarded unchanged from `get_symbol`. The negative-contract property confirms the encoder correctly refuses non-symbol targets rather than silently encoding them. No immediate-magnitude or shift-validation concerns apply to this instruction class.
+
+---
+
 # PBT Coverage: `encode_movz`
 
 **File:** `src/backend/arm/assembler/encoder/data_processing.rs`

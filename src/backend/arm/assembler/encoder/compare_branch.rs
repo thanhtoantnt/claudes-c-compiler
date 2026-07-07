@@ -631,3 +631,156 @@ mod prop_encode_tbz_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_branch_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // B instruction (unconditional branch): opcode 0b000101 occupies bits
+    // [31:26]; the imm26 offset field [25:0] is left zero for the linker to
+    // fill via a Jump26 relocation.
+    const B_OPCODE: u32 = 0b000101u32 << 26; // == 0x1400_0000
+    const OPCODE_MASK: u32 = 0xFC00_0000;    // bits [31:26]
+    const IMM26_MASK: u32 = 0x03FF_FFFF;     // bits [25:0]
+
+    fn word_of(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::WordWithReloc { word, .. }) => word,
+            other => panic!("expected WordWithReloc, got {:?}", other),
+        }
+    }
+
+    fn reloc_of(r: Result<EncodeResult, String>) -> Relocation {
+        match r {
+            Ok(EncodeResult::WordWithReloc { reloc, .. }) => reloc,
+            other => panic!("expected WordWithReloc, got {:?}", other),
+        }
+    }
+
+    // Build every operand kind that `get_symbol` accepts, paired with the
+    /// (symbol, addend) the encoder is expected to forward into the relocation.
+    /// Mirrors `get_symbol`'s documented forwarding table.
+    fn accepted_operand_and_expected(
+        sym: String,
+        off: i64,
+        kind_idx: usize,
+    ) -> (Operand, String, i64) {
+        let cases: Vec<(Operand, String, i64)> = vec![
+            (Operand::Symbol(sym.clone()), sym.clone(), 0),
+            (Operand::Label(sym.clone()), sym.clone(), 0),
+            (Operand::SymbolOffset(sym.clone(), off), sym.clone(), off),
+            (Operand::Modifier { kind: "lo12".into(), symbol: sym.clone() }, sym.clone(), 0),
+            (Operand::ModifierOffset {
+                kind: "lo12".into(), symbol: sym.clone(), offset: off,
+            }, sym.clone(), off),
+            (Operand::Reg(sym.clone()), sym.clone(), 0),
+            (Operand::Cond(sym.clone()), sym.clone(), 0),
+            (Operand::Barrier(sym.clone()), sym.clone(), 0),
+        ];
+        cases[kind_idx].clone()
+    }
+
+    prop_compose! {
+        fn arb_accepted_symbol()(
+            s in "[a-z][a-z0-9_]{0,7}",
+            off in -8192i64..=8192i64,
+            kind_idx in 0usize..8usize,
+        ) -> (Operand, String, i64) {
+            accepted_operand_and_expected(s, off, kind_idx)
+        }
+    }
+
+    proptest! {
+        // Property A — opcode structure oracle. The encoded word is fully
+        // determined: opcode 0b000101 in bits [31:26] and the imm26 offset
+        // field [25:0] is left zero for the linker to fill.
+        #[test]
+        fn prop_opcode_structure_and_imm26_zero(
+            sym in "[a-z][a-z0-9_]{0,7}",
+        ) {
+            let ops = vec![Operand::Symbol(sym)];
+            let word = word_of(encode_branch(&ops));
+            prop_assert_eq!(word & OPCODE_MASK, B_OPCODE);
+            prop_assert_eq!(word & IMM26_MASK, 0u32);
+            // Equivalently: the word is exactly the fixed base, independent of operand.
+            prop_assert_eq!(word, B_OPCODE);
+        }
+
+        // Property B — differential: B (encode_branch) and BL (encode_bl)
+        // share the 100101/000101 layout and differ ONLY in bit 31 (the
+        // link bit).
+        #[test]
+        fn prop_branch_vs_bl_differ_only_bit31(
+            sym in "[a-z][a-z0-9_]{0,7}",
+        ) {
+            let ops = vec![Operand::Symbol(sym)];
+            let b_word = word_of(encode_branch(&ops));
+            let bl_word = word_of(encode_bl(&ops));
+            prop_assert_eq!(b_word ^ bl_word, 1u32 << 31);
+        }
+
+        // Property C — relocation contract for the primary operand forms: the
+        // result always carries a Jump26 relocation whose symbol & addend
+        // exactly mirror the input operand.
+        #[test]
+        fn prop_reloc_is_jump26_primary_forms(
+            sym in "[a-z][a-z0-9_]{0,7}",
+            off in -8192i64..=8192i64,
+            is_offset in any::<bool>(),
+        ) {
+            let (op, exp_off) = if is_offset {
+                (Operand::SymbolOffset(sym.clone(), off), off)
+            } else {
+                (Operand::Symbol(sym.clone()), 0)
+            };
+            let reloc = reloc_of(encode_branch(&[op]));
+            prop_assert!(matches!(reloc.reloc_type, RelocType::Jump26));
+            prop_assert_eq!(reloc.symbol, sym);
+            prop_assert_eq!(reloc.addend, exp_off);
+        }
+
+        // Property D — symbol forwarding across every operand kind that
+        // `get_symbol` accepts (incl. parser-misclassified Reg/Cond/Barrier).
+        #[test]
+        fn prop_symbol_forwarding_all_accepted_kinds(
+            (op, exp_sym, exp_off) in arb_accepted_symbol(),
+        ) {
+            let reloc = reloc_of(encode_branch(&[op]));
+            prop_assert!(matches!(reloc.reloc_type, RelocType::Jump26));
+            prop_assert_eq!(reloc.symbol, exp_sym);
+            prop_assert_eq!(reloc.addend, exp_off);
+        }
+
+        // Property E — negative contract. Operand kinds that `get_symbol`
+        // does NOT accept must make encode_branch return Err; no silent
+        // encoding of an invalid branch target.
+        #[test]
+        fn prop_rejects_non_symbol_operands(
+            idx in 0usize..11usize,
+        ) {
+            let rejected: Vec<Operand> = vec![
+                Operand::Imm(42),
+                Operand::Mem { base: "x0".into(), offset: 0 },
+                Operand::MemExpr {
+                    base: "x0".into(), expr: "foo".into(), writeback: false,
+                },
+                Operand::MemPreIndex { base: "x0".into(), offset: 8 },
+                Operand::MemPostIndex { base: "x0".into(), offset: 8 },
+                Operand::MemRegOffset {
+                    base: "x0".into(), index: "x1".into(), extend: None, shift: None,
+                },
+                Operand::Shift { kind: "lsl".into(), amount: 2 },
+                Operand::Extend { kind: "sxtw".into(), amount: 0 },
+                Operand::Expr("x + y".into()),
+                Operand::RegArrangement { reg: "v0".into(), arrangement: "16b".into() },
+                Operand::RegLane { reg: "v0".into(), elem_size: "s".into(), index: 2 },
+            ];
+            let op = rejected[idx].clone();
+            prop_assert!(
+                encode_branch(&[op]).is_err(),
+                "encode_branch should reject this operand"
+            );
+        }
+    }
+}
