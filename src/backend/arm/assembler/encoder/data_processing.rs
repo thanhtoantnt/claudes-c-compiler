@@ -2953,4 +2953,106 @@ mod tests {
             prop_assert!(encode_orn(&ops).is_err());
         }
     }
+
+    // ── encode_eon (EON = EOR with N=1, i.e. exclusive-OR NOT) ─────────────
+    // Oracle: reference (ARMv8 ARM §C4.1.66) + differential vs encode_orn.
+    // Scalar (shifted register): sf opc 01010 shift N Rm imm6 Rn Rd
+    //   EON = opc=10 (bits 30:29), N=1 (bit 21). Sibling of ORN (opc=01, N=1),
+    //   BICS (opc=11, N=1), and the non-inverted EOR (opc=10, N=0).
+    // EON has no NEON vector form; only the scalar register path is exercised.
+    proptest! {
+        // 1. REGISTER-FORM FIELD PLACEMENT: EON Xd, Xn, Xm (no shift), both
+        //    widths. opc=10, fixed op 01010 (bits 28:24), N=1 (bit 21),
+        //    zero shift, and Rm/Rn/Rd placed; sf tracks register width.
+        #[test]
+        fn eon_register_form_field_placement(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            is_64 in any::<bool>(),
+        ) {
+            let mk = |n: u32| if is_64 { xreg(n) } else { Operand::Reg(format!("w{}", n)) };
+            let ops = vec![mk(rd), mk(rn), mk(rm)];
+            let w = expect_word(encode_eon(&ops));
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(opc_of(w), 0b10);          // EON
+            prop_assert_eq!(opcode5_of(w), 0b01010);   // logical shifted register
+            prop_assert_eq!(n21_of(w), 1);             // N=1 marks the NOT variant
+            prop_assert_eq!(shift_type_of(w), 0);      // default LSL
+            prop_assert_eq!(shift_amt_of(w), 0);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 2. REGISTER-FORM SHIFT MAPPING: the four shift kinds map to the 2-bit
+        //    shift field (lsl=00,lsr=01,asr=10,ror=11) and, for X registers,
+        //    imm6 (0..=63) is placed verbatim. The N=1 + opc=10 signature is
+        //    preserved regardless of the shift operand (so EON never degrades
+        //    to EOR, ORN, or BICS).
+        #[test]
+        fn eon_register_form_shift_mapping(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            sk in 0u32..=3u32, amount in 0u32..=63u32,
+        ) {
+            let (kind, want_st) = match sk {
+                0 => ("lsl", 0u32), 1 => ("lsr", 1u32),
+                2 => ("asr", 2u32), _ => ("ror", 3u32),
+            };
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm),
+                           Operand::Shift { kind: kind.into(), amount }];
+            let w = expect_word(encode_eon(&ops));
+            prop_assert_eq!(opc_of(w), 0b10);          // still EON
+            prop_assert_eq!(n21_of(w), 1);             // still the NOT variant
+            prop_assert_eq!(shift_type_of(w), want_st);
+            prop_assert_eq!(shift_amt_of(w), amount);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 3. DIFFERENTIAL vs encode_orn: EON and ORN are identical encodings
+        //    except in the opc field (bits 30:29): ORN=01, EON=10 (so the words
+        //    differ in exactly 0b11 << 29). Every other field — sf, fixed op,
+        //    N, shift, Rm/Rn/Rd — must match bit-for-bit.
+        #[test]
+        fn eon_differs_from_orn_only_in_opc(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            is_w in any::<bool>(),
+            shifted in any::<bool>(), sk in 0u32..=3u32, amount in 0u32..=63u32,
+        ) {
+            let mk = |n: u32| if is_w { format!("w{}", n) } else { format!("x{}", n) };
+            let ops = if shifted {
+                let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+                vec![Operand::Reg(mk(rd)), Operand::Reg(mk(rn)), Operand::Reg(mk(rm)),
+                     Operand::Shift { kind: kind.into(), amount }]
+            } else {
+                vec![Operand::Reg(mk(rd)), Operand::Reg(mk(rn)), Operand::Reg(mk(rm))]
+            };
+            let orn = expect_word(encode_orn(&ops));
+            let eon = expect_word(encode_eon(&ops));
+            prop_assert_eq!(eon ^ orn, 0b11u32 << 29);
+        }
+
+        // 4. NEGATIVE CONTRACT: fewer than 3 operands must be rejected.
+        #[test]
+        fn eon_rejects_too_few_operands(n in 0u32..=2u32) {
+            let ops: Vec<Operand> = (0..n).map(xreg).collect();
+            prop_assert!(encode_eon(&ops).is_err());
+        }
+
+        // 5. NEGATIVE CONTRACT: for sf=0 (W register) the imm6 shift must be
+        //    0..=31 (ARMv8 ARM §C4.1.66); 32..=63 is UNPREDICTABLE and MUST be
+        //    rejected. The encoder currently masks with `& 0x3F` and accepts it.
+        #[test]
+        fn eon_w_register_rejects_shift_above_31(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            amount in 32u32..=63u32, sk in 0u32..=3u32,
+        ) {
+            let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+            let ops = vec![Operand::Reg(format!("w{}", rd)),
+                           Operand::Reg(format!("w{}", rn)),
+                           Operand::Reg(format!("w{}", rm)),
+                           Operand::Shift { kind: kind.into(), amount }];
+            prop_assert!(encode_eon(&ops).is_err());
+        }
+    }
 }
