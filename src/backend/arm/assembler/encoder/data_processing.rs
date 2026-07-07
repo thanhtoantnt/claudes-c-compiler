@@ -1660,4 +1660,189 @@ mod tests {
             prop_assert!(encode_movn(&ops).is_err());
         }
     }
+
+    // ── encode_logical (AND/ORR/EOR/ANDS, scalar forms) ───────────────────
+    // ARMv8 logical (shifted register): sf opc 01010 shift N Rm imm6 Rn Rd
+    //   opc: 00=AND, 01=ORR, 10=EOR, 11=ANDS; N(bit21)=0 for these four.
+    // ARMv8 logical (immediate):         sf opc 100100 N immr imms Rn Rd
+    fn n21_of(w: u32) -> u32 { (w >> 21) & 1 }    // register-form N (bit 21)
+    fn n22_of(w: u32) -> u32 { (w >> 22) & 1 }    // immediate-form N (bit 22)
+    fn immr_of(w: u32) -> u32 { (w >> 16) & 0x3F }
+    fn imms_of(w: u32) -> u32 { (w >> 10) & 0x3F }
+
+    proptest! {
+        // 1. AND/ORR/EOR/ANDS Xd, Xn, Xm (no shift): every fixed field and
+        //    every register field lands exactly where the ARMv8 spec dictates,
+        //    and N (bit 21) is 0 (distinct from ORN/EON/BIC which set N=1).
+        #[test]
+        fn logical_register_form_field_placement(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            opc in 0u32..=3,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_logical(&ops, opc));
+            prop_assert_eq!(sf_of(w), 1);
+            prop_assert_eq!(opc_of(w), opc);
+            prop_assert_eq!(opcode5_of(w), 0b01010);   // logical shifted register
+            prop_assert_eq!(n21_of(w), 0);              // AND/ORR/EOR/ANDS: N=0
+            prop_assert_eq!(shift_type_of(w), 0);
+            prop_assert_eq!(shift_amt_of(w), 0);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 2. Shifted register: all four shift kinds map to the 2-bit shift
+        //    field, and for X registers the imm6 amount (0..=63) is placed
+        //    verbatim with no masking needed (the full legal range).
+        #[test]
+        fn logical_register_form_shift_mapping(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            sk in 0u32..=3u32,
+            amount in 0u32..=63u32,
+            opc in 0u32..=3,
+        ) {
+            let (kind, want) = match sk {
+                0 => ("lsl", 0u32), 1 => ("lsr", 1u32),
+                2 => ("asr", 2u32), _ => ("ror", 3u32),
+            };
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm),
+                           Operand::Shift { kind: kind.into(), amount }];
+            let w = expect_word(encode_logical(&ops, opc));
+            prop_assert_eq!(opcode5_of(w), 0b01010);
+            prop_assert_eq!(shift_type_of(w), want);
+            prop_assert_eq!(shift_amt_of(w), amount);
+            prop_assert_eq!(n21_of(w), 0);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(opc_of(w), opc);
+        }
+
+        // 3. sf (bit 31) tracks register width: W -> 0, X -> 1.
+        #[test]
+        fn logical_sf_tracks_width(
+            n in 0u32..=30, is_w in any::<bool>(),
+        ) {
+            let r = if is_w { Operand::Reg(format!("w{}", n)) } else { xreg(n) };
+            let ops = vec![r.clone(), r.clone(), r];
+            let w = expect_word(encode_logical(&ops, 1));
+            prop_assert_eq!(sf_of(w), if is_w { 0 } else { 1 });
+        }
+
+        // 4. NEGATIVE CONTRACT: for the 32-bit (W) shifted-register form,
+        //    imm6 must be 0..=31; a shift of 32..=63 is UNDEFINED (ARMv8 ARM)
+        //    and MUST be rejected, not silently masked into the imm6 field.
+        #[test]
+        fn logical_w_reg_rejects_shift_above_31(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            amount in 32u32..=63u32,
+            sk in 0u32..=3u32,
+        ) {
+            let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+            let ops = vec![Operand::Reg(format!("w{}", rd)),
+                           Operand::Reg(format!("w{}", rn)),
+                           Operand::Reg(format!("w{}", rm)),
+                           Operand::Shift { kind: kind.into(), amount }];
+            prop_assert!(encode_logical(&ops, 0).is_err());
+        }
+
+        // 5. Immediate form: for a valid bitmask immediate the fixed opcode
+        //    100100 and opc land per spec, and the (N,immr,imms) chosen by the
+        //    encoder ROUND-TRIP — decoded by an independent ARM-ARM reference
+        //    (NOT encode_bitmask_imm) — back to the ORIGINAL value. A genuine
+        //    reference oracle: a shared bug cannot mask a field-placement defect.
+        #[test]
+        fn logical_immediate_form_roundtrips(
+            rd in 0u32..=30, rn in 0u32..=30,
+            size_bits in 1u32..=6u32,        // element size = 1<<size_bits (2..64)
+            ones_off in 0u32..=63u32,        // ones = 1 + (ones_off mod (size-1))
+            rot_off in 0u32..=63u32,         // right-rotation within element
+            is_64 in any::<bool>(),
+            opc in 0u32..=3,
+        ) {
+            let size = 1u32 << size_bits;                 // 2,4,8,16,32,64
+            prop_assume!(is_64 || size <= 32);            // 64-bit element needs X
+            let width = if is_64 { 64 } else { 32 };
+            let max_ones = (size - 1).max(1);             // ones in 1..=size-1
+            let ones = 1 + (ones_off % max_ones);
+            let rot = rot_off % size;
+            // element = run of `ones` ones, rotated right by `rot` within size
+            let welem = if ones == 64 { u64::MAX } else { (1u64 << ones) - 1 };
+            let emask = if size == 64 { u64::MAX } else { (1u64 << size) - 1 };
+            let elem = if rot == 0 {
+                welem & emask
+            } else {
+                ((welem >> rot) | (welem << (size - rot))) & emask
+            };
+            // replicate the element across the register width
+            let mut val: u64 = 0;
+            let mut b = 0u32;
+            while b < width { val |= elem << b; b += size; }
+            let allones = if is_64 { u64::MAX } else { 0xFFFFFFFF };
+            val &= allones;
+            prop_assume!(val != 0 && val != allones);     // not all-0 / all-1
+
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rn_op = if is_64 { xreg(rn) } else { Operand::Reg(format!("w{}", rn)) };
+            let ops = vec![rd_op, rn_op, Operand::Imm(val as i64)];
+            let w = expect_word(encode_logical(&ops, opc));
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(opc_of(w), opc);
+            prop_assert_eq!(opcode6_of(w), 0b100100);     // logical immediate
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+            // independent reference decode of the encoder's chosen fields
+            let decoded = decode_bitmask_ref(n22_of(w), immr_of(w), imms_of(w), is_64);
+            prop_assert_eq!(decoded, val);
+        }
+
+        // 6. NEGATIVE CONTRACT: a value that is NOT a legal bitmask immediate
+        //    (0, or all-ones for the width) MUST be rejected with Err, not
+        //    silently emitted as a bogus bitmask encoding.
+        #[test]
+        fn logical_immediate_rejects_non_bitmask(
+            rd in 0u32..=30, rn in 0u32..=30, is_64 in any::<bool>(),
+            zero in any::<bool>(),
+        ) {
+            let allones = if is_64 { u64::MAX } else { 0xFFFFFFFF };
+            let val: u64 = if zero { 0 } else { allones };
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rn_op = if is_64 { xreg(rn) } else { Operand::Reg(format!("w{}", rn)) };
+            let ops = vec![rd_op, rn_op, Operand::Imm(val as i64)];
+            prop_assert!(encode_logical(&ops, 0).is_err());
+        }
+    }
+
+    /// Independent ARM-ARM reference decoder for an AArch64 logical bitmask
+    /// immediate, used to round-trip the encoder's (N, immr, imms) fields.
+    /// Reimplemented from the architecture pseudocode (DecodeBitMasks), NOT from
+    /// encode_bitmask_imm, so a bug shared with the encoder cannot hide itself.
+    fn decode_bitmask_ref(n: u32, immr: u32, imms: u32, is_64: bool) -> u64 {
+        let len = if n == 1 {
+            6u32
+        } else {
+            let ctmp = (!imms) & 0x3F;                 // imms XOR 0b111111
+            if ctmp == 0 { return 0; }                 // reserved encoding
+            31 - ctmp.leading_zeros()                  // HighestSetBit(ctmp), 0..5
+        };
+        let esize: u32 = 1u32 << len;                  // element size 2..64
+        // S/R are the low `len` bits of imms/immr (ARM ARM DecodeBitMasks).
+        let levels = (1u64 << len) - 1;                 // len-bit mask (len <= 6)
+        let s = (imms as u64) & levels;
+        let r = (immr as u64) & levels;
+        let welem = if s >= 63 { u64::MAX } else { (1u64 << (s + 1)) - 1 };
+        let emask = if esize == 64 { u64::MAX } else { (1u64 << esize) - 1 };
+        let elem = if r == 0 {
+            welem & emask
+        } else {
+            ((welem >> r) | (welem << (esize - r as u32))) & emask
+        };
+        let width = if is_64 { 64 } else { 32 };
+        let mut result: u64 = 0;
+        let mut b = 0u32;
+            while b < width { result |= elem << b; b += esize; }
+        result &= if is_64 { u64::MAX } else { 0xFFFFFFFF };
+        result
+    }
 }
