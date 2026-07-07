@@ -1986,3 +1986,186 @@ mod movi_pbt_tests {
     }
 }
 
+#[cfg(test)]
+mod dup_pbt_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Valid destination arrangements for the GP-register form of DUP
+    // (these drive both the Q bit and the size imm5). NOTE: "1d" is intentionally
+    // absent — DUP (general) has no .1d variant, so the encoder rejects it.
+    const GP_ARRS: &[&str] = &["8b", "16b", "4h", "8h", "2s", "4s", "2d"];
+    // Destination arrangements accepted for the element form (Q derived from these).
+    const ELEM_DEST_ARRS: &[&str] = &["8b", "16b", "4h", "8h", "2s", "4s", "1d", "2d"];
+
+    // Expected Q bit for a destination arrangement.
+    fn expected_q(arr: &str) -> u32 {
+        match arr {
+            "16b" | "8h" | "4s" | "2d" => 1,
+            _ => 0,
+        }
+    }
+
+    // Expected imm5 size-code for the GP form per arrangement.
+    fn gp_imm5_code(arr: &str) -> u32 {
+        match arr {
+            "8b" | "16b" => 0b00001,
+            "4h" | "8h" => 0b00010,
+            "2s" | "4s" => 0b00100,
+            "2d" => 0b01000,
+            _ => unreachable!("gp_imm5_code on {}", arr),
+        }
+    }
+
+    // Build DUP Vd.T, Rn  (general register form)
+    fn gp_ops(rd: u32, arr: &str, rn: u32) -> Vec<Operand> {
+        vec![
+            Operand::RegArrangement { reg: format!("v{}", rd), arrangement: arr.to_string() },
+            Operand::Reg(format!("x{}", rn)),
+        ]
+    }
+
+    // Build DUP Vd.T, Vn.Ss[index]  (element form)
+    fn elem_ops(rd: u32, dest_arr: &str, rn: u32, elem_size: &str, index: u32) -> Vec<Operand> {
+        vec![
+            Operand::RegArrangement {
+                reg: format!("v{}", rd),
+                arrangement: dest_arr.to_string(),
+            },
+            Operand::RegLane {
+                reg: format!("v{}", rn),
+                elem_size: elem_size.to_string(),
+                index,
+            },
+        ]
+    }
+
+    fn encode_word(ops: &[Operand]) -> Result<u32, String> {
+        match encode_neon_dup(ops) {
+            Ok(EncodeResult::Word(w)) => Ok(w),
+            Ok(other) => Err(format!("unexpected non-Word: {:?}", other)),
+            Err(e) => Err(e),
+        }
+    }
+
+    proptest! {
+        // 1. Constant ISA fields hold for every valid encoding of both forms.
+        #[test]
+        fn prop_fixed_fields(rd in 0u32..32u32, rn in 0u32..32u32, idx in 0u32..16u32) {
+            // General-register form
+            for &arr in GP_ARRS {
+                let w = encode_word(&gp_ops(rd, arr, rn)).expect("gp encodes");
+                prop_assert_eq!((w >> 31) & 1, 0u32, "bit31 gp {}", arr);
+                prop_assert_eq!((w >> 24) & 0x1F, 0b01110u32, "opcode[28:24] gp {}", arr);
+                prop_assert_eq!((w >> 21) & 0x7, 0b000u32, "bits[23:21] gp {}", arr);
+                prop_assert_eq!((w >> 15) & 1, 0u32, "bit15 gp {}", arr);
+                prop_assert_eq!((w >> 10) & 1, 1u32, "bit10 gp {}", arr);
+            }
+            // Element form
+            for &dest in ELEM_DEST_ARRS {
+                for &(es, max) in &[("b", 15u32), ("h", 7u32), ("s", 3u32), ("d", 1u32)] {
+                    let index = idx & max;
+                    let w = encode_word(&elem_ops(rd, dest, rn, es, index)).expect("elem encodes");
+                    prop_assert_eq!((w >> 31) & 1, 0u32, "bit31 elem {} {}", dest, es);
+                    prop_assert_eq!((w >> 24) & 0x1F, 0b01110u32, "opcode[28:24] elem {} {}", dest, es);
+                    prop_assert_eq!((w >> 21) & 0x7, 0b000u32, "bits[23:21] elem {} {}", dest, es);
+                    prop_assert_eq!((w >> 15) & 1, 0u32, "bit15 elem {} {}", dest, es);
+                    prop_assert_eq!((w >> 10) & 1, 1u32, "bit10 elem {} {}", dest, es);
+                }
+            }
+        }
+
+        // 2. Rd (bits[4:0]) and Rn (bits[9:5]) always equal the source register numbers.
+        #[test]
+        fn prop_reg_fields(rd in 0u32..32u32, rn in 0u32..32u32, idx in 0u32..16u32) {
+            for &arr in GP_ARRS {
+                let w = encode_word(&gp_ops(rd, arr, rn)).expect("gp encodes");
+                prop_assert_eq!(w & 0x1F, rd, "Rd gp {}", arr);
+                prop_assert_eq!((w >> 5) & 0x1F, rn, "Rn gp {}", arr);
+            }
+            for &dest in ELEM_DEST_ARRS {
+                for &(es, max) in &[("b", 15u32), ("h", 7u32), ("s", 3u32), ("d", 1u32)] {
+                    let index = idx & max;
+                    let w = encode_word(&elem_ops(rd, dest, rn, es, index)).expect("elem encodes");
+                    prop_assert_eq!(w & 0x1F, rd, "Rd elem {} {}", dest, es);
+                    prop_assert_eq!((w >> 5) & 0x1F, rn, "Rn elem {} {}", dest, es);
+                }
+            }
+        }
+
+        // 3. Q bit (bit30) reflects the destination arrangement for both forms.
+        #[test]
+        fn prop_q_bit(rd in 0u32..32u32, rn in 0u32..32u32, idx in 0u32..16u32) {
+            for &arr in GP_ARRS {
+                let w = encode_word(&gp_ops(rd, arr, rn)).expect("gp encodes");
+                prop_assert_eq!((w >> 30) & 1, expected_q(arr), "Q gp {}", arr);
+            }
+            for &dest in ELEM_DEST_ARRS {
+                for &(es, max) in &[("b", 15u32), ("h", 7u32), ("s", 3u32), ("d", 1u32)] {
+                    let index = idx & max;
+                    let w = encode_word(&elem_ops(rd, dest, rn, es, index)).expect("elem encodes");
+                    prop_assert_eq!((w >> 30) & 1, expected_q(dest), "Q elem {} {}", dest, es);
+                }
+            }
+        }
+
+        // 4. imm5 round-trips and bit 11 distinguishes the two forms.
+        #[test]
+        fn prop_imm5_and_form_opcode(rd in 0u32..32u32, rn in 0u32..32u32, idx in 0u32..16u32) {
+            // General-register form: opcode bits[15:10] == 0b000011, imm5 == size code.
+            for &arr in GP_ARRS {
+                let w = encode_word(&gp_ops(rd, arr, rn)).expect("gp encodes");
+                prop_assert_eq!((w >> 10) & 0x3F, 0b000011u32, "form-opcode gp {}", arr);
+                prop_assert_eq!((w >> 16) & 0x1F, gp_imm5_code(arr), "imm5 gp {}", arr);
+            }
+            // Element form: opcode bits[15:10] == 0b000001,
+            //   imm5 == (index << sh) | size_code, and the masked index round-trips.
+            for &(es, max, sh, code) in &[
+                ("b", 15u32, 1u32, 0b00001u32),
+                ("h", 7u32, 2u32, 0b00010u32),
+                ("s", 3u32, 3u32, 0b00100u32),
+                ("d", 1u32, 4u32, 0b01000u32),
+            ] {
+                let index = idx & max;
+                let w = encode_word(&elem_ops(rd, "8b", rn, es, index)).expect("elem encodes");
+                prop_assert_eq!((w >> 10) & 0x3F, 0b000001u32, "form-opcode elem {}", es);
+                let imm5 = (w >> 16) & 0x1F;
+                prop_assert_eq!(imm5, (index << sh) | code, "imm5 elem {} idx {}", es, index);
+                // reconstruct the index from imm5 and verify round-trip
+                prop_assert_eq!((imm5 - code) >> sh, index, "idx roundtrip elem {}", es);
+            }
+        }
+
+        // 5. Error contracts: too few operands, bogus dest arrangement,
+        //    the GP-only rejection of .1d, and unsupported element size.
+        #[test]
+        fn prop_error_contracts(rd in 0u32..32u32, rn in 0u32..32u32, idx in 0u32..16u32) {
+            // <2 operands -> Err
+            let dest_only = vec![Operand::RegArrangement {
+                reg: format!("v{}", rd),
+                arrangement: "8b".to_string(),
+            }];
+            prop_assert!(encode_word(&dest_only).is_err(), "dest-only must error");
+
+            // GP form with unsupported dest arrangement -> Err (neon_arr_to_q_size fails)
+            for &arr in &["1q", "2h", "bogus"] {
+                let r = encode_word(&gp_ops(rd, arr, rn));
+                prop_assert!(r.is_err(), "gp bogus arr {} must error", arr);
+            }
+
+            // GP form rejects .1d: neon_arr_to_q_size(1d) is Ok but the imm5 match has no arm.
+            // DUP (general) defines no .1d variant.
+            let r = encode_word(&gp_ops(rd, "1d", rn));
+            prop_assert!(r.is_err(), "gp .1d must error");
+
+            // Element form: valid dest but unsupported element size -> Err
+            let r = encode_word(&elem_ops(rd, "8b", rn, "q", idx));
+            prop_assert!(r.is_err(), "elem bogus elem_size must error");
+
+            // Element form: bogus dest arrangement -> Err
+            let r = encode_word(&elem_ops(rd, "1q", rn, "b", idx));
+            prop_assert!(r.is_err(), "elem bogus dest arr must error");
+        }
+    }
+}
+

@@ -93,3 +93,18 @@ No bugs found. `encode_ccmp_ccmn` correctly implements both the immediate (`#imm
 
 Verification:
 - `cargo test --lib prop_ccmp_ccmn_tests`
+
+## PBT coverage: `encode_neon_dup` (src/backend/arm/assembler/encoder/neon.rs)
+
+Module `dup_pbt_tests` (5 properties, all PASS, 256 cases each via proptest):
+
+- `prop_fixed_fields` — Fixed-bits invariant (both forms): for every valid encoding `bit31==0`, `bits[28:24]==0b01110`, `bits[23:21]==0b000`, `bit15==0`, `bit10==1`.
+- `prop_reg_fields` — Field-preservation invariant: `Rd` (bits[4:0]) and `Rn` (bits[9:5]) always equal the source register numbers, for the GP-register form across all 7 valid arrangements and the element form across all 8 dest arrangements × 4 element sizes.
+- `prop_q_bit` — Q-selection invariant: `bit30==1` for wide arrangements {16b,8h,4s,2d} and `0` for narrow {8b,4h,2s,1d}, for both forms (Q is driven by the destination arrangement).
+- `prop_imm5_and_form_opcode` — Differential oracle: the GP form produces opcode bits[15:10]==`0b000011` with `imm5` equal to the per-arrangement size code {1,2,4,8}; the element form produces bits[15:10]==`0b000001` with `imm5 == (index<<sh)|sizecode` that round-trips the masked lane index — verifying bit 11 distinguishes the two forms and imm5 encodes size (+index).
+- `prop_error_contracts` — Negative contract: `<2` operands, bogus dest arrangement (`1q`/`2h`/`bogus`), the GP-only rejection of `.1d` (DUP general defines no .1d variant), unsupported element size, and element form with a bogus dest arrangement all return `Err`.
+
+No bugs found. `encode_neon_dup` correctly implements both the AArch64 DUP (general) `0 Q 0 01110 000 imm5 0 0001 1 Rn Rd` and DUP (element) `0 Q 0 01110 000 imm5 0 0000 1 Rn Rd` encodings.
+
+Verification:
+- `cargo test --lib dup_pbt_tests`
