@@ -1676,3 +1676,194 @@ mod prop_encode_ldp_stp_tests {
         assert_eq!(word(encode_ldp_stp(&signed_ops, false)), GOLDEN_STP_X0_X1_X2_16);
     }
 }
+
+#[cfg(test)]
+mod prop_encode_ldnp_stnp_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ORACLE: reference-encoding / field-placement (ARMv8-A ARM, §C4.1.66
+    // “LDNP/STNP — Load/store no-allocate pair”). Bit layout:
+    //   opc[31:30] | 101[29:27] | V[26] | 000[25:23] | L[22] | imm7[21:15]
+    //   | Rt2[14:10] | Rn[9:5] | Rt[4:0]
+    // - opc=10 for 64-bit (Xn), opc=00 for 32-bit (Wn). V is hard-wired 0
+    //   (integer-only; FP/SIMD is a documented TODO in the source).
+    // - imm7 is a SIGNED 7-bit scaled immediate: scale=8 (64-bit) / scale=4
+    //   (32-bit). Architectural range: imm7 ∈ [-64, +63], i.e. offset ∈
+    //   [-512, +504] (64-bit) / [-256, +252] (32-bit), and the offset MUST be a
+    //   multiple of the scale. The ARM ARM mandates that an assembler REJECT
+    //   out-of-range and misaligned immediates (it is a constraint, not UB).
+
+    fn gp_reg(prefix: char, num: u32) -> Operand {
+        Operand::Reg(format!("{}{}", prefix, num))
+    }
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    prop_compose! {
+        fn arb_reg_num()(n in 0u32..=30u32) -> u32 { n }
+    }
+
+    // imm7 in the valid signed range [-63, +63]; offset = imm7 * scale stays
+    // aligned and in-range for both 64- and 32-bit forms.
+    prop_compose! {
+        fn arb_imm7()(v in -63i32..=63i32) -> i32 { v }
+    }
+
+    proptest! {
+        // Property 1 — load vs store differ ONLY in the L bit [22].
+        // Swapping is_load flips exactly 0x0040_0000, for both 64- and 32-bit.
+        #[test]
+        fn prop_load_xor_store_is_l_bit(
+            rt1 in arb_reg_num(),
+            rt2 in arb_reg_num(),
+            rn in arb_reg_num(),
+            is64 in any::<bool>(),
+        ) {
+            let p = if is64 { 'x' } else { 'w' };
+            let ops = vec![
+                gp_reg(p, rt1),
+                gp_reg(p, rt2),
+                Operand::Mem { base: format!("x{}", rn), offset: 0 },
+            ];
+            let load  = word(encode_ldnp_stnp(&ops, true));
+            let store = word(encode_ldnp_stnp(&ops, false));
+            prop_assert_eq!(load ^ store, 0x0040_0000u32);
+        }
+
+        // Property 2 — opc [31:30] + fixed field placement.
+        // opc=0b10 for Xn, 0b00 for Wn; Rt→[4:0], Rn→[9:5], Rt2→[14:10];
+        // V=0 (integer), [25:23]=000, [29:27]=101.
+        #[test]
+        fn prop_opc_and_register_fields(
+            rt1 in arb_reg_num(),
+            rt2 in arb_reg_num(),
+            rn in arb_reg_num(),
+            is64 in any::<bool>(),
+        ) {
+            let p = if is64 { 'x' } else { 'w' };
+            let ops = vec![
+                gp_reg(p, rt1),
+                gp_reg(p, rt2),
+                Operand::Mem { base: format!("x{}", rn), offset: 0 },
+            ];
+            let w = word(encode_ldnp_stnp(&ops, true));
+            prop_assert_eq!((w >> 30) & 0b11, if is64 { 0b10u32 } else { 0b00u32 });
+            prop_assert_eq!(w & 0x1F, rt1);             // Rt  [4:0]
+            prop_assert_eq!((w >> 5) & 0x1F, rn);         // Rn  [9:5]
+            prop_assert_eq!((w >> 10) & 0x1F, rt2);       // Rt2 [14:10]
+            prop_assert_eq!((w >> 26) & 1, 0u32);         // V = 0
+            prop_assert_eq!((w >> 23) & 0b111, 0u32);     // [25:23] = 000
+            prop_assert_eq!((w >> 27) & 0b111, 0b101u32); // [29:27] = 101
+        }
+
+        // Property 3 — imm7 scaling lands in [21:15] for in-range aligned offsets.
+        // 64-bit scale=8, 32-bit scale=4; imm7 ∈ [-63,+63].
+        #[test]
+        fn prop_imm7_scaling(
+            imm7 in arb_imm7(),
+            rn in arb_reg_num(),
+            is64 in any::<bool>(),
+        ) {
+            let scale = if is64 { 3i64 } else { 2 };
+            let offset = (imm7 as i64) << scale;
+            let p = if is64 { 'x' } else { 'w' };
+            let ops = vec![
+                gp_reg(p, 0),
+                gp_reg(p, 1),
+                Operand::Mem { base: format!("x{}", rn), offset },
+            ];
+            let w = word(encode_ldnp_stnp(&ops, true));
+            prop_assert_eq!((w >> 15) & 0x7F, (imm7 as u32) & 0x7F);
+        }
+
+        // Property 4 — NEGATIVE contract: out-of-range imm7 MUST be rejected.
+        // imm7 is signed 7-bit: valid range [-64, +63]. For 64-bit (scale 8),
+        // offset #512 ⇒ imm7 = +64 (> +63, out of range). The ARM ARM mandates
+        // rejection. The encoder currently does `(*offset >> shift) & 0x7F`,
+        // so #512 → imm7 field 0b1000000 = -64 ⇒ decoded offset -512 (silent
+        // corruption: +512 → -512). This property FAILS, documenting the bug.
+        #[test]
+        fn prop_negative_imm7_range_violation_rejects(
+            is64 in any::<bool>(),
+        ) {
+            let scale = if is64 { 3i64 } else { 2 };
+            let offset = 64i64 << scale; // imm7 = +64, just past the valid +63
+            let p = if is64 { 'x' } else { 'w' };
+            let ops = vec![
+                gp_reg(p, 0),
+                gp_reg(p, 1),
+                Operand::Mem { base: "x2".to_string(), offset },
+            ];
+            let r = encode_ldnp_stnp(&ops, true);
+            prop_assert!(
+                r.is_err(),
+                "out-of-range imm7 (offset {}, imm7=+64) must be rejected, got {:?}",
+                offset, r
+            );
+        }
+
+        // Property 5 — NEGATIVE contract: misaligned offset MUST be rejected.
+        // The offset must be a multiple of the scale (8 or 4). #5 is misaligned
+        // for both, yet the encoder computes imm7 = (5 >> shift) & 0x7F = 0 and
+        // silently encodes #5 as #0. ARM ARM requires rejection. FAILS → bug.
+        #[test]
+        fn prop_negative_misaligned_offset_rejects(
+            is64 in any::<bool>(),
+        ) {
+            let p = if is64 { 'x' } else { 'w' };
+            let ops = vec![
+                gp_reg(p, 0),
+                gp_reg(p, 1),
+                Operand::Mem { base: "x2".to_string(), offset: 5 },
+            ];
+            let r = encode_ldnp_stnp(&ops, true);
+            prop_assert!(
+                r.is_err(),
+                "misaligned offset #5 must be rejected, got {:?}",
+                r
+            );
+        }
+
+        // Property 6 — error contract: arity < 3 or a non-Mem third operand → Err.
+        #[test]
+        fn prop_error_contract(
+            nregs in 0u8..3u8,
+            bad_kind in 0u8..3u8,
+        ) {
+            let bad = match bad_kind {
+                0 => Operand::MemPreIndex { base: "x2".to_string(), offset: 0 },
+                1 => Operand::Imm(7),
+                _ => Operand::Symbol("foo".to_string()),
+            };
+            let mut ops: Vec<Operand> = vec![gp_reg('x', 0), gp_reg('x', 1)];
+            if nregs == 2 {
+                ops.push(bad); // wrong shape at slot 2
+            }
+            let r = encode_ldnp_stnp(&ops, true);
+            prop_assert!(r.is_err(), "expected error for ops={:?}, got {:?}", ops, r);
+        }
+    }
+
+    // Golden cross-check (no inputs): hand-derived ARMv8 LDNP/STNP encodings.
+    //   ldnp x0, x1, [x2]  → opc=10,101,V=0,000,L=1,imm7=0,Rt2=1,Rn=2,Rt=0 = 0xA8400440
+    //   stnp x0, x1, [x2]  → L=0                                          = 0xA8000440
+    // NOTE: derived from the ARMv8 ARM bit layout; no AArch64 cross-assembler
+    // (llvm-mc / aarch64-as) is available in this environment to objdump-verify,
+    // so the relationship properties above carry the independent-checking weight.
+    #[test]
+    fn golden_ldnp_stnp_encodings() {
+        let ops = vec![
+            gp_reg('x', 0),
+            gp_reg('x', 1),
+            Operand::Mem { base: "x2".to_string(), offset: 0 },
+        ];
+        assert_eq!(word(encode_ldnp_stnp(&ops, true)), 0xA8400440);
+        assert_eq!(word(encode_ldnp_stnp(&ops, false)), 0xA8000440);
+    }
+}
