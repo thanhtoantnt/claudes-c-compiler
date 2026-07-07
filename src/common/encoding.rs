@@ -102,6 +102,27 @@ pub fn decode_pua_byte(input: &[u8], pos: usize) -> (u8, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    fn decode_all_pua_bytes(encoded: &str) -> Vec<u8> {
+        let input = encoded.as_bytes();
+        let mut output = Vec::with_capacity(input.len());
+        let mut pos = 0;
+        while pos < input.len() {
+            let (byte, consumed) = decode_pua_byte(input, pos);
+            output.push(byte);
+            pos += consumed;
+        }
+        output
+    }
+
+    fn contains_literal_pua_utf8(bytes: &[u8]) -> bool {
+        bytes.windows(3).any(|w| {
+            w[0] == 0xEE
+                && ((w[1] == 0x82 && (0x80..=0xBF).contains(&w[2]))
+                    || (w[1] == 0x83 && (0x80..=0xBF).contains(&w[2])))
+        })
+    }
 
     #[test]
     fn test_ascii_passthrough() {
@@ -180,6 +201,34 @@ mod tests {
             let input: Vec<u8> = encoded.bytes().collect();
             let (decoded, _) = decode_pua_byte(&input, 0);
             assert_eq!(decoded, b, "Byte 0x{:02X} failed round-trip", b);
+        }
+    }
+
+    proptest! {
+        // Oracle: Algebraic/Reference — valid UTF-8 is preserved exactly unless the
+        // input begins with a BOM, which is intentionally stripped.
+        #[test]
+        fn valid_utf8_is_preserved(text in any::<String>().prop_filter("exclude leading BOM", |s| !s.starts_with('\u{FEFF}'))) {
+            let encoded = bytes_to_string(text.as_bytes().to_vec());
+            prop_assert_eq!(encoded, text);
+        }
+
+        // Oracle: Algebraic/Reference — bytes_to_string + decode_pua_byte is a
+        // round-trip for raw source bytes, modulo the documented BOM stripping.
+        #[test]
+        fn raw_bytes_roundtrip_through_pua_decoder(
+            bytes in prop::collection::vec(any::<u8>(), 0..=128)
+                .prop_filter("exclude literal PUA UTF-8 sequences", |bytes| !contains_literal_pua_utf8(bytes))
+        ) {
+            let expected = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                bytes[3..].to_vec()
+            } else {
+                bytes.clone()
+            };
+
+            let encoded = bytes_to_string(bytes);
+            let decoded = decode_all_pua_bytes(&encoded);
+            prop_assert_eq!(decoded, expected);
         }
     }
 }

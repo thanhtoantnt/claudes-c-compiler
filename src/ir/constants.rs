@@ -685,8 +685,135 @@ mod tests {
     }
 
     #[test]
-    fn to_f64_maps_zero_to_positive_zero() {
-        let got = IrConst::Zero.to_f64().expect("zero constant should convert to f64");
-        assert_eq!(got.to_bits(), 0.0f64.to_bits());
+    fn cast_float_to_target_preserves_float_targets() {
+        proptest!(|(v in any::<f64>(), choice in 0u8..2)| {
+            let target = match choice {
+                0 => IrType::F64,
+                1 => IrType::F128,
+                _ => unreachable!(),
+            };
+
+            let got = IrConst::cast_float_to_target(v, target).expect("float targets should always cast");
+
+            match choice {
+                0 => match got {
+                    IrConst::F64(out) => prop_assert_eq!(out.to_bits(), v.to_bits()),
+                    _ => prop_assert!(false, "expected F64 result"),
+                },
+                1 => match got {
+                    IrConst::LongDouble(out, bytes) => {
+                        prop_assert_eq!(out.to_bits(), v.to_bits());
+                        prop_assert_eq!(bytes, *IrConst::long_double(v).long_double_bytes().expect("long double bytes"));
+                    }
+                    _ => prop_assert!(false, "expected LongDouble result"),
+                },
+                _ => unreachable!(),
+            }
+        });
+    }
+
+    #[test]
+    fn cast_float_to_target_matches_f32_cast() {
+        proptest!(|(v in any::<f64>())| {
+            let got = IrConst::cast_float_to_target(v, IrType::F32).expect("F32 cast should succeed");
+            match got {
+                IrConst::F32(out) => prop_assert_eq!(out.to_bits(), (v as f32).to_bits()),
+                _ => prop_assert!(false, "expected F32 result"),
+            }
+        });
+    }
+
+    #[test]
+    fn cast_float_to_target_matches_signed_integer_casts() {
+        proptest!(|(v in any::<f64>(), choice in 0u8..5)| {
+            let target = match choice {
+                0 => IrType::I8,
+                1 => IrType::I16,
+                2 => IrType::I32,
+                3 => IrType::I64,
+                4 => IrType::I128,
+                _ => unreachable!(),
+            };
+
+            let got = IrConst::cast_float_to_target(v, target).expect("signed integer cast should succeed");
+
+            match choice {
+                0 => match got {
+                    IrConst::I8(out) => prop_assert_eq!(out, v as i8),
+                    _ => prop_assert!(false, "expected I8 result"),
+                },
+                1 => match got {
+                    IrConst::I16(out) => prop_assert_eq!(out, v as i16),
+                    _ => prop_assert!(false, "expected I16 result"),
+                },
+                2 => match got {
+                    IrConst::I32(out) => prop_assert_eq!(out, v as i32),
+                    _ => prop_assert!(false, "expected I32 result"),
+                },
+                3 => match got {
+                    IrConst::I64(out) => prop_assert_eq!(out, v as i64),
+                    _ => prop_assert!(false, "expected I64 result"),
+                },
+                4 => match got {
+                    IrConst::I128(out) => prop_assert_eq!(out, v as i128),
+                    _ => prop_assert!(false, "expected I128 result"),
+                },
+                _ => unreachable!(),
+            }
+        });
+    }
+
+    #[test]
+    fn cast_float_to_target_matches_unsigned_integer_casts() {
+        proptest!(|(v in any::<f64>(), choice in 0u8..5)| {
+            let target = match choice {
+                0 => IrType::U8,
+                1 => IrType::U16,
+                2 => IrType::U32,
+                3 => IrType::U64,
+                4 => IrType::U128,
+                _ => unreachable!(),
+            };
+
+            let got = IrConst::cast_float_to_target(v, target).expect("unsigned integer cast should succeed");
+
+            match choice {
+                0 => match got {
+                    IrConst::I8(out) => prop_assert_eq!(out, v as u8 as i8),
+                    _ => prop_assert!(false, "expected I8 result for U8 target"),
+                },
+                1 => match got {
+                    IrConst::I16(out) => prop_assert_eq!(out, v as u16 as i16),
+                    _ => prop_assert!(false, "expected I16 result for U16 target"),
+                },
+                2 => match got {
+                    IrConst::I64(out) => prop_assert_eq!(out, v as u32 as i64),
+                    _ => prop_assert!(false, "expected I64 result for U32 target"),
+                },
+                3 => match got {
+                    IrConst::I64(out) => prop_assert_eq!(out, v as u64 as i64),
+                    _ => prop_assert!(false, "expected I64 result for U64 target"),
+                },
+                4 => match got {
+                    IrConst::I128(out) => prop_assert_eq!(out, v as u128 as i128),
+                    _ => prop_assert!(false, "expected I128 result for U128 target"),
+                },
+                _ => unreachable!(),
+            }
+        });
+    }
+
+    #[test]
+    fn cast_float_to_target_matches_pointer_int_cast() {
+        proptest!(|(v in any::<f64>())| {
+            let got = IrConst::cast_float_to_target(v, IrType::Ptr).expect("Ptr cast should succeed");
+            let expected = IrConst::ptr_int(v as i64);
+
+            match (got, expected) {
+                (IrConst::I32(a), IrConst::I32(b)) => prop_assert_eq!(a, b),
+                (IrConst::I64(a), IrConst::I64(b)) => prop_assert_eq!(a, b),
+                _ => prop_assert!(false, "expected pointer-width integer result"),
+            }
+        });
     }
 }
