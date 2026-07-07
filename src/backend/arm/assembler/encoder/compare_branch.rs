@@ -320,3 +320,168 @@ pub(crate) fn encode_cinv(operands: &[Operand]) -> Result<EncodeResult, String> 
         | (inv_cond << 12) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
+
+#[cfg(test)]
+mod prop_ccmp_ccmn_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ---- Opcode constants for the CCMP/CCMN instruction class ----
+    // Bits always 1: bit 29 (S) + bits 28,27,25,22 (opcode 11010010 @ [28:21]).
+    const FIXED_SET: u32 = (1u32 << 29) | (0b11010010u32 << 21); // == 0x3A400000
+    // Bits always 0: 26,24,23,21 (opcode tail) + 10,4 (gaps between fields).
+    const FIXED_ZERO: u32 = 0x05A0_0410;
+
+    fn word_of(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand], is_ccmp: bool) -> u32 {
+        word_of(encode_ccmp_ccmn(ops, is_ccmp))
+    }
+
+    /// Canonical ARM condition-code table mirroring `encode_cond`: (name, 4-bit value).
+    const COND_TABLE: &[(&str, u32)] = &[
+        ("eq", 0), ("ne", 1), ("cs", 2), ("hs", 2), ("cc", 3), ("lo", 3),
+        ("mi", 4), ("pl", 5), ("vs", 6), ("vc", 7), ("hi", 8), ("ls", 9),
+        ("ge", 10), ("lt", 11), ("gt", 12), ("le", 13), ("al", 14), ("nv", 15),
+    ];
+
+    prop_compose! {
+        fn arb_reg()(n in 0u32..=30u32, is_64 in any::<bool>()) -> (String, u32) {
+            let name = if is_64 { format!("x{}", n) } else { format!("w{}", n) };
+            (name, n)
+        }
+    }
+
+    proptest! {
+        // Property A — full structural / field-placement oracle.
+        // Verifies the fixed opcode bits and the position+mask of every field.
+        #[test]
+        fn prop_opcode_structure_and_fields(
+            (rn_name, rn_num) in arb_reg(),
+            (rm_name, rm_num) in arb_reg(),
+            imm5 in 0i64..=255i64,
+            nzcv in 0i64..=255i64,
+            cond_idx in 0usize..COND_TABLE.len(),
+            is_ccmp in any::<bool>(),
+            is_imm in any::<bool>(),
+        ) {
+            let (cond_name, cond_val) = COND_TABLE[cond_idx];
+            let ops: Vec<Operand> = if is_imm {
+                vec![Operand::Reg(rn_name.clone()), Operand::Imm(imm5),
+                     Operand::Imm(nzcv), Operand::Cond(cond_name.to_string())]
+            } else {
+                vec![Operand::Reg(rn_name.clone()), Operand::Reg(rm_name.clone()),
+                     Operand::Imm(nzcv), Operand::Cond(cond_name.to_string())]
+            };
+            let word = enc(&ops, is_ccmp);
+
+            // Fixed opcode bits.
+            prop_assert_eq!(word & FIXED_SET, FIXED_SET);
+            prop_assert_eq!(word & FIXED_ZERO, 0u32);
+            // sf bit [31] tracks the width of Rn.
+            let expected_sf = if rn_name.starts_with('x') { 1u32 } else { 0u32 };
+            prop_assert_eq!((word >> 31) & 1, expected_sf);
+            // op bit [30]: CCMP => 1, CCMN => 0.
+            prop_assert_eq!((word >> 30) & 1, if is_ccmp { 1 } else { 0 });
+            // cond field [15:12].
+            prop_assert_eq!((word >> 12) & 0xF, cond_val);
+            // Rn field [9:5].
+            prop_assert_eq!((word >> 5) & 0x1F, rn_num);
+            // nzcv field [3:0] is masked to a nibble.
+            prop_assert_eq!(word & 0xF, (nzcv as u32) & 0xF);
+            // o3 bit [11]: 1 for immediate form, 0 for register form.
+            prop_assert_eq!((word >> 11) & 1, if is_imm { 1 } else { 0 });
+            // imm5 / Rm field [20:16].
+            if is_imm {
+                prop_assert_eq!((word >> 16) & 0x1F, (imm5 as u32) & 0x1F);
+            } else {
+                prop_assert_eq!((word >> 16) & 0x1F, rm_num);
+            }
+        }
+
+        // Property B — differential: CCMP and CCMN differ ONLY in bit 30.
+        #[test]
+        fn prop_ccmp_xor_ccmn_is_bit30(
+            (rn_name, _) in arb_reg(),
+            (rm_name, _) in arb_reg(),
+            imm5 in 0i64..=255i64,
+            nzcv in 0i64..=255i64,
+            cond_idx in 0usize..COND_TABLE.len(),
+            is_imm in any::<bool>(),
+        ) {
+            let (cond_name, _) = COND_TABLE[cond_idx];
+            let ops: Vec<Operand> = if is_imm {
+                vec![Operand::Reg(rn_name), Operand::Imm(imm5),
+                     Operand::Imm(nzcv), Operand::Cond(cond_name.to_string())]
+            } else {
+                vec![Operand::Reg(rn_name), Operand::Reg(rm_name),
+                     Operand::Imm(nzcv), Operand::Cond(cond_name.to_string())]
+            };
+            let ccmp = enc(&ops, true);
+            let ccmn = enc(&ops, false);
+            prop_assert_eq!(ccmp ^ ccmn, 1u32 << 30);
+        }
+
+        // Property C — differential: 64- vs 32-bit register differ ONLY in bit 31 (sf).
+        #[test]
+        fn prop_sf_bit_is_bit31(
+            rn_num in 0u32..=30u32,
+            imm5 in 0i64..=255i64,
+            nzcv in 0i64..=255i64,
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let (cond_name, _) = COND_TABLE[cond_idx];
+            let ops64 = vec![Operand::Reg(format!("x{}", rn_num)), Operand::Imm(imm5),
+                             Operand::Imm(nzcv), Operand::Cond(cond_name.to_string())];
+            let ops32 = vec![Operand::Reg(format!("w{}", rn_num)), Operand::Imm(imm5),
+                             Operand::Imm(nzcv), Operand::Cond(cond_name.to_string())];
+            let w64 = enc(&ops64, true);
+            let w32 = enc(&ops32, true);
+            prop_assert_eq!(w64 ^ w32, 1u32 << 31);
+        }
+
+        // Property D — nzcv is masked to 4 bits (idempotent under & 0xF).
+        #[test]
+        fn prop_nzcv_masked_to_nibble(
+            (rn_name, _) in arb_reg(),
+            imm5 in 0i64..=255i64,
+            nzcv in 0i64..=65535i64,
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let (cond_name, _) = COND_TABLE[cond_idx];
+            let mk = |n: i64| vec![Operand::Reg(rn_name.clone()), Operand::Imm(imm5),
+                                   Operand::Imm(n), Operand::Cond(cond_name.to_string())];
+            let full = enc(&mk(nzcv), true);
+            let masked = enc(&mk(nzcv & 0xF), true);
+            // Low nibble equals nzcv & 0xF ...
+            prop_assert_eq!(full & 0xF, (nzcv as u32) & 0xF);
+            // ... and the rest of the word is independent of nzcv's high bits.
+            prop_assert_eq!(full & !0xFu32, masked & !0xFu32);
+        }
+
+        // Property E — differential: immediate vs register forms differ ONLY in
+        // bit 11 (o3) when imm5 equals the Rm register number.
+        #[test]
+        fn prop_imm_vs_reg_differ_only_bit11(
+            (rn_name, _) in arb_reg(),
+            field_val in 0u32..=30u32, // used both as imm5 and as the Rm number
+            nzcv in 0i64..=255i64,
+            cond_idx in 0usize..COND_TABLE.len(),
+            is_ccmp in any::<bool>(),
+        ) {
+            let (cond_name, _) = COND_TABLE[cond_idx];
+            let imm_ops = vec![Operand::Reg(rn_name.clone()), Operand::Imm(field_val as i64),
+                               Operand::Imm(nzcv), Operand::Cond(cond_name.to_string())];
+            let reg_ops = vec![Operand::Reg(rn_name), Operand::Reg(format!("x{}", field_val)),
+                               Operand::Imm(nzcv), Operand::Cond(cond_name.to_string())];
+            let imm_word = enc(&imm_ops, is_ccmp);
+            let reg_word = enc(&reg_ops, is_ccmp);
+            prop_assert_eq!(imm_word ^ reg_word, 1u32 << 11);
+        }
+    }
+}

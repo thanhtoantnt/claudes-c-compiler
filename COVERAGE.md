@@ -78,3 +78,18 @@ No bugs found. `encode_neon_movi` correctly implements the AArch64 SIMD modified
 
 Verification:
 - `cargo test --lib movi_pbt_tests`
+
+## PBT coverage: `encode_ccmp_ccmn` (src/backend/arm/assembler/encoder/compare_branch.rs)
+
+Module `prop_ccmp_ccmn_tests` (5 properties, all PASS, 256 cases each via proptest):
+
+- `prop_opcode_structure_and_fields` — Full reference oracle: fixed opcode bits (`[29]`=1, `[28:21]`=11010010, gaps `[10]`/`[4]`=0) are exact, and every operand-dependent field lands in its ISA-defined position — `sf`@[31], `op`@[30], `imm5`/`Rm`@[20:16], `cond`@[15:12], `o3`@[11], `Rn`@[9:5], `nzcv`@[3:0] — with `imm5`/`nzcv` masked to their field widths.
+- `prop_ccmp_xor_ccmn_is_bit30` — Differential oracle: identical operands+cond yield CCMP and CCMN words that differ *only* in bit 30 (`ccmp ^ ccmn == 1<<30`).
+- `prop_sf_bit_is_bit31` — Differential oracle: an `x`-register vs the matching `w`-register produce words that differ *only* in bit 31 (sf).
+- `prop_nzcv_masked_to_nibble` — Masking invariant: the low nibble equals `nzcv & 0xF` and the rest of the word is identical whether `nzcv` or `nzcv & 0xF` is supplied (idempotent under masking).
+- `prop_imm_vs_reg_differ_only_bit11` — Differential oracle: when `imm5 == Rm` register number, the immediate and register forms differ *only* in bit 11 (o3), since both place the same value in `[20:16]`.
+
+No bugs found. `encode_ccmp_ccmn` correctly implements both the immediate (`#imm5`) and register (`Rm`) forms of the AArch64 conditional-compare instruction for CCMP and CCMN, in 32- and 64-bit register widths.
+
+Verification:
+- `cargo test --lib prop_ccmp_ccmn_tests`
