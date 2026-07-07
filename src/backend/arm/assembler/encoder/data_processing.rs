@@ -1065,3 +1065,141 @@ pub(crate) fn encode_bic(operands: &[Operand]) -> Result<EncodeResult, String> {
 
     Err("unsupported bic operands".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Field extractors (ARMv8 ADD/SUB encoding) ───────────────────────────
+    // Immediate form:  sf op S 1000100 sh imm12 Rn Rd
+    // Shifted-reg form: sf op S 0101100 shift Rm imm6 Rn Rd
+    fn sf_of(w: u32) -> u32        { (w >> 31) & 1 }
+    fn op_of(w: u32) -> u32        { (w >> 30) & 1 }
+    fn s_of(w: u32) -> u32         { (w >> 29) & 1 }
+    fn opcode5_of(w: u32) -> u32   { (w >> 24) & 0x1F } // bits 24..28
+    fn sh_of(w: u32) -> u32        { (w >> 22) & 1 }    // imm form shift bit
+    fn imm12_of(w: u32) -> u32     { (w >> 10) & 0xFFF }
+    fn shift_type_of(w: u32) -> u32 { (w >> 22) & 0x3 }
+    fn shift_amt_of(w: u32) -> u32 { (w >> 10) & 0x3F }
+    fn rm_of(w: u32) -> u32        { (w >> 16) & 0x1F }
+    fn rn_of(w: u32) -> u32        { (w >> 5) & 0x1F }
+    fn rd_of(w: u32) -> u32        { w & 0x1F }
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+
+    fn expect_word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        // 1. ADD Xd, Xn, #imm (0..=0xFFF, unshifted): every fixed field and every
+        //    register/immediate field lands exactly where the ARMv8 spec dictates.
+        #[test]
+        fn add_imm_unshifted_field_placement(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            imm in 0i64..=0xFFF,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), Operand::Imm(imm)];
+            let w = expect_word(encode_add_sub(&ops, false, false));
+            prop_assert_eq!(sf_of(w), 1);            // 64-bit
+            prop_assert_eq!(op_of(w), 0);            // ADD
+            prop_assert_eq!(s_of(w), 0);             // no flags
+            prop_assert_eq!(opcode5_of(w), 0b10001); // add/sub immediate
+            prop_assert_eq!(sh_of(w), 0);            // unshifted
+            prop_assert_eq!(imm12_of(w), imm as u32);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 2. Register-form ADD/SUB: opcode, op bit, and rm/rn/rd placement.
+        #[test]
+        fn register_form_field_placement(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            is_sub in any::<bool>(),
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_add_sub(&ops, is_sub, false));
+            prop_assert_eq!(sf_of(w), 1);
+            prop_assert_eq!(op_of(w), if is_sub { 1 } else { 0 });
+            prop_assert_eq!(s_of(w), 0);
+            prop_assert_eq!(opcode5_of(w), 0b01011); // add/sub shifted register
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(shift_type_of(w), 0);
+            prop_assert_eq!(shift_amt_of(w), 0);
+        }
+
+        // 3. Negative immediate flips the operation: ADD #-N -> SUB #N,
+        //    SUB #-N -> ADD #N. The op bit and imm12 must reflect the swap.
+        #[test]
+        fn negative_immediate_flips_op(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            n in 1i64..=0xFFF,
+            is_sub in any::<bool>(),
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), Operand::Imm(-n)];
+            let w = expect_word(encode_add_sub(&ops, is_sub, false));
+            prop_assert_eq!(op_of(w), if is_sub { 0 } else { 1 });
+            prop_assert_eq!(sh_of(w), 0);
+            prop_assert_eq!(imm12_of(w), n as u32);
+        }
+
+        // 4. Shifted immediate: explicit `lsl #12` (operand = chunk) and auto-shift
+        //    (operand = chunk<<12) both produce sh=1 with imm12 == chunk.
+        #[test]
+        fn shifted_immediate_uses_sh_bit(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            k in 1u32..=0xFFF,
+            explicit in any::<bool>(),
+        ) {
+            let ops = if explicit {
+                vec![xreg(rd), xreg(rn), Operand::Imm(k as i64),
+                     Operand::Shift { kind: "lsl".into(), amount: 12 }]
+            } else {
+                vec![xreg(rd), xreg(rn), Operand::Imm((k as i64) << 12)]
+            };
+            let w = expect_word(encode_add_sub(&ops, false, false));
+            prop_assert_eq!(opcode5_of(w), 0b10001);
+            prop_assert_eq!(sh_of(w), 1);
+            prop_assert_eq!(imm12_of(w), k);
+        }
+
+        // 5. An immediate whose low 12 bits are nonzero and that exceeds the
+        //    unshifted range cannot be encoded -> Err (never silently truncated).
+        #[test]
+        fn unencodable_immediate_returns_err(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            low in 1u32..=0xFFF,
+            extra in 1u32..=0x10,
+        ) {
+            let imm = (low as i64) + (extra as i64) * 0x1000;
+            prop_assume!(imm & 0xFFF != 0 && imm > 0xFFF);
+            let ops = vec![xreg(rd), xreg(rn), Operand::Imm(imm)];
+            prop_assert!(encode_add_sub(&ops, false, false).is_err());
+        }
+
+        // 6. sf (bit 31) tracks register width: W -> 0, X -> 1.
+        #[test]
+        fn sf_bit_tracks_register_width(
+            n in 0u32..=30,
+            is_w in any::<bool>(),
+        ) {
+            let rd = if is_w { Operand::Reg(format!("w{}", n)) } else { xreg(n) };
+            let rn = if is_w { Operand::Reg(format!("w{}", n)) } else { xreg(n) };
+            let ops = vec![rd, rn, Operand::Imm(0)];
+            let w = expect_word(encode_add_sub(&ops, false, false));
+            prop_assert_eq!(sf_of(w), if is_w { 0 } else { 1 });
+        }
+    }
+}
