@@ -786,3 +786,135 @@ impl ElfWriter {
         self.base.write_elf(output_path, &config, false)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn writer_with_text_section(len: usize, fill: u8) -> ElfWriter {
+        let mut writer = ElfWriter::new();
+        writer.base.ensure_text_section();
+        let section = writer
+            .base
+            .sections
+            .get_mut(".text")
+            .expect("text section should exist");
+        section.data = vec![fill; len];
+        writer
+    }
+
+    fn expected_bytes(size: usize, value: i64) -> Vec<u8> {
+        match size {
+            1 => vec![value as u8],
+            2 => (value as i16).to_le_bytes().to_vec(),
+            4 => (value as i32).to_le_bytes().to_vec(),
+            8 => value.to_le_bytes().to_vec(),
+            _ => unreachable!("unsupported size"),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_resolve_pending_exprs_patches_known_label(
+            size in prop_oneof![Just(1usize), Just(2usize), Just(4usize), Just(8usize)],
+            label_offset in 0u64..10_000,
+            addend in -500i64..500,
+            patch_offset in 0usize..32,
+        ) {
+            let mut writer = writer_with_text_section(64, 0x00);
+            writer.base.labels.insert(
+                "label0".to_string(),
+                (".text".to_string(), label_offset),
+            );
+
+            let expr = if addend >= 0 {
+                format!("label0+{}", addend)
+            } else {
+                format!("label0{}", addend)
+            };
+            let expected = expected_bytes(size, label_offset as i64 + addend);
+
+            writer.pending_exprs.push(PendingExpr {
+                section: ".text".to_string(),
+                offset: patch_offset as u64,
+                expr,
+                size,
+            });
+
+            writer.resolve_pending_exprs().unwrap();
+
+            let section = writer.base.sections.get(".text").unwrap();
+            prop_assert!(section.relocs.is_empty());
+            prop_assert_eq!(
+                &section.data[patch_offset..patch_offset + size],
+                expected.as_slice()
+            );
+            prop_assert!(writer.pending_exprs.is_empty());
+        }
+
+        #[test]
+        fn prop_resolve_pending_exprs_emits_reloc_for_unresolved_symbol(
+            patch_offset in 0usize..32,
+            size in prop_oneof![Just(1usize), Just(2usize), Just(4usize), Just(8usize)],
+            suffix in "[a-z]{1,12}",
+        ) {
+            let mut writer = writer_with_text_section(64, 0xAA);
+            let original = writer.base.sections.get(".text").unwrap().data.clone();
+            let expr = format!("missing_{}", suffix);
+
+            writer.pending_exprs.push(PendingExpr {
+                section: ".text".to_string(),
+                offset: patch_offset as u64,
+                expr: expr.clone(),
+                size,
+            });
+
+            writer.resolve_pending_exprs().unwrap();
+
+            let section = writer.base.sections.get(".text").unwrap();
+            prop_assert_eq!(section.data.as_slice(), original.as_slice());
+            prop_assert_eq!(section.relocs.len(), 1);
+            let reloc = &section.relocs[0];
+            prop_assert_eq!(reloc.offset, patch_offset as u64);
+            prop_assert_eq!(reloc.reloc_type, RelocType::Abs32.elf_type());
+            prop_assert_eq!(&reloc.symbol_name, &expr);
+            prop_assert_eq!(reloc.addend, 0);
+            prop_assert!(writer.pending_exprs.is_empty());
+        }
+
+        #[test]
+        fn prop_resolve_pending_exprs_handles_overlapping_label_names(
+            prefix in "[a-z]{1,4}",
+            suffix in "[a-z]{1,4}",
+            short_offset in 0u64..10_000,
+            long_offset in 0u64..10_000,
+        ) {
+            let mut writer = writer_with_text_section(64, 0x00);
+            let long = format!("{}{}", prefix, suffix);
+
+            writer.base.labels.insert(
+                prefix.clone(),
+                (".text".to_string(), short_offset),
+            );
+            writer.base.labels.insert(
+                long.clone(),
+                (".text".to_string(), long_offset),
+            );
+            writer.pending_exprs.push(PendingExpr {
+                section: ".text".to_string(),
+                offset: 0,
+                expr: format!("{}-{}", long, prefix),
+                size: 8,
+            });
+
+            writer.resolve_pending_exprs().unwrap();
+
+            let section = writer.base.sections.get(".text").unwrap();
+            let expected = (long_offset as i64 - short_offset as i64).to_le_bytes();
+            prop_assert_eq!(&section.data[0..8], &expected);
+            prop_assert!(section.relocs.is_empty());
+            prop_assert!(writer.pending_exprs.is_empty());
+        }
+    }
+}
