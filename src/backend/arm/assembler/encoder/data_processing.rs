@@ -2245,4 +2245,157 @@ mod tests {
             prop_assert!(encode_neg(&ops).is_err());
         }
     }
+
+    // ── encode_negs (NEGS = SUBS Rd, XZR, Rm) ───────────────────────────
+    // ARMv8 add/sub (shifted register): sf op S 01011 shift Rm imm6 Rn Rd
+    // NEGS aliases SUBS with Rn hardwired to XZR (11111), op=1 (sub), S=1
+    // (flags set). The ONLY field that differs from NEG is S (bit 29): NEGS
+    // sets it, NEG clears it.
+    //   op (bit 30) = 1, S (bit 29) = 1, fixed op (bits 28:24) = 01011,
+    //   bit 21 = 0 (shifted register, not extended), Rn (bits 9:5) = 11111.
+    // Reuses sf_of/op_of/s_of/opcode5_of/shift_type_of/shift_amt_of/
+    // ext21_of/rm_of/rn_of/rd_of/expect_word/xreg from the sections above.
+
+    proptest! {
+        // 1. NEGS Xd/Wd, Xm/Wm (no shift): every fixed field and every register
+        //    field lands exactly where the ARMv8 spec dictates. Because NEGS
+        //    aliases SUBS Rd, XZR, Rm, Rn (bits 9:5) must be hardwired to 11111,
+        //    op (bit 30) must be 1 (subtraction), S (bit 29) must be 1 (flags
+        //    set — this is what distinguishes NEGS from NEG), bit 21 must be 0
+        //    (shifted register), and sf (bit 31) must track the register width.
+        #[test]
+        fn negs_field_placement(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+            is_64 in any::<bool>(),
+        ) {
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rm_op = if is_64 { xreg(rm) } else { Operand::Reg(format!("w{}", rm)) };
+            let ops = vec![rd_op, rm_op];
+            let w = expect_word(encode_negs(&ops));
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(op_of(w), 1);            // SUB (subtraction)
+            prop_assert_eq!(s_of(w), 1);             // flags set (NEGS, not NEG)
+            prop_assert_eq!(opcode5_of(w), 0b01011); // add/sub shifted register
+            prop_assert_eq!(ext21_of(w), 0);         // shifted register, not extended
+            prop_assert_eq!(rn_of(w), 0b11111);      // Rn hardwired to XZR
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(shift_type_of(w), 0);
+            prop_assert_eq!(shift_amt_of(w), 0);
+        }
+
+        // 2. NEGS vs NEG differ only in the S bit: the same operands must
+        //    produce encodings that are identical except S (bit 29) = 1 for
+        //    NEGS and 0 for NEG. This is the defining relationship between the
+        //    two aliases (both alias SUB/SUBS Rd, XZR, Rm).
+        #[test]
+        fn negs_vs_neg_differs_only_in_s_bit(
+            rd in 0u32..=30, rm in 0u32..=30,
+            is_64 in any::<bool>(),
+            sk in 0u32..=2u32, amount in 0u32..=63u32,
+        ) {
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rm_op = if is_64 { xreg(rm) } else { Operand::Reg(format!("w{}", rm)) };
+            let shift = Operand::Shift {
+                kind: match sk { 0 => "lsl", 1 => "lsr", _ => "asr" }.into(),
+                amount,
+            };
+            let ops = vec![rd_op, rm_op, shift];
+            let w_s = expect_word(encode_negs(&ops));
+            let w = expect_word(encode_neg(&ops));
+            prop_assert_eq!(w_s & !(1u32 << 29), w & !(1u32 << 29)); // identical except S
+            prop_assert_eq!(s_of(w_s), 1);
+            prop_assert_eq!(s_of(w), 0);
+        }
+
+        // 3. Shifted register: the three legal shift kinds (lsl/lsr/asr) map to
+        //    the 2-bit shift field, and for X registers the imm6 amount (0..=63)
+        //    is placed verbatim. The NEGS alias signature (op=1, S=1, Rn=11111)
+        //    is preserved regardless of the shift operand.
+        #[test]
+        fn negs_shift_mapping(
+            rd in 0u32..=30, rm in 0u32..=30,
+            sk in 0u32..=2u32,            // 0=lsl, 1=lsr, 2=asr (ROR invalid for ADD/SUB)
+            amount in 0u32..=63u32,
+        ) {
+            let (kind, want) = match sk {
+                0 => ("lsl", 0u32), 1 => ("lsr", 1u32), _ => ("asr", 2u32),
+            };
+            let ops = vec![xreg(rd), xreg(rm),
+                           Operand::Shift { kind: kind.into(), amount }];
+            let w = expect_word(encode_negs(&ops));
+            prop_assert_eq!(opcode5_of(w), 0b01011);
+            prop_assert_eq!(shift_type_of(w), want);
+            prop_assert_eq!(shift_amt_of(w), amount);
+            prop_assert_eq!(op_of(w), 1);
+            prop_assert_eq!(s_of(w), 1);
+            prop_assert_eq!(rn_of(w), 0b11111);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 4. ALGEBRAIC ALIAS ORACLE: NEGS is defined as SUBS Rd, XZR, Rm. The
+        //    encoding of `negs Rd, Rm [, shift]` must therefore be bit-identical
+        //    to `subs Rd, (XZR|WZR), Rm [, shift]`, for both widths and with or
+        //    without a shift. This is the defining equivalence of the alias.
+        #[test]
+        fn negs_equals_subs_rn_xzr(
+            rd in 0u32..=30, rm in 0u32..=30,
+            is_64 in any::<bool>(),
+            shifted in any::<bool>(),
+            sk in 0u32..=2u32, amount in 0u32..=63u32,
+        ) {
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rm_op = if is_64 { xreg(rm) } else { Operand::Reg(format!("w{}", rm)) };
+            let zr_op = if is_64 { Operand::Reg("xzr".into()) }
+                        else { Operand::Reg("wzr".into()) };
+            let shift = Operand::Shift {
+                kind: match sk { 0 => "lsl", 1 => "lsr", _ => "asr" }.into(),
+                amount,
+            };
+            let negs_ops = if shifted { vec![rd_op.clone(), rm_op.clone(), shift.clone()] }
+                           else { vec![rd_op.clone(), rm_op.clone()] };
+            let subs_ops = if shifted { vec![rd_op, zr_op, rm_op, shift] }
+                           else { vec![rd_op, zr_op, rm_op] };
+            let w_negs = expect_word(encode_negs(&negs_ops));
+            let w_subs = expect_word(encode_add_sub(&subs_ops, true, true));
+            prop_assert_eq!(w_negs, w_subs);
+        }
+
+        // 5. NEGATIVE CONTRACT: for the 32-bit (W) shifted-register form, imm6
+        //    must be 0..=31; a shift of 32..63 is UNDEFINED (ARMv8 ARM, C4.1.4:
+        //    for sf=0 the shift amount must be 0..=31) and MUST be rejected, not
+        //    silently masked into the imm6 field via `& 0x3F`.
+        #[test]
+        fn negs_w_reg_rejects_shift_above_31(
+            rd in 0u32..=30, rm in 0u32..=30,
+            amount in 32u32..=63u32, sk in 0u32..=2u32,
+        ) {
+            let kind = match sk { 0 => "lsl", 1 => "lsr", _ => "asr" };
+            let ops = vec![Operand::Reg(format!("w{}", rd)),
+                           Operand::Reg(format!("w{}", rm)),
+                           Operand::Shift { kind: kind.into(), amount }];
+            prop_assert!(encode_negs(&ops).is_err());
+        }
+    }
+
+    // ── encode_negs: additional negative contract (separate proptest block) ─
+    proptest! {
+        // 6. NEGATIVE CONTRACT: ADD/SUB shifted register only permits LSL/LSR/ASR
+        //    (ROR is reserved for logical ops; ARMv8 ARM C4.1.66). A `ror` shift
+        //    operand to NEGS MUST be rejected with Err, not silently re-encoded
+        //    as LSL via the default arm of the `match kind.as_str()`.
+        #[test]
+        fn negs_rejects_ror_shift(
+            rd in 0u32..=30, rm in 0u32..=30,
+            amount in 0u32..=63u32, is_64 in any::<bool>(),
+        ) {
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rm_op = if is_64 { xreg(rm) } else { Operand::Reg(format!("w{}", rm)) };
+            let ops = vec![rd_op, rm_op,
+                           Operand::Shift { kind: "ror".into(), amount }];
+            prop_assert!(encode_negs(&ops).is_err());
+        }
+    }
 }
