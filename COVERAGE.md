@@ -44,3 +44,29 @@
 - Function is a pure, branchless bit-packer with no error path; the strongest meaningful oracle is the inverse (field extraction). `proptest::any::<u32>()` is used for every field so masking invariance is checked over the full u32 range, including values far outside the legal widths.
 - Already indirectly covered by the existing `proptest_msr::msr_generic_sysreg_matches_sysreg_encoding` differential test; this module covers the function directly.
 - No bugs found in `sysreg_encoding` itself. The one initial failure was a wrong canonical-tuple constant (SCTLR_EL1 op0 is 3, not 2) in the *test fixture*, now corrected.
+
+---
+
+# PBT Coverage — `encode_sys`
+
+**Target:** `src/backend/arm/assembler/encoder/system.rs` → `encode_sys`
+**Oracle type:** field-extraction round-trip (inverse of bit-packing). The function builds the AArch64 `SYS #op1, Cn, Cm, #op2 [, Xt]` instruction as `0xD508_0000 | (op1&7)<<16 | (CRn&0xF)<<12 | (CRm&0xF)<<8 | (op2&7)<<5 | Rt`, parsing a comma-separated operand string. Each property extracts a field back out of the result and asserts it equals the masked input.
+
+## Properties (6) + 1 deterministic companion — all PASS
+
+| # | Property | What it pins |
+|---|----------|--------------|
+| 1 | `sys_high_opcode_bits_fixed` | bits[31:19] == 0xD508_0000 for every well-formed input |
+| 2 | `sys_each_field_roundtrips_in_valid_range` | op1/CRn/CRm/op2/Rt each decode back at their declared (shift, mask) |
+| 3 | `sys_masks_field_inputs_to_width` | encoding(raw) == encoding(masked): high bits of each numeric input dropped |
+| 4 | `sys_omitted_register_defaults_to_xzr_31` | 4-operand form sets Rt = 31 (xzr) |
+| 5 | `sys_distinct_valid_tuples_distinct_words` | distinct legal tuples → distinct words (fields disjoint) |
+| 6 | `sys_rejects_malformed_operands` | <4 operands, non-numeric op1/op2, unparseable register → Err |
+| C | `sys_canonical_words` | all-zero fields→0xD508_001F, DC-CIVAC fields, uppercase CRn/CRm parity |
+
+## Notes
+
+- Function is a pure bit-packer over a parsed string; the inverse (field extraction) is the strongest meaningful oracle and fully reconstructs the encoding jointly with property 1.
+- Masking invariance (property 3) is checked over inputs up to 0xFFFF — well outside each 3-/4-bit field width — confirming the `& 7` / `& 0xF` masks.
+- Error contract (property 6) covers all four failure paths: arity, op1 parse, op2 parse, and register parse.
+- No bugs found in `encode_sys`.

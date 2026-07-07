@@ -1017,3 +1017,143 @@ mod proptest_sysreg {
         assert_eq!(sysreg_encoding(0, 0, 0, 0, 0), 0, "all-zero inputs");
     }
 }
+
+// ── Property-based tests for encode_sys ──────────────────────────────────
+// encode_sys builds the AArch64 `SYS #op1, Cn, Cm, #op2 [, Xt]` instruction
+// from a raw comma-separated operand string:
+//
+//     1101 0101 0000 1 op1[18:16] CRn[15:12] CRm[11:8] op2[7:5] Rt[4:0]
+//       = 0xD508_0000 | (op1 & 7)<<16 | (CRn & 0xF)<<12 | (CRm & 0xF)<<8
+//                     | (op2 & 7)<<5 | Rt
+//
+// Each numeric field is masked to its declared width before placement, so the
+// five variable fields occupy pairwise-disjoint bit ranges within bits[18:0];
+// bits[31:19] are the fixed SYS opcode. If the optional register is omitted,
+// Rt defaults to 31 (xzr).
+//
+// Oracle: field-extraction round-trip — pull each field back out of the result
+// at its declared (shift, mask) and assert equality with the masked input.
+#[cfg(test)]
+mod proptest_sys {
+    use super::encode_sys;
+    use crate::backend::arm::assembler::encoder::EncodeResult;
+    use proptest::prelude::*;
+
+    /// Helper: encode a raw `sys` operand string and unwrap the resulting word.
+    fn encode_word(raw: &str) -> u32 {
+        match encode_sys(raw).expect("valid sys operands must encode") {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected EncodeResult::Word, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        // 1. Fixed opcode: bits[31:19] are constant (0xD508_0000) for every
+        //    well-formed input, regardless of field values.
+        #[test]
+        fn sys_high_opcode_bits_fixed(
+            op1 in 0u32..=255, crn in 0u32..=255, crm in 0u32..=255,
+            op2 in 0u32..=255, rt in 0u32..=31,
+        ) {
+            let raw = format!("#{}, c{}, c{}, #{}, x{}", op1, crn, crm, op2, rt);
+            let word = encode_word(&raw);
+            prop_assert_eq!(word & 0xFFF8_0000, 0xD508_0000u32);
+        }
+
+        // 2. Field-extraction oracle: within each field's legal range, every
+        //    field round-trips out of the result at its declared position. This
+        //    independently pins both the masking and the placement of all five
+        //    fields (op1, CRn, CRm, op2, Rt).
+        #[test]
+        fn sys_each_field_roundtrips_in_valid_range(
+            op1 in 0u32..=7, crn in 0u32..=15, crm in 0u32..=15,
+            op2 in 0u32..=7, rt in 0u32..=31,
+        ) {
+            let raw = format!("#{}, c{}, c{}, #{}, x{}", op1, crn, crm, op2, rt);
+            let word = encode_word(&raw);
+            prop_assert_eq!((word >> 16) & 0x7,  op1, "op1 at [18:16]");
+            prop_assert_eq!((word >> 12) & 0xF, crn, "CRn at [15:12]");
+            prop_assert_eq!((word >> 8)  & 0xF, crm, "CRm at [11:8]");
+            prop_assert_eq!((word >> 5)  & 0x7, op2, "op2 at [7:5]");
+            prop_assert_eq!(word         & 0x1F, rt, "Rt at [4:0]");
+        }
+
+        // 3. Masking invariance: high bits of each numeric input are ignored.
+        //    Encoding the raw (possibly out-of-range) values equals encoding
+        //    each value masked down to its legal field width.
+        #[test]
+        fn sys_masks_field_inputs_to_width(
+            op1 in 0u32..=0xFFFF, crn in 0u32..=0xFFFF, crm in 0u32..=0xFFFF,
+            op2 in 0u32..=0xFFFF, rt in 0u32..=31,
+        ) {
+            let raw_big = format!("#{}, c{}, c{}, #{}, x{}", op1, crn, crm, op2, rt);
+            let raw_masked = format!(
+                "#{}, c{}, c{}, #{}, x{}",
+                op1 & 7, crn & 0xF, crm & 0xF, op2 & 7, rt,
+            );
+            let big = encode_word(&raw_big);
+            let masked = encode_word(&raw_masked);
+            prop_assert_eq!(big, masked);
+        }
+
+        // 4. Default register: with exactly four operands (no Xt), Rt defaults
+        //    to 31 (xzr).
+        #[test]
+        fn sys_omitted_register_defaults_to_xzr_31(
+            op1 in 0u32..=7, crn in 0u32..=15, crm in 0u32..=15, op2 in 0u32..=7,
+        ) {
+            let raw = format!("#{}, c{}, c{}, #{}", op1, crn, crm, op2);
+            let word = encode_word(&raw);
+            prop_assert_eq!(word & 0x1F, 31u32);
+        }
+
+        // 5. Injectivity over legal ranges: distinct (op1, CRn, CRm, op2, Rt)
+        //    tuples yield distinct words. Holds because the fields occupy
+        //    disjoint bits; a collision would reveal an overlap bug.
+        #[test]
+        fn sys_distinct_valid_tuples_distinct_words(
+            a1 in 0u32..=7, acn in 0u32..=15, acm in 0u32..=15, a2 in 0u32..=7, art in 0u32..=31,
+            b1 in 0u32..=7, bcn in 0u32..=15, bcm in 0u32..=15, b2 in 0u32..=7, brt in 0u32..=31,
+        ) {
+            let a = (a1, acn, acm, a2, art);
+            let b = (b1, bcn, bcm, b2, brt);
+            prop_assume!(a != b);
+            let wa = encode_word(&format!("#{}, c{}, c{}, #{}, x{}", a1, acn, acm, a2, art));
+            let wb = encode_word(&format!("#{}, c{}, c{}, #{}, x{}", b1, bcn, bcm, b2, brt));
+            prop_assert_ne!(wa, wb);
+        }
+
+        // 6. Error contract: malformed operand strings are rejected with Err —
+        //    too few operands, non-numeric op1/op2, or an unparseable register.
+        #[test]
+        fn sys_rejects_malformed_operands(kind in 0u8..5) {
+            let raw = match kind {
+                0 => "#1, c0, c0".to_string(),           // < 4 operands
+                1 => "#1, c0, c0, #0, #0".to_string(),   // 5th part not a register
+                2 => "foo, c0, c0, #0".to_string(),      // non-numeric op1
+                3 => "#1, c0, c0, bar".to_string(),      // non-numeric op2
+                _ => "#1, c0, c0, #0, xyz".to_string(),  // unparseable register
+            };
+            prop_assert!(
+                encode_sys(&raw).is_err(),
+                "expected Err for operand string: {}", raw,
+            );
+        }
+    }
+
+    // Deterministic companions: canonical boundary encodings.
+    #[test]
+    fn sys_canonical_words() {
+        // All-zero fields, no register -> Rt=31 (xzr). Only the opcode survives.
+        assert_eq!(encode_word("#0, c0, c0, #0"), 0xD508_001Fu32);
+        // All-zero fields with x0 -> Rt=0.
+        assert_eq!(encode_word("#0, c0, c0, #0, x0"), 0xD508_0000u32);
+        // DC-CIVAC-equivalent fields: op1=3, CRn=7, CRm=14, op2=1, Rt=0.
+        assert_eq!(
+            encode_word("#3, c7, c14, #1, x0"),
+            0xD508_0000u32 | (3 << 16) | (7 << 12) | (14 << 8) | (1 << 5) | 0,
+        );
+        // Uppercase CRn/CRm accepted (lowercased before strip).
+        assert_eq!(encode_word("#0, C7, C10, #1, x5"), encode_word("#0, c7, c10, #1, x5"));
+    }
+}
