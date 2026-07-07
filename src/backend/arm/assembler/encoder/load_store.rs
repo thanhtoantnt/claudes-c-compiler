@@ -2968,3 +2968,170 @@ mod prop_encode_ldaxr_stlxr_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_ldxp_stxp_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: reference-encoding against hand-derived ARMv8-A Architecture
+    // Reference Manual golden words for the Load/Store exclusive *pair*
+    // instructions (ARM ARM §C4.1.66–C4.1.69).
+    //
+    // Field layout (bit 31 → 0):
+    //   1 sz 0010000 L 1 Rs o0 Rt2 Rn Rt
+    //   [31]=1  [30]=sz  [29:23]=0010000  [22]=L(load)  [21]=1
+    //   [20:16]=Rs   [15]=o0(acquire/release)   [14:10]=Rt2
+    //   [9:5]=Rn     [4:0]=Rt
+    //
+    // Golden values were derived by independent bit-level reconstruction
+    // (NOT the crate's own shift expression) and cross-checked:
+    //   LDXP  x0,x1,[x2]   = 0xC87F0440   (sz=1, L=1, Rs=11111, o0=0)
+    //   LDAXP x0,x1,[x2]   = 0xC87F8440   (o0=1)
+    //   STXP  w3,x0,x1,[x2]= 0xC8230440   (sz=1, L=0, Rs=3,  o0=0)
+    //   STLXP w3,x0,x1,[x2]= 0xC8238440   (o0=1)
+    //   LDXP  w0,w1,[w2]   = 0x887F0440   (sz=0)
+
+    const GOLDEN_LDXP_X0_X1_X2: u32 = 0xC87F0440;
+    const GOLDEN_STXP_W3_X0_X1_X2: u32 = 0xC8230440;
+
+    fn reg(prefix: char, n: u32) -> Operand {
+        Operand::Reg(format!("{}{}", prefix, n))
+    }
+
+    fn mem_x(n: u32) -> Operand {
+        Operand::Mem { base: format!("x{}", n), offset: 0 }
+    }
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        // Property 1 — LDXP/LDAXP reference encoding.
+        // For valid (matching-width) operands the load-pair word must equal the
+        // golden `ldxp x0,x1,[x2]` offset additively by Rt[4:0], Rt2[14:10],
+        // Rn[9:5]; sz cleared for W registers (−0x4000_0000); o0 set for LDAXP
+        // (+0x0000_8000).  Rs[20:16] stays reserved as 11111 throughout.
+        #[test]
+        fn prop_load_matches_arm_reference(
+            rt in 0u32..=30,
+            rt2 in 0u32..=30,
+            rn in 0u32..=30,
+            is_64 in any::<bool>(),
+            acquire in any::<bool>(),
+        ) {
+            let p = if is_64 { 'x' } else { 'w' };
+            let ops = vec![reg(p, rt), reg(p, rt2), mem_x(rn)];
+            let w = word(encode_ldxp_stxp(&ops, true, acquire));
+
+            let mut expected = GOLDEN_LDXP_X0_X1_X2 as i64
+                + (rt as i64)                       // Rt   [4:0]
+                + ((rt2 as i64 - 1) << 10)          // Rt2  [14:10]
+                + ((rn as i64 - 2) << 5);           // Rn   [9:5]
+            if !is_64  { expected -= 1i64 << 30; }  // clear sz
+            if acquire { expected += 1i64 << 15; }  // set   o0
+
+            prop_assert_eq!(w, expected as u32);
+            // Rs field is architecturally reserved as 11111 for load-pair.
+            prop_assert_eq!((w >> 16) & 0x1F, 0b11111u32);
+        }
+
+        // Property 2 — STXP/STLXP reference encoding.
+        // `stxp w3,x0,x1,[x2]` golden offset additively by Rt[4:0], Rt2[14:10],
+        // Rn[9:5], and Rs=Ws[20:16]; sz cleared for W; o0 set for STLXP.
+        #[test]
+        fn prop_store_matches_arm_reference(
+            ws in 0u32..=30,
+            rt in 0u32..=30,
+            rt2 in 0u32..=30,
+            rn in 0u32..=30,
+            is_64 in any::<bool>(),
+            release in any::<bool>(),
+        ) {
+            let p = if is_64 { 'x' } else { 'w' };
+            let ops = vec![reg('w', ws), reg(p, rt), reg(p, rt2), mem_x(rn)];
+            let w = word(encode_ldxp_stxp(&ops, false, release));
+
+            let mut expected = GOLDEN_STXP_W3_X0_X1_X2 as i64
+                + (rt as i64)                       // Rt   [4:0]
+                + ((rt2 as i64 - 1) << 10)          // Rt2  [14:10]
+                + ((rn as i64 - 2) << 5)            // Rn   [9:5]
+                + ((ws as i64 - 3) << 16);          // Rs=Ws[20:16]
+            if !is_64  { expected -= 1i64 << 30; }  // clear sz
+            if release { expected += 1i64 << 15; }  // set   o0
+
+            prop_assert_eq!(w, expected as u32);
+        }
+
+        // Property 3 — sz[30] tracks Rt width; L[22] is set iff is_load.
+        // These two control bits are pure functions of (width, direction)
+        // and must be independent of register numbers and acquire/release.
+        #[test]
+        fn prop_sz_and_l_bits_track_width_and_direction(
+            rt in 0u32..=30,
+            rt2 in 0u32..=30,
+            rn in 0u32..=30,
+            is_64 in any::<bool>(),
+            is_load in any::<bool>(),
+            ar in any::<bool>(),
+        ) {
+            let p = if is_64 { 'x' } else { 'w' };
+            let ops = if is_load {
+                vec![reg(p, rt), reg(p, rt2), mem_x(rn)]
+            } else {
+                vec![reg('w', 0), reg(p, rt), reg(p, rt2), mem_x(rn)]
+            };
+            let w = word(encode_ldxp_stxp(&ops, is_load, ar));
+            prop_assert_eq!((w >> 30) & 1, if is_64 { 1 } else { 0 });
+            prop_assert_eq!((w >> 22) & 1, if is_load { 1 } else { 0 });
+        }
+
+        // Property 4 — o0[15] (acquire for load / release for store) is set
+        // iff the `acquire_release` flag is true, regardless of operands/direction.
+        #[test]
+        fn prop_o0_bit_reflects_acquire_release(
+            rt in 0u32..=30,
+            rt2 in 0u32..=30,
+            rn in 0u32..=30,
+            is_load in any::<bool>(),
+            acquire_release in any::<bool>(),
+        ) {
+            let ops = if is_load {
+                vec![reg('x', rt), reg('x', rt2), mem_x(rn)]
+            } else {
+                vec![reg('w', 0), reg('x', rt), reg('x', rt2), mem_x(rn)]
+            };
+            let w = word(encode_ldxp_stxp(&ops, is_load, acquire_release));
+            prop_assert_eq!((w >> 15) & 1, if acquire_release { 1 } else { 0 });
+        }
+
+        // Property 5 — negative/error contract: the memory operand slot must
+        // hold a Mem; any other Operand variant at that position is rejected.
+        // (LDXP/LDAXP use [Xn] only — no offset/pre/post-index forms exist.)
+        #[test]
+        fn prop_missing_memory_operand_errors(
+            is_load in any::<bool>(),
+            bad_kind in 0u8..3,
+        ) {
+            let bad = match bad_kind {
+                0 => Operand::Reg("x9".to_string()),
+                1 => Operand::Imm(0),
+                _ => Operand::Symbol("foo".to_string()),
+            };
+            let ops = if is_load {
+                vec![Operand::Reg("x0".into()), Operand::Reg("x1".into()), bad]
+            } else {
+                vec![Operand::Reg("w0".into()), Operand::Reg("x1".into()),
+                     Operand::Reg("x2".into()), bad]
+            };
+            let r = encode_ldxp_stxp(&ops, is_load, false);
+            prop_assert!(r.is_err(), "expected error for non-Mem operand, got {:?}", r);
+        }
+    }
+}
+
