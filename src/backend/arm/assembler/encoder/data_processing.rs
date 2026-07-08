@@ -5923,3 +5923,137 @@ mod smaddl_props {
         }
     }
 }
+
+// ── encode_madd property tests ───────────────────────────────────────────
+// MADD <Rd>, <Rn>, <Rm>, <Ra> (multiply-add):
+//   sf[31] 0[30] S=0[29] 11011[28:24] 000[23:21] Rm[20:16] o0=0[15]
+//   Ra[14:10] Rn[9:5] Rd[4:0]
+// Reference: ARMv8 ARM, Data-processing (3 source). MADD differs from MSUB
+// only in o0 (bit 15): MADD has o0=0, MSUB has o0=1.
+// Base word (all register fields zero): 0x9B000000 (64-bit), 0x1B000000 (32-bit).
+#[cfg(test)]
+mod madd_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn sf_of(w: u32) -> u32    { (w >> 31) & 1 }
+    fn fixed_of(w: u32) -> u32 { (w >> 21) & 0x3FF } // bits [30:21]
+    fn o0_of(w: u32) -> u32    { (w >> 15) & 1 }     // bit 15
+    fn ra_of(w: u32) -> u32    { (w >> 10) & 0x1F }
+    fn rm_of(w: u32) -> u32    { (w >> 16) & 0x1F }
+    fn rn_of(w: u32) -> u32    { (w >> 5) & 0x1F }
+    fn rd_of(w: u32) -> u32    { w & 0x1F }
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        // P1. Full-word reference oracle: the encoded word equals the
+        //     spec-derived constant with Rm/Ra/Rn/Rd placed in their fields,
+        //     for both 32- and 64-bit forms.
+        #[test]
+        fn madd_reference_encoding(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            ra in 0u32..=31,
+            is_64 in any::<bool>(),
+        ) {
+            let rd_op = if is_64 { xreg(rd) } else { wreg(rd) };
+            let ops = vec![rd_op, xreg(rn), xreg(rm), xreg(ra)];
+            let w = word(encode_madd(&ops));
+            let base = if is_64 { 0x9B000000u32 } else { 0x1B000000u32 };
+            let expected = base | (rm << 16) | (ra << 10) | (rn << 5) | rd;
+            prop_assert_eq!(w, expected);
+        }
+
+        // P2. Field placement: every fixed bit-group and every register field
+        //     lands exactly where the ARMv8 MADD encoding dictates. o0 (bit 15)
+        //     is 0, which is what distinguishes MADD from MSUB.
+        #[test]
+        fn madd_field_placement(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            ra in 0u32..=31,
+            is_64 in any::<bool>(),
+        ) {
+            let rd_op = if is_64 { xreg(rd) } else { wreg(rd) };
+            let ops = vec![rd_op, xreg(rn), xreg(rm), xreg(ra)];
+            let w = word(encode_madd(&ops));
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(fixed_of(w), 0b0011011000); // bits [30:21]
+            prop_assert_eq!(o0_of(w), 0);               // bit 15 = 0 -> MADD
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(ra_of(w), ra);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // P3. NEGATIVE CONTRACT (spec): AArch64 MADD <Rd>,<Rn>,<Rm>,<Ra> requires
+        //     ALL FOUR operands to share the same register width (all W or all X).
+        //     The implementation derives `sf` only from Rd and silently encodes
+        //     mixed W/X operands as the Rd width. This property therefore FAILS
+        //     and is the bug witness for encode_madd_mixed_width_operands.
+        //     Mirrors the file's established convention (adc/sbc/orn/eon
+        //     _rejects_mixed_width_operands).
+        #[test]
+        fn madd_rejects_mixed_width_operands(
+            n in 0u32..=30,
+        ) {
+            let ops = vec![xreg(n), wreg(n), xreg(n), xreg(n)]; // 64-bit Rd, 32-bit Rn
+            let r = encode_madd(&ops);
+            prop_assert!(r.is_err(),
+                "encode_madd should reject mixed-width operands: {:?}", ops);
+        }
+
+        // P4. MADD vs MSUB disambiguation: for identical register operands,
+        //     encode_madd's o0 (bit 15) is 0 while encode_msub's is 1, and the
+        //     two words differ only in that single bit.
+        #[test]
+        fn madd_vs_msub_differ_only_in_o0(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            ra in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm), xreg(ra)];
+            let wmadd = word(encode_madd(&ops));
+            let wmsub = word(encode_msub(&ops));
+            prop_assert_eq!(o0_of(wmadd), 0);
+            prop_assert_eq!(o0_of(wmsub), 1);
+            prop_assert_eq!(wmadd ^ wmsub, 1u32 << 15);
+        }
+
+        // P5. Negative contract: MADD takes exactly four register operands.
+        //     Fewer than four, or a non-register operand in any position, is Err.
+        #[test]
+        fn madd_rejects_missing_or_non_register_operands(
+            n in 0u32..=30,
+            missing in 1u32..=4,
+            bad_pos in 0u32..4,
+        ) {
+            // too few operands
+            {
+                let mut ops = vec![xreg(n), xreg(n), xreg(n), xreg(n)];
+                for _ in 0..missing {
+                    ops.pop();
+                }
+                prop_assert!(encode_madd(&ops).is_err());
+            }
+            // a non-register operand in any position
+            {
+                let mut ops = vec![xreg(n), xreg(n), xreg(n), xreg(n)];
+                ops[bad_pos as usize] = Operand::Imm(3);
+                prop_assert!(encode_madd(&ops).is_err());
+            }
+        }
+    }
+}

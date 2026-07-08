@@ -240,3 +240,60 @@ Other notes (non-findings, no separate report):
   a valid MSUB bit pattern.
 - **No panic risk:** the function returns `Result` on every path and always
   yields `EncodeResult::Word`. See the bug report for the fix.
+
+---
+
+# PBT Coverage — `encode_umulh`
+
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_umulh`
+**Suite:** inline `mod tests` proptest block (8 properties total; 7 pass, 1 failing bug reproducer)
+
+## Function under test
+
+```rust
+pub(crate) fn encode_umulh(operands: &[Operand]) -> Result<EncodeResult, String> {
+    let (rd, _) = get_reg(operands, 0)?;
+    let (rn, _) = get_reg(operands, 1)?;
+    let (rm, _) = get_reg(operands, 2)?;
+    // UMULH: 1 00 11011 1 10 Rm 0 11111 Rn Rd
+    let word = (1u32 << 31) | (0b0011011110 << 21) | (rm << 16) | (0b011111 << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+```
+
+## Properties (oracle: reference / literal-spec — ARMv8 ARM)
+
+| # | Property | Status | What it pins |
+|---|----------|--------|--------------|
+| 1 | `umulh_fixed_fields` | pass | sf=1, class opcode `11011`, op31=`110`, o0=0, Ra=XZR |
+| 2 | `umulh_register_fields_match_reference` | pass | Rd/Rn/Rm field placement + full-word == `umulh_ref` |
+| 3 | `umulh_missing_operand_errors` | pass | <3 operands → Err (count contract) |
+| 4 | `umulh_rejects_32bit_w_registers` | **FAIL** | W-register operands must be UNDEF → bug |
+| 5 | `umulh_rejects_non_register_operand_in_any_position` | pass | non-Reg (Imm) in any slot → Err (type contract) |
+| 6 | `umulh_w_form_emits_identical_word_to_x_form` | pass | width-indifference regression guard (evidence for #4) |
+| 7 | `umulh_silently_accepts_trailing_extra_operand` | pass | no upper-bound arity check (minor finding) |
+| — | `smulh_vs_umulh_only_sign_bit_differs` | pass | SMULH↔UMULH differ only in bit 23 |
+
+Reference constant (Rd=Rn=Rm=0): `umulh x0,x0,x0 == 0x9BC07C00`.
+
+## Findings
+
+**1 functional finding filed:** `pbt-out/bug_reports/umulh_accepts_32bit_w_registers.md`
+
+`encode_umulh` discards `get_reg`'s `is_64` flag (bound to `_`) and hardcodes
+`sf=1`, so `umulh w0, w1, w2` is silently accepted and emits the identical word
+to `umulh x0, x1, x2` (`0x9BC07C00`). UMULH is 64-bit-only per the ARMv8 ARM
+(`sf=0` / op31=110 is UNDEF); a correct assembler must reject W operands.
+Reproduced by the failing property #4 and pinned by the passing guard #6.
+
+Secondary (low severity, characterization only): property #7 shows the encoder
+performs no upper-bound arity check — surplus trailing operands are silently
+ignored (`umulh x0, x1, x2, x3` ⇒ `umulh x0, x1, x2`). Consistent with the rest
+of the encoder module; not a regression target.
+
+Other notes (non-findings):
+- **No silent truncation / masking:** register numbers >31 are rejected by
+  `parse_reg_num`; UMULH has no immediates, shifts, or lanes to truncate.
+- **No reserved/unallocated encoding:** all valid 0..=31 register combinations
+  produce a valid UMULH bit pattern.
+- **No panic risk:** returns `Result` on every path, always `EncodeResult::Word`.

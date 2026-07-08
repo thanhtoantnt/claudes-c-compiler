@@ -1,92 +1,74 @@
-# REPORT
+# REPORT — `encode_madd`
 
 ## Summary
 
-Function-scoped property-based testing campaign on `encode_smull` in
-`src/backend/arm/assembler/encoder/data_processing.rs`. Added 6 `proptest!`
-properties to the module's existing `mod tests`: a reference-constant oracle,
-fixed-field placement, deterministic sf behavior, three negative contracts, and a
-width-validation negative contract. Five pass; **one fails** (`smull_rejects_wrong_width_destination`),
-confirming a real SUT violation with a shrunk counterexample. The failure is
-reported as B1 below.
+Generated a property-based test suite for `encode_madd`
+(`src/backend/arm/assembler/encoder/data_processing.rs:598`), the AArch64
+`MADD <Rd>, <Rn>, <Rm>, <Ra>` encoder. Five properties were written; **four pass,
+one fails**. The failing property is a legitimate spec-violation witness:
+`encode_madd` does not validate that all four operands share the same register
+width, so mixed W/X operands are silently encoded as the `Rd` width.
 
-Methodology: the reference constant `0x9B207C00` was derived independently from the
-ARMv8 ARM SMADDL bit-string `1 00 11011 001 Rm 0 11111 Rn Rd` with Rm=Rn=Rd=0 and
-OR'd with the register field placements (not copied from the implementation).
-Register-number generators are scoped to `0..=30` (excluding 31) so `WZR`/`XZR`/
-`SP`/`WSP` aliasing is exercised only by the dedicated negative-contract
-properties. proptest default shrinking was sufficient; no custom `Strategy` types
-were needed beyond the existing `xreg`/`wreg` helpers.
+(Pre-existing context: the `data_processing` test binary already had ~46 failing
+tests from prior campaigns — unrelated to this work; results below are isolated
+to `data_processing::madd_props`.)
 
 ## Modules Tested
 
-| Module (file) | Function | Oracle type | Properties added | Status |
+| Module | Target | Oracle | Properties | Result |
 |---|---|---|---|---|
-| `src/backend/arm/assembler/encoder/data_processing.rs` | `encode_smull` | reference constant (spec bit-string) + field placement + negative contract | 6 | 5 pass, 1 FAILS (B1) |
+| `data_processing::madd_props` | `encode_madd` (data_processing.rs:598) | reference constant + field placement + differential (vs `encode_msub`) + negative contract | 5 | 4 pass / 1 fail |
 
 ## Bugs Found
 
-### B1 — `encode_smull` accepts a 32-bit (W) destination, silently miscoding as a 64-bit result
+**`encode_madd` silently accepts mixed-width register operands** —
+full report: `pbt-out/bug_reports/encode_madd_mixed_width_operands.md`.
 
-**Witness (failing, shrunk PBT property):**
-- Property: `smull_rejects_wrong_width_destination`
-  (`src/backend/arm/assembler/encoder/data_processing.rs`, `mod tests`)
-- **minimal failing input:** `n = 0`
-- **Counterexample operands:** `[wreg(0), wreg(0), wreg(0)]` ≡ `smull w0, w0, w0`
-- **Actual:** `encode_smull(...)` returns `Ok(EncodeResult::Word(0x9B207C00))`,
-  i.e. emits `SMADDL X0, W0, W0, XZR` — a **64-bit** destination write.
-- **Expected:** `Err` (SMULL has no valid encoding with a `W` destination).
-- **Run record:** `successes: 0`, `local rejects: 0` — failed on first draw,
-  shrunk to `n = 0`.
-- **Reproduce:** `cargo test --lib smull_rejects_wrong_width_destination`
-  → `assertion failed: encode_smull(&ops).is_err()`
+`sf` is derived only from `Rd` (operand 0); the widths of `Rn`/`Rm`/`Ra` are
+bound to `_` and discarded, so `madd x0, w0, x0, x0` encodes as a 64-bit `MADD`
+instead of erroring. The ARMv8 ARM requires all four MADD operands to share one
+width.
 
-**Spec / doc evidence (oracle anchor):**
-- ARMv8 ARM: `SMULL <Xd>, <Wn>, <Wm>` is the alias of `SMADDL <Xd>, <Wn>, <Wm>, <XZR>`;
-  the destination MUST be a 64-bit (X) register.
-- In-tree docstring on `encode_smull`:
-  `SMULL Xd, Wn, Wm -> SMADDL Xd, Wn, Wm, XZR`.
+Witness (failing, shrunk PBT property):
+- **property:** `madd_rejects_mixed_width_operands` (mod `madd_props`,
+  data_processing.rs:6013)
+- **reproduce:** `cargo test --lib data_processing::madd_props::madd_rejects_mixed_width_operands`
+- **Falsifiable / minimal failing input:** `n = 0` (successes before failure: 0)
+- **counterexample:** `ops = [Reg("x0"), Reg("w0"), Reg("x0"), Reg("x0")]`
+  → `madd x0, w0, x0, x0`
+- **actual:** `Ok(EncodeResult::Word(…))` with `sf = 1`
+- **expected:** `Err`
 
-**Root cause:** `get_reg` (defined at `src/backend/arm/assembler/encoder/mod.rs:956`)
-returns `(num, is_64)`, but `encode_smull` binds all three `is_64` flags to `_` and
-hardcodes `(1u32 << 31)` as `sf`. The destination width is never validated, so a `W`
-destination is silently re-encoded as `X`.
-
-**Impact:** valid-looking ARM word (`0x9B207C00`) that mismatches the assembly text —
-silent miscompilation of width-incorrect source. Severity: medium. The fixed-bit
-layout itself is correct (verified by the passing `smull_reference_encoding` and
-`smull_field_placement` properties); the defect is the missing width validation.
-
-**Suggested fix:** bind `(rd, rd_is_64)`, `(rn, rn_is_64)`, `(rm, rm_is_64)` from
-`get_reg`; return `Err` unless `rd_is_64 && !rn_is_64 && !rm_is_64`. The same
-`is_64`-discarding pattern appears in `encode_umull`, `encode_smaddl`,
-`encode_umaddl`, `encode_smulh`, `encode_umulh` — worth auditing together. Full
-write-up in `pbt-out/SMULL_BUG_REPORT.md`.
+The same defect class affects the adjacent `encode_msub` (line 608) and
+`encode_mul` (line 584); each has / needs its own report
+(`encode_msub_mixed_width_operands.md` already exists in `pbt-out/bug_reports/`).
 
 ## Design Caveats
 
-None.
+- **Register 31 encodes as XZR/WZR and is valid for MADD.** The generated
+  register range (`0u32..=31`) includes 31; P1/P2 verify it encodes correctly.
+  This is spec-correct (ARMv8 ARM, Data-processing (3 source): the zero register
+  is permitted in every MADD operand), not a defect — hence not filed.
+  *Doc evidence:* existing differential/characterization convention in
+  `data_processing.rs` (`encode_madd`/`encode_msub` both place Ra=31 for the
+  XZR alias, e.g. `encode_mul` line 594 `0b11111 << 10`).
+- **No other evidence-backed intentional-behavior caveats.** The mixed-width
+  acceptance was the only non-spec-correct behavior observed; per reporting
+  rules it is reclassified as a bug (see ## Bugs Found), not a caveat.
 
 ## Test Files Created
 
-No new test files were created. The 6 properties were added to the existing
-`#[cfg(test)] mod tests` block inside
-`src/backend/arm/assembler/encoder/data_processing.rs`, immediately after the
-shared `expect_word` helper, reusing the module's existing field extractors
-(`sf_of`, `rm_of`, `rn_of`, `rd_of`) and `xreg`/`wreg` builders. Properties added:
+| File | Change | Type |
+|---|---|---|
+| `src/backend/arm/assembler/encoder/data_processing.rs` | appended `#[cfg(test)] mod madd_props` (~135 lines, 5 `proptest!` properties) | inline PBT module |
 
-- `smull_reference_encoding` (pass)
-- `smull_field_placement` (pass)
-- `smull_sf_always_set_regardless_of_source_width` (pass)
-- `smull_rejects_too_few_operands` (pass)
-- `smull_rejects_non_register_operands` (pass)
-- `smull_rejects_wrong_width_destination` (**FAILS — witness for B1**)
+No new top-level test files; the suite was appended as a sibling
+`#[cfg(test)] mod madd_props` to match the file's existing convention
+(`mod smull_props`, `mod smaddl_props`, `mod mvn_props`, …).
 
 ## Output Directories
 
-- `pbt-out/` — this report.
-- `pbt-out/SMULL_BUG_REPORT.md` — full bug write-up for B1 (root cause, witness,
-  suggested fix, list of sibling functions with the same pattern).
-
-This was an in-tree, function-scoped campaign that edits the module's own test
-block, so no `pbt-out/tests/` generated-test directory was produced.
+| Path | Contents |
+|---|---|
+| `pbt-out/bug_reports/encode_madd_mixed_width_operands.md` | Bug report for the mixed-width finding (failing-property witness) |
+| `pbt-out/REPORT.md` | This report |
