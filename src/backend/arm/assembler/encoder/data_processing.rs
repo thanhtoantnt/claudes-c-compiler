@@ -4108,6 +4108,64 @@ mod tests {
         }
     }
 
+    proptest! {
+        // 6. NEGATIVE CONTRACT: SDIV/UDIV require exactly three operands
+        //    (<Rd>, <Rn>, <Rm>). With fewer than three registers, get_reg(.,2)
+        //    reads None and must return Err rather than producing a word with
+        //    a zeroed Rm field. Holds for both signed and unsigned variants.
+        #[test]
+        fn div_rejects_too_few_operands(
+            n in 0u32..=30,
+            unsigned in any::<bool>(),
+            missing in 1u32..=3,
+        ) {
+            let mut ops = vec![xreg(n), xreg(n), xreg(n)];
+            for _ in 0..missing {
+                ops.pop();
+            }
+            prop_assert!(encode_div(&ops, unsigned).is_err());
+        }
+
+        // 7. NEGATIVE CONTRACT: SDIV/UDIV take three registers and NO immediates
+        //    or shifts. A non-register (Immediate) operand in any of the three
+        //    positions must be rejected with Err (get_reg returns Err on
+        //    Operand::Imm). Holds for both signed and unsigned variants.
+        #[test]
+        fn div_rejects_non_register_operands(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            unsigned in any::<bool>(),
+            bad_pos in 0u32..3,
+        ) {
+            let mut ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            ops[bad_pos as usize] = Operand::Imm(5);
+            prop_assert!(encode_div(&ops, unsigned).is_err());
+        }
+
+        // 8. NEGATIVE CONTRACT (spec): the ARMv8 ARM "SDIV" / "UDIV" instructions
+        //    require <Rd>, <Rn>, <Rm> to all share the same register width
+        //    (all W or all X). The encoder derives sf from the DESTINATION only
+        //    (the source is_64 flags are bound to `_` and discarded), so a
+        //    mixed-width form such as `sdiv x0, w1, w2` is silently mis-encoded
+        //    as a 64-bit instruction with W-numbered sources instead of being
+        //    rejected. This property asserts the spec-correct behavior
+        //    (rejection) and is EXPECTED TO FAIL, demonstrating the gap.
+        //    (llvm-mc rejects these as invalid.)
+        #[test]
+        fn div_rejects_mixed_register_widths(
+            n in 0u32..=30,
+            unsigned in any::<bool>(),
+        ) {
+            // Destination 64-bit, sources 32-bit: (s|u)div x{n}, w{n}, w{n}
+            let ops1 = vec![xreg(n), wreg(n), wreg(n)];
+            prop_assert!(encode_div(&ops1, unsigned).is_err());
+            // Destination 32-bit, sources 64-bit: (s|u)div w{n}, x{n}, x{n}
+            let ops2 = vec![wreg(n), xreg(n), xreg(n)];
+            prop_assert!(encode_div(&ops2, unsigned).is_err());
+        }
+    }
+
     // ── encode_smull: SMULL Xd, Wn, Wm -> SMADDL Xd, Wn, Wm, XZR ──────────────
     // ARMv8 SMADDL reference with Ra = XZR (31):
     //   bit 31 = 1 (sf)            bits 30:29 = 00
@@ -6136,6 +6194,168 @@ mod madd_props {
                 let mut ops = vec![xreg(n), xreg(n), xreg(n), xreg(n)];
                 ops[bad_pos as usize] = Operand::Imm(3);
                 prop_assert!(encode_madd(&ops).is_err());
+            }
+        }
+    }
+}
+
+// ── encode_mneg property tests ───────────────────────────────────────────
+// MNEG <Xd>, <Xn>, <Xm> is defined by the ARMv8 ARM as the alias of
+//   MSUB <Xd>, <Xn>, <Xm>, <XZR>  (i.e. MSUB with Ra = XZR).
+// MSUB (Data-processing (3 source)) bit-string:
+//   sf[31] 0[30] S=0[29] 11011[28:24] o1=0[23] 00[22:21] Rm[20:16]
+//   o0=1[15] Ra[14:10] Rn[9:5] Rd[4:0]
+// The MNEG alias forces Ra = 11111 (XZR/WZR) and o0 = 1 (the SUB variant).
+// Reference: ARMv8 ARM, §C4.1.65 (Data-processing (3 source)), MSUB / MNEG alias.
+// Base word (all register fields zero, Ra=11111, o0=1):
+//   64-bit: 0x9B00FC00   32-bit: 0x1B00FC00
+#[cfg(test)]
+mod mneg_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn sf_of(w: u32) -> u32    { (w >> 31) & 1 }
+    fn fixed_of(w: u32) -> u32 { (w >> 21) & 0x3FF } // bits [30:21]
+    fn o0_of(w: u32) -> u32    { (w >> 15) & 1 }     // bit 15 (o0: 0=ADD/MADD, 1=SUB/MSUB)
+    fn ra_of(w: u32) -> u32    { (w >> 10) & 0x1F }
+    fn rm_of(w: u32) -> u32    { (w >> 16) & 0x1F }
+    fn rn_of(w: u32) -> u32    { (w >> 5) & 0x1F }
+    fn rd_of(w: u32) -> u32    { w & 0x1F }
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        // P1. Full-word reference oracle: the encoded word equals an
+        //     independently-derived constant with Rm/Rn/Rd placed in their
+        //     fields, for both 32- and 64-bit. This verifies the entire
+        //     bit-layout holistically without reusing the encoder's arithmetic.
+        #[test]
+        fn mneg_reference_encoding(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            // 64-bit: MNEG Xd, Xn, Xm
+            let ops64 = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w64 = word(encode_mneg(&ops64));
+            prop_assert_eq!(w64, 0x9B00FC00u32 | (rm << 16) | (rn << 5) | rd);
+
+            // 32-bit: MNEG Wd, Wn, Wm
+            let ops32 = vec![wreg(rd), wreg(rn), wreg(rm)];
+            let w32 = word(encode_mneg(&ops32));
+            prop_assert_eq!(w32, 0x1B00FC00u32 | (rm << 16) | (rn << 5) | rd);
+        }
+
+        // P2. Field placement: every fixed opcode bit-group and every register
+        //     field lands exactly where the ARMv8 MSUB/MNEG encoding dictates.
+        //     o0 (bit 15) must be 1 (SUB variant); Ra field [14:10] must be
+        //     11111 (XZR) — the defining alias constraint of MNEG.
+        #[test]
+        fn mneg_field_placement(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            is_64 in any::<bool>(),
+        ) {
+            let dst = if is_64 { xreg(rd) } else { wreg(rd) };
+            let ops = vec![dst, xreg(rn), xreg(rm)];
+            let w = word(encode_mneg(&ops));
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(fixed_of(w), 0b0011011000); // 0 0 11011 o1=0 00 fixed bits
+            prop_assert_eq!(o0_of(w), 1);               // o0 = 1 -> MSUB (negate)
+            prop_assert_eq!(ra_of(w), 0b11111);         // Ra = 31 (XZR) -> MNEG alias
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // P3. sf is derived ONLY from the destination register's width: Xdst ->
+        //     sf=1, Wdst -> sf=0, regardless of the (possibly mismatched)
+        //     textual width of the source registers (only the number is read).
+        #[test]
+        fn mneg_sf_tracks_destination_width_only(
+            n in 0u32..=30,
+            rd_is_x in any::<bool>(),
+            rn_is_x in any::<bool>(),
+            rm_is_x in any::<bool>(),
+        ) {
+            let mk = |is_x: bool, n: u32| if is_x { xreg(n) } else { wreg(n) };
+            let ops = vec![mk(rd_is_x, n), mk(rn_is_x, n), mk(rm_is_x, n)];
+            let w = word(encode_mneg(&ops));
+            prop_assert_eq!(sf_of(w), if rd_is_x { 1 } else { 0 });
+        }
+
+        // P4. Differential / algebraic oracle: MUL and MNEG are the same
+        //     instruction family differing ONLY in o0. MUL = MADD (o0=0, add);
+        //     MNEG = MSUB (o0=1, subtract) — both with Ra = XZR. For identical
+        //     Rd/Rn/Rm and destination width, the XOR of the two words must be
+        //     exactly 1 << 15, proving MNEG truly encodes the SUB (negate)
+        //     variant and that no other field diverges.
+        #[test]
+        fn mneg_differs_from_mul_only_in_o0(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            is_64 in any::<bool>(),
+        ) {
+            let mk = |is_x: bool| if is_x { xreg(rd) } else { wreg(rd) };
+            let ops = vec![mk(is_64), xreg(rn), xreg(rm)];
+            let wmul = word(encode_mul(&ops));
+            let wneg = word(encode_mneg(&ops));
+            prop_assert_eq!(o0_of(wmul), 0);
+            prop_assert_eq!(o0_of(wneg), 1);
+            prop_assert_eq!(wmul ^ wneg, 1u32 << 15);
+        }
+
+        // P5. Differential oracle: MNEG <Xd>,<Xn>,<Xm> is by definition an alias
+        //     of MSUB <Xd>,<Xn>,<Xm>,<XZR>. So MNEG must produce a byte-identical
+        //     word to MSUB with an explicit Ra=XZR for the same registers.
+        #[test]
+        fn mneg_equals_msub_with_ra_xzr(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            is_64 in any::<bool>(),
+        ) {
+            let dst = if is_64 { xreg(rd) } else { wreg(rd) };
+            let ra = if is_64 { xreg(31) } else { wreg(31) }; // XZR/WZR
+            let mneg_ops = vec![dst.clone(), xreg(rn), xreg(rm)];
+            let msub_ops = vec![dst, xreg(rn), xreg(rm), ra];
+            let wneg = word(encode_mneg(&mneg_ops));
+            let wsub = word(encode_msub(&msub_ops));
+            prop_assert_eq!(wneg, wsub);
+        }
+
+        // P6. Negative contract: MNEG takes exactly three register operands
+        //     (<Rd>,<Rn>,<Rm>). Fewer than three, or a non-register (immediate)
+        //     operand in any of the three positions, must be Err.
+        #[test]
+        fn mneg_rejects_missing_or_non_register_operands(
+            n in 0u32..=30,
+            missing in 1u32..=3,
+            bad_pos in 0u32..3,
+        ) {
+            // too few operands
+            {
+                let mut ops = vec![xreg(n), xreg(n), xreg(n)];
+                for _ in 0..missing {
+                    ops.pop();
+                }
+                prop_assert!(encode_mneg(&ops).is_err());
+            }
+            // a non-register operand in any of the three positions
+            {
+                let mut ops = vec![xreg(n), xreg(n), xreg(n)];
+                ops[bad_pos as usize] = Operand::Imm(7);
+                prop_assert!(encode_mneg(&ops).is_err());
             }
         }
     }
