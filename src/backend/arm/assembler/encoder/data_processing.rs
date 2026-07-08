@@ -6197,6 +6197,73 @@ mod madd_props {
             }
         }
     }
+
+    // ── Additional encode_madd properties: MUL aliasing & SP error contract ──
+    proptest! {
+        // P6. DIFFERENTIAL ORACLE (alias): MADD <Rd>, <Rn>, <Rm>, <ZR> is the
+        //     canonical alias of MUL <Rd>, <Rn>, <Rm> (ARMv8 ARM, MUL alias sets
+        //     Ra = XZR/WZR). Therefore encode_madd with Ra=ZR must produce a
+        //     byte-identical word to encode_mul with the same Rd/Rn/Rm, for both
+        //     register widths.
+        #[test]
+        fn madd_xzr_ra_equals_mul(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            is_64 in any::<bool>(),
+        ) {
+            let (madd_rd, mul_rd, zr) = if is_64 {
+                (xreg(rd), xreg(rd), Operand::Reg("xzr".into()))
+            } else {
+                (wreg(rd), wreg(rd), Operand::Reg("wzr".into()))
+            };
+            let madd_ops = vec![madd_rd, xreg(rn), xreg(rm), zr];
+            let mul_ops  = vec![mul_rd,  xreg(rn), xreg(rm)];
+            let wmadd = word(encode_madd(&madd_ops));
+            let wmul  = word(encode_mul(&mul_ops));
+            prop_assert_eq!(wmadd, wmul);
+        }
+
+        // P7. For Ra in 0..=30, encode_madd is a genuine four-operand instruction
+        //     distinct from the MUL alias: its Ra field equals Ra (not 31), and the
+        //     only bits that differ from encode_mul are the Ra field bits 14:10.
+        #[test]
+        fn madd_ra_below_31_is_not_mul_alias(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            ra in 0u32..=30,
+        ) {
+            let madd_ops = vec![xreg(rd), xreg(rn), xreg(rm), xreg(ra)];
+            let mul_ops  = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let wmadd = word(encode_madd(&madd_ops));
+            let wmul  = word(encode_mul(&mul_ops));
+            prop_assert_eq!(ra_of(wmadd), ra);
+            prop_assert_eq!(ra_of(wmul), 31);
+            prop_assert_ne!(wmadd, wmul);
+            // XOR must be confined to bits 14:10 and equal (ra ^ 31) shifted in.
+            prop_assert_eq!(wmadd ^ wmul, (ra ^ 31) << 10);
+        }
+
+        // P8. NEGATIVE CONTRACT (spec) — FAILS / bug witness.
+        //     MADD is the "Data-processing (3 source)" encoding (ARMv8 ARM
+        //     §C4.1.65) in which every operand field encodes R31 = ZR, NOT SP.
+        //     SP/WSP are therefore NOT encodable in MADD and MUST be rejected.
+        //     The implementation accepts `sp`/`wsp` in any position (parse_reg_num
+        //     maps them to 31) and silently emits zero-register semantics.
+        //     See BUGS.md: encode_madd_accepts_sp_operand.
+        #[test]
+        fn madd_rejects_sp_operand(
+            n in 0u32..=30,
+            sp_pos in 0u32..=4,
+        ) {
+            let mut ops = vec![xreg(n), xreg(n), xreg(n), xreg(n)];
+            ops[sp_pos as usize] = Operand::Reg("sp".into());
+            let r = encode_madd(&ops);
+            prop_assert!(r.is_err(),
+                "encode_madd should reject SP (not encodable; R31=ZR): {:?}", ops);
+        }
+    }
 }
 
 // ── encode_mneg property tests ───────────────────────────────────────────
@@ -6593,3 +6660,4 @@ mod umulh_props {
         }
     }
 }
+
