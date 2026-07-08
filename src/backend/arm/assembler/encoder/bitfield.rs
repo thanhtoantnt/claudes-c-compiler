@@ -2645,3 +2645,172 @@ mod prop_encode_extr_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_rev32_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── REV32 encoding (ARM ARM, Data-processing (1 source) / vector) ────
+    //
+    // SCALAR form: REV32 <Rd>, <Rn>   (Rd/Rn are W or X)
+    //   sf 1 0 11010110 00000 opc[15:10] Rn Rd
+    //   The (sf, opc) decode is a bijection; REV and REV32 share opc in
+    //   {000010, 000011} and are MIRRORED in sf:
+    //     REV   32-bit: sf=0 opc=000010   |   REV32 64-bit: sf=1 opc=000010
+    //     REV   64-bit: sf=1 opc=000011   |   REV32 32-bit: sf=0 opc=000011
+    //   (encode_rev in this file uses opc = if is_64 {0b000011} else {0b000010}
+    //    and is correct; REV32 must mirror it.)
+    //
+    // VECTOR form: REV32 <Vd>.<T>, <Vn>.<T>
+    //   0 Q 1 01110 size 1 00000 0000 10 Rn Rd
+    //   size in {00 (bytes), 01 (halfwords)} only; size=10/11 is UNALLOCATED.
+    //
+    // Reference base words (excluding Rn/Rd):
+    //   scalar 64-bit (X): 0xDAC00800      scalar 32-bit (W): 0x5AC00C00
+    const MASK_SF: u32 = 0x8000_0000;
+    const MASK_30_29: u32 = 0b11 << 29; // 0x6000_0000
+    const MASK_28_21: u32 = 0xFF << 21; // 0x1FE0_0000
+    const MASK_20_16: u32 = 0x1F << 16; // 0x001F_0000
+    const MASK_OPC: u32 = 0x3F << 10; // bits [15:10]
+    const MASK_RN: u32 = 0x1F << 5; // bits [9:5]
+    const MASK_RD: u32 = 0x1F; // bits [4:0]
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word(encode_rev32(ops))
+    }
+
+    fn reg_name(num: u32, is_64: bool) -> String {
+        if is_64 { format!("x{}", num) } else { format!("w{}", num) }
+    }
+
+    /// ARM ARM reference word for the scalar form, both widths.
+    fn ref_scalar(is_64: bool, rn: u32, rd: u32) -> u32 {
+        let base = if is_64 { 0xDAC0_0800 } else { 0x5AC0_0C00 };
+        base | (rn << 5) | rd
+    }
+
+    proptest! {
+        // Property A — structural / field-placement oracle for the 64-bit
+        // scalar form (the only width the current encoder happens to get
+        // right). Every fixed bit and the opc[15:10]=000010 field land
+        // exactly where the ARM ARM mandates; Rn/Rd reconstruct to inputs.
+        #[test]
+        fn prop_scalar_field_placement_64bit(rd in 0u32..=30u32, rn in 0u32..=30u32) {
+            let ops = vec![Operand::Reg(reg_name(rd, true)), Operand::Reg(reg_name(rn, true))];
+            let w = enc(&ops);
+            prop_assert_eq!(w & MASK_SF, MASK_SF, "sf must be 1 for X registers");
+            prop_assert_eq!(w & MASK_30_29, 0b10 << 29);
+            prop_assert_eq!(w & MASK_28_21, 0xD6 << 21, "bits[28:21] must be 11010110");
+            prop_assert_eq!(w & MASK_20_16, 0, "bits[20:16] must be 0");
+            prop_assert_eq!((w & MASK_OPC) >> 10, 0b000010, "opc must be 000010 for 64-bit REV32");
+            prop_assert_eq!((w & MASK_RN) >> 5, rn);
+            prop_assert_eq!(w & MASK_RD, rd);
+        }
+
+        // Property B — reference oracle for BOTH widths (THE FINDING).
+        // The ARM ARM decode for scalar REV32 is:
+        //   64-bit (X): sf=1, opc=000010  -> base 0xDAC00800
+        //   32-bit (W): sf=0, opc=000011  -> base 0x5AC00C00
+        // The current encoder discards the register width
+        // (`let (rd, _) = get_reg(...)`) and hardcodes sf=1 with opc=000010,
+        // i.e. it ALWAYS emits the 64-bit encoding regardless of input.
+        // For W registers the output is therefore doubly wrong: sf should be
+        // 0 and opc should be 000011. This property PASSES for X registers
+        // and FAILS for W registers.
+        #[test]
+        fn prop_scalar_matches_arm_reference(
+            is_64 in any::<bool>(),
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+        ) {
+            let ops = vec![
+                Operand::Reg(reg_name(rd, is_64)),
+                Operand::Reg(reg_name(rn, is_64)),
+            ];
+            let got = enc(&ops);
+            let want = ref_scalar(is_64, rn, rd);
+            let w = if is_64 { 'x' } else { 'w' };
+            prop_assert_eq!(got, want,
+                "REV32 {}{}, {}{} (is_64={}): expected {:#010X}, got {:#010X}",
+                w, rd, w, rn, is_64, want, got);
+        }
+
+        // Property C — structural / field-placement oracle for the NEON
+        // (vector) form. Verifies bit31=0, Q from arrangement, bit29=1,
+        // bits[28:24]=01110, size from arrangement, bit21=1, bits[20:16]=0,
+        // bits[15:12]=0, bits[11:10]=10, and Rn/Rd reconstruct. Architecturally
+        // REV32 vector is only valid for size in {00, 01}; UNALLOCATED sizes
+        // (2s/4s/1d/2d) are skipped here via prop_assume.
+        #[test]
+        fn prop_neon_field_placement(
+            rd in 0u32..=31u32,
+            rn in 0u32..=31u32,
+            arr in prop_oneof![
+                Just("8b"), Just("16b"), Just("4h"), Just("8h"),
+                Just("2s"), Just("4s"), Just("1d"), Just("2d"),
+            ],
+        ) {
+            let (q, size): (u32, u32) = match arr {
+                "8b" => (0, 0b00), "16b" => (1, 0b00),
+                "4h" => (0, 0b01), "8h" => (1, 0b01),
+                "2s" => (0, 0b10), "4s" => (1, 0b10),
+                "1d" => (0, 0b11), "2d" => (1, 0b11),
+                _ => unreachable!(),
+            };
+            prop_assume!(size <= 0b01, "REV32 vector valid only for size<=01");
+
+            let ops = vec![
+                Operand::RegArrangement { reg: format!("v{}", rd), arrangement: arr.into() },
+                Operand::RegArrangement { reg: format!("v{}", rn), arrangement: arr.into() },
+            ];
+            let w = enc(&ops);
+            prop_assert_eq!(w & MASK_SF, 0, "bit31 must be 0 for NEON form");
+            prop_assert_eq!((w >> 30) & 1, q, "Q must match arrangement");
+            prop_assert_eq!((w >> 29) & 1, 1);
+            prop_assert_eq!((w >> 24) & 0x1F, 0b01110, "bits[28:24] must be 01110");
+            prop_assert_eq!((w >> 22) & 0x3, size, "size must match arrangement");
+            prop_assert_eq!((w >> 21) & 1, 1, "bit21 must be 1");
+            prop_assert_eq!(w & MASK_20_16, 0, "bits[20:16] must be 0");
+            prop_assert_eq!((w >> 12) & 0xF, 0, "bits[15:12] must be 0");
+            prop_assert_eq!((w >> 10) & 0x3, 0b10, "bits[11:10] must be 10");
+            prop_assert_eq!((w & MASK_RN) >> 5, rn);
+            prop_assert_eq!(w & MASK_RD, rd);
+        }
+
+        // Property D — malformed-operands negative contract (should pass).
+        // Missing operands or a non-register in a fixed slot must yield Err.
+        #[test]
+        fn prop_rejects_malformed_operands(
+            kind in prop_oneof![Just(0u8), Just(1u8), Just(2u8), Just(3u8)],
+            n in 0u32..=30u32,
+        ) {
+            let r = match kind {
+                0 => encode_rev32(&[]),
+                1 => encode_rev32(&[Operand::Reg(reg_name(n, true))]),
+                2 => encode_rev32(&[Operand::Imm(n as i64), Operand::Reg("x1".into())]),
+                _ => encode_rev32(&[Operand::Reg(reg_name(n, true)), Operand::Imm(0)]),
+            };
+            prop_assert!(r.is_err(), "expected Err, got {:?}", r);
+        }
+
+        // Property E — determinism. The same operand list always yields the
+        // same 32-bit word (the encoder is a pure function).
+        #[test]
+        fn prop_deterministic(
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+            is_64 in any::<bool>(),
+        ) {
+            let ops = vec![Operand::Reg(reg_name(rd, is_64)), Operand::Reg(reg_name(rn, is_64))];
+            prop_assert_eq!(enc(&ops), enc(&ops));
+        }
+    }
+}
