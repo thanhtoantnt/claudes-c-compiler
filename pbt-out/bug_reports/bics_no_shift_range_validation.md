@@ -66,3 +66,5 @@ if shift_amount > max_shift {
 | `bics_differs_from_bic_only_in_opc` | PASS |
 | `bics_rejects_too_few_operands` | PASS |
 | `bics_w_register_rejects_shift_above_31` | **FAIL** (this bug) |
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/3
