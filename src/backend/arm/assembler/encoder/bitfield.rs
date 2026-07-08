@@ -3385,6 +3385,128 @@ mod prop_encode_rbit_tests {
 }
 
 #[cfg(test)]
+mod prop_encode_rbit_scalar_width_coherence_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── RBIT scalar width coherence (ARM ARM "Data-processing (1 source)") ──
+    //
+    // Scalar form: RBIT <Rd>, <Rn>  with <Rd>,<Rn> a matched {<Wd>,<Wn>} or
+    // {<Xd>,<Xn>} pair.
+    //   sf 1 0 11010110 00000 000000 Rn Rd
+    // The single sf bit [31] governs the width of BOTH operands: sf=1 → 64-bit
+    // (X), sf=0 → 32-bit (W). The ARM ARM lists ONLY the two matched forms
+    //   RBIT <Wd>, <Wn>   and   RBIT <Xd>, <Xn>
+    // so Rd and Rn MUST share the same width — a width-coherent assembler
+    // derives sf from a *consistent* Rd/Rn pair and rejects mismatches such
+    // as `RBIT x0, w1` as UNALLOCATED.
+    //
+    // encode_rbit derives sf solely from Rd (`let (rd, is_64) = get_reg(...)`)
+    // and throws the source width away (`let (rn, _) = get_reg(...)`). These
+    // properties pin down the scalar-width-coherence contract and expose that
+    // the source operand's width is silently ignored.
+
+    const MASK_SF: u32 = 0x8000_0000;
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word(encode_rbit(ops))
+    }
+
+    fn reg_name(num: u32, is_64: bool) -> String {
+        if is_64 { format!("x{}", num) } else { format!("w{}", num) }
+    }
+
+    proptest! {
+        // Property 1 — sf tracks the (matched) scalar width.
+        // For a coherent matched-width operand pair, sf[31] must equal 1 iff
+        // the destination register is 64-bit. This is the baseline width
+        // contract the encoder currently honours.
+        #[test]
+        fn prop_sf_tracks_matched_width(
+            is_64 in any::<bool>(),
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+        ) {
+            let ops = vec![Operand::Reg(reg_name(rd, is_64)), Operand::Reg(reg_name(rn, is_64))];
+            let w = enc(&ops);
+            prop_assert_eq!(w & MASK_SF, if is_64 { MASK_SF } else { 0 },
+                "sf[31] must reflect the (matched) scalar register width");
+        }
+
+        // Property 2 — width differential (coherence).
+        // Switching BOTH operands' width together (x{N},x{M} -> w{N},w{M}) must
+        // change ONLY bit sf[31]; every fixed/opcode/Rn/Rd bit is identical for
+        // both widths. This is the core scalar-width-coherence invariant:
+        // width is carried solely by sf, with no opcode swap (contrast REV).
+        #[test]
+        fn prop_matched_width_differential_only_sf(
+            num in 0u32..=30u32,
+            rn in 0u32..=30u32,
+        ) {
+            let x = vec![Operand::Reg(format!("x{}", num)), Operand::Reg(format!("x{}", rn))];
+            let w = vec![Operand::Reg(format!("w{}", num)), Operand::Reg(format!("w{}", rn))];
+            prop_assert_eq!(enc(&x) ^ enc(&w), MASK_SF,
+                "X vs W (matched widths) must differ only in sf[31]");
+        }
+
+        // Property 3 — DIAGNOSTIC (passes, exposes the defect).
+        // The source register's scalar width is a DEAD PARAMETER: `RBIT x{A}, x{B}`
+        // and `RBIT x{A}, w{B}` encode to bit-identical words. A width-COHERENT
+        // encoder must distinguish these (x{A},x{B} is a valid <Xd>,<Xn> form;
+        // x{A},w{B} is not) — the fact that they are equal proves Rn's width is
+        // silently discarded and the encoding is width-incoherent w.r.t. the
+        // source operand.
+        #[test]
+        fn prop_source_width_silently_ignored(
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+        ) {
+            let src_x = vec![Operand::Reg(format!("x{}", rd)), Operand::Reg(format!("x{}", rn))];
+            let src_w = vec![Operand::Reg(format!("x{}", rd)), Operand::Reg(format!("w{}", rn))];
+            // Both accepted and bit-identical → Rn width has no encoding effect.
+            prop_assert_eq!(enc(&src_x), enc(&src_w),
+                "RBIT x{},x{} == RBIT x{},w{} : Rn width discarded (defect)",
+                rd, rn, rd, rn);
+        }
+
+        // Property 4 — NEGATIVE CONTRACT (the finding, EXPECTED TO FAIL).
+        // The ARM ARM "Data-processing (1 source)" group carries a SINGLE sf
+        // bit that governs both Rd and Rn, and lists only the matched forms
+        //   RBIT <Wd>, <Wn>   and   RBIT <Xd>, <Xn>.
+        // A width-coherent assembler MUST therefore reject mismatched-width
+        // operands `RBIT x{A}, w{B}` and `RBIT w{A}, x{B}` as UNALLOCATED.
+        //
+        // encode_rbit derives sf only from Rd and discards Rn's width, so these
+        // are SILENTLY ACCEPTED and emitted as if Rn shared Rd's width (a
+        // different instruction than the mnemonic denotes, referencing a
+        // register of the wrong width). This property is EXPECTED TO FAIL and
+        // documents the missing scalar-width-coherence validation (mirrors the
+        // identical defect already recorded for encode_rev in this file).
+        #[test]
+        fn prop_rejects_mismatched_scalar_widths(
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+            rd_is_64 in any::<bool>(),
+        ) {
+            let rd_str = reg_name(rd, rd_is_64);
+            let rn_str = reg_name(rn, !rd_is_64); // intentionally opposite width
+            let ops = vec![Operand::Reg(rd_str.clone()), Operand::Reg(rn_str.clone())];
+            let r = encode_rbit(&ops);
+            prop_assert!(r.is_err(),
+                "RBIT {} (mismatched scalar widths) must be Err, got {:?}",
+                format!("{}, {}", rd_str, rn_str), r);
+        }
+    }
+}
+
+#[cfg(test)]
 mod prop_encode_clz_tests {
     use super::*;
     use proptest::prelude::*;
@@ -3733,7 +3855,113 @@ mod prop_encode_crc32_tests {
                 "mnemonic {:?} should be rejected, got {:?}", c, r);
         }
     }
+
+    // Property F — POSITIVE reference: the register-width contract honored.
+    // ARM ARM (CRC32 / CRC32C) fixes exactly one legal register-width
+    // combination per size class:
+    //   crc32{b,h,w} / crc32c{b,h,w}: <Wd>, <Wn>, <Wm>   (all three 32-bit)
+    //   crc32{x}     / crc32c{x}:     <Xd>, <Wn>, <Xm>   (Rd,Rm 64-bit; Rn 32-bit)
+    // For the SINGLE legal combination per variant, encode succeeds and the
+    // emitted word carries the spec-mandated sf/sz/C and reconstructs
+    // Rm/Rn/Rd. This anchors the contract before the negative case in G.
+    #[test]
+    fn prop_legal_width_combination_matches_spec() {
+        let rn = |n: u32, x64: bool| {
+            Operand::Reg(if x64 { format!("x{}", n) } else { format!("w{}", n) })
+        };
+        // (mnemonic, (sf, sz, c), [Rd, Rn, Rm] widths: true = 64-bit X)
+        let cases: &[(&str, (u32, u32, u32), [bool; 3])] = &[
+            ("crc32b",  (0, 0b00, 0), [false, false, false]),
+            ("crc32h",  (0, 0b01, 0), [false, false, false]),
+            ("crc32w",  (0, 0b10, 0), [false, false, false]),
+            ("crc32x",  (1, 0b11, 0), [true,  false, true ]),
+            ("crc32cb", (0, 0b00, 1), [false, false, false]),
+            ("crc32ch", (0, 0b01, 1), [false, false, false]),
+            ("crc32cw", (0, 0b10, 1), [false, false, false]),
+            ("crc32cx", (1, 0b11, 1), [true,  false, true ]),
+        ];
+        for &(mn, (sf, sz, c), widths) in cases {
+            let ops = vec![rn(7, widths[0]), rn(11, widths[1]), rn(13, widths[2])];
+            let w = enc(mn, &ops);
+            assert_eq!((w >> 31) & 1, sf, "{:?}: sf (width contract)", mn);
+            assert_eq!((w >> 10) & 0b11, sz, "{:?}: sz", mn);
+            assert_eq!((w >> 12) & 1, c, "{:?}: C", mn);
+            assert_eq!((w >> 16) & 0x1F, 13, "{:?}: Rm reconstruct", mn);
+            assert_eq!((w >> 5) & 0x1F, 11, "{:?}: Rn reconstruct", mn);
+            assert_eq!(w & 0x1F, 7, "{:?}: Rd reconstruct", mn);
+        }
+    }
+
+    // Property G — NEGATIVE CONTRACT (the finding): register-width contract.
+    // A correct AArch64 assembler MUST reject any mnemonic/width mismatch
+    // (see Property F for the legal widths). For example, all of these are
+    // UNPREDICTABLE / UNALLOCATED and must yield Err:
+    //   * `crc32x  w0, w1, w2`  (Rd/Rm must be X)
+    //   * `crc32x  x0, x1, x2`  (Rn must be W)
+    //   * `crc32b  x0, w1, w2`  (all three must be W)
+    //   * `crc32cw w0, x1, w2`  (Rn must be W)
+    // The current encoder discards EVERY width flag — `let (rd, _)`,
+    // `(rn, _)`, `(rm, _)` — and derives sf purely from the mnemonic
+    // suffix, so it silently emits a Word for these illegal combinations.
+    // This property is EXPECTED TO FAIL and documents the missing
+    // register-width validation in encode_crc32.
+    #[test]
+    fn prop_rejects_width_mismatch_per_variant() {
+        let rn = |n: u32, x64: bool| {
+            Operand::Reg(if x64 { format!("x{}", n) } else { format!("w{}", n) })
+        };
+        // [Rd, Rn, Rm] legal widths per variant: true = 64-bit X.
+        let wants: &[(&str, [bool; 3])] = &[
+            ("crc32b",  [false, false, false]),
+            ("crc32h",  [false, false, false]),
+            ("crc32w",  [false, false, false]),
+            ("crc32x",  [true,  false, true ]),
+            ("crc32cb", [false, false, false]),
+            ("crc32ch", [false, false, false]),
+            ("crc32cw", [false, false, false]),
+            ("crc32cx", [true,  false, true ]),
+        ];
+        for &(mn, want) in wants {
+            for slot in 0..3usize {
+                let mut widths = want;
+                widths[slot] = !widths[slot]; // introduce an illegal mismatch
+                let ops = vec![rn(0, widths[0]), rn(1, widths[1]), rn(2, widths[2])];
+                let r = encode_crc32(mn, &ops);
+                let label = |b: bool| if b { 'X' } else { 'W' };
+                assert!(r.is_err(),
+                    "{:?} with Rd={}0, Rn={}1, Rm={}2 (slot {} mismatched) \
+                     must be rejected, got {:?}",
+                    mn, label(widths[0]), label(widths[1]), label(widths[2]),
+                    slot, r);
+            }
+        }
+    }
+
+    // Property H — known-constant anchor (ARM ARM), register-width bound.
+    // CRC32W W0,W0,W0 (all 32-bit) = 0x1AC0_4800. The 'x' variant forces
+    // sf=1 (64-bit Rd/Rm) with Rn staying 32-bit: CRC32X X0,W0,X0 =
+    // 0x9AC0_4C00. The two words differ in EXACTLY sf[31] and the low bit
+    // of sz[10] (sz 11 vs 10), i.e. 0x8000_0400 — confirming the width
+    // contract is the only thing the 'x' suffix changes.
+    #[test]
+    fn prop_crc32_known_constants() {
+        let w32 = enc("crc32w", &[
+            Operand::Reg("w0".into()),
+            Operand::Reg("w0".into()),
+            Operand::Reg("w0".into()),
+        ]);
+        let x64 = enc("crc32x", &[
+            Operand::Reg("x0".into()),
+            Operand::Reg("w0".into()),
+            Operand::Reg("x0".into()),
+        ]);
+        assert_eq!(w32, 0x1AC0_4800u32, "CRC32W W0,W0,W0");
+        assert_eq!(x64, 0x9AC0_4C00u32, "CRC32X X0,W0,X0");
+        assert_eq!(w32 ^ x64, 0x8000_0400u32,
+            "CRC32X vs CRC32W differ only in sf[31] and sz bit0 [10]");
+    }
 }
+
 #[cfg(test)]
 mod prop_encode_cls_tests {
     use super::*;
