@@ -2966,3 +2966,264 @@ mod prop_encode_rev16_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_rbit_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── RBIT encoding (ARM ARM) ───────────────────────────────────────────
+    //
+    // SCALAR form: RBIT <Rd>, <Rn>   (Rd/Rn are W or X — available in BOTH widths)
+    //   sf 1 0 11010110 00000 000000 Rn Rd
+    //   31 30 29 28:21       20:16 15:10 9:5 4:0
+    //   bit30=1, bit29=0, bits[28:21]=11010110 (0xD6), bits[20:16]=0,
+    //   bits[15:10]=000000. sf tracks the register width.
+    //
+    // VECTOR form: RBIT <Vd>.<T>, <Vn>.<T>   (T is 8B or 16B ONLY)
+    //   0 Q 1 01110 01 10000 00101 10 Rn Rd
+    //   bit31=0, Q[30], bit29=1, bits[28:24]=01110, bits[23:22]=01,
+    //   bits[21:17]=10000, bits[16:12]=00101, bits[11:10]=10.
+    //   The ARM ARM CONSTRAINS T ∈ {8B, 16B}: RBIT reverses bits within each
+    //   byte, so there is no size field and no other arrangement is allocated.
+    //
+    // Reference base words (Rn=0, Rd=0):
+    //   scalar 64-bit (X): 0xDAC00000      scalar 32-bit (W): 0x5AC00000
+    //   vector 16B (Q=1): 0x6E605800       vector  8B (Q=0): 0x2E605800
+    const SCALAR_BASE_64: u32 = 0xDAC0_0000;
+    const SCALAR_BASE_32: u32 = 0x5AC0_0000;
+    const NEON_BASE_16B: u32 = 0x6E60_5800;
+    const NEON_BASE_8B: u32 = 0x2E60_5800;
+
+    const MASK_SF: u32 = 0x8000_0000;
+    const MASK_30_29: u32 = 0b11 << 29; // 0x6000_0000
+    const MASK_28_21: u32 = 0xFF << 21; // 0x1FE0_0000
+    const MASK_20_16: u32 = 0x1F << 16; // 0x001F_0000
+    const MASK_15_10: u32 = 0x3F << 10; // 0x0000_FC00
+    const MASK_Q: u32 = 1 << 30; // 0x4000_0000
+    const MASK_RN: u32 = 0x1F << 5; // bits [9:5]
+    const MASK_RD: u32 = 0x1F; // bits [4:0]
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word(encode_rbit(ops))
+    }
+
+    fn reg_name(num: u32, is_64: bool) -> String {
+        if is_64 { format!("x{}", num) } else { format!("w{}", num) }
+    }
+
+    /// ARM ARM reference word for the scalar form, both widths.
+    fn ref_scalar(is_64: bool, rn: u32, rd: u32) -> u32 {
+        let base = if is_64 { SCALAR_BASE_64 } else { SCALAR_BASE_32 };
+        base | (rn << 5) | rd
+    }
+
+    /// ARM ARM reference word for the vector form, both valid arrangements.
+    fn ref_neon(arr: &str, rn: u32, rd: u32) -> u32 {
+        let base = if arr == "16b" { NEON_BASE_16B } else { NEON_BASE_8B };
+        base | (rn << 5) | rd
+    }
+
+    proptest! {
+        // Property A — scalar structural / field-placement oracle.
+        // Every fixed bit lands where the ARM ARM mandates: bit30=1,
+        // bit29=0, bits[28:21]=11010110 (0xD6), bits[20:16]=0,
+        // bits[15:10]=000000; sf tracks the destination register width;
+        // Rn/Rd reconstruct exactly to the inputs.
+        #[test]
+        fn prop_scalar_field_placement(
+            is_64 in any::<bool>(),
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+        ) {
+            let ops = vec![Operand::Reg(reg_name(rd, is_64)), Operand::Reg(reg_name(rn, is_64))];
+            let w = enc(&ops);
+            prop_assert_eq!(w & MASK_SF, if is_64 { MASK_SF } else { 0 }, "sf must track width");
+            prop_assert_eq!(w & MASK_30_29, 0b10 << 29, "bit30=1, bit29=0");
+            prop_assert_eq!(w & MASK_28_21, 0xD6 << 21, "bits[28:21] must be 11010110");
+            prop_assert_eq!(w & MASK_20_16, 0, "bits[20:16] must be 0");
+            prop_assert_eq!(w & MASK_15_10, 0, "bits[15:10] must be 000000");
+            prop_assert_eq!((w & MASK_RN) >> 5, rn, "Rn reconstruct");
+            prop_assert_eq!(w & MASK_RD, rd, "Rd reconstruct");
+        }
+
+        // Property B — scalar reference oracle (full word).
+        // The emitted word must equal the hand-derived ARM ARM base for the
+        // given width OR'd with (Rn<<5)|Rd, for BOTH widths. This pins every
+        // bit and confirms RBIT varies only sf with width (correct behavior,
+        // contrast REV32 which hardcodes a single width).
+        #[test]
+        fn prop_scalar_matches_arm_reference(
+            is_64 in any::<bool>(),
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+        ) {
+            let ops = vec![Operand::Reg(reg_name(rd, is_64)), Operand::Reg(reg_name(rn, is_64))];
+            let got = enc(&ops);
+            let want = ref_scalar(is_64, rn, rd);
+            let c = if is_64 { 'x' } else { 'w' };
+            prop_assert_eq!(got, want,
+                "RBIT {}{}, {}{} (is_64={}): expected {:#010X}, got {:#010X}",
+                c, rd, c, rn, is_64, want, got);
+        }
+
+        // Property C — NEON vector reference + field-placement oracle.
+        // For the two VALID arrangements (8B, 16B) the emitted word must equal
+        // the ARM ARM base OR'd with (Rn<<5)|Rd, and every fixed bit (bit31=0,
+        // bit29=1, bits[28:24]=01110, bits[23:22]=01, bits[21:17]=10000,
+        // bits[16:12]=00101, bits[11:10]=10) must land in place.
+        #[test]
+        fn prop_neon_matches_arm_reference(
+            arr in prop_oneof![Just("8b"), Just("16b")],
+            rd in 0u32..=31u32,
+            rn in 0u32..=31u32,
+        ) {
+            let ops = vec![
+                Operand::RegArrangement { reg: format!("v{}", rd), arrangement: arr.into() },
+                Operand::RegArrangement { reg: format!("v{}", rn), arrangement: arr.into() },
+            ];
+            let w = enc(&ops);
+            let want = ref_neon(arr, rn, rd);
+            prop_assert_eq!(w, want,
+                "RBIT v{}.{}, v{}.{}: expected {:#010X}, got {:#010X}",
+                rd, arr, rn, arr, want, w);
+            // Field placement of the fixed bits.
+            prop_assert_eq!(w & MASK_SF, 0, "bit31 must be 0 for vector form");
+            prop_assert_eq!((w >> 30) & 1, if arr == "16b" { 1 } else { 0 }, "Q must match arrangement");
+            prop_assert_eq!((w >> 29) & 1, 1);
+            prop_assert_eq!((w >> 24) & 0x1F, 0b01110, "bits[28:24] must be 01110");
+            prop_assert_eq!((w >> 22) & 0x3, 0b01, "bits[23:22] must be 01");
+            prop_assert_eq!((w >> 17) & 0x1F, 0b10000, "bits[21:17] must be 10000");
+            prop_assert_eq!((w >> 12) & 0x1F, 0b00101, "bits[16:12] must be 00101");
+            prop_assert_eq!((w >> 10) & 0x3, 0b10, "bits[11:10] must be 10");
+        }
+
+        // Property D — differential oracles.
+        // (1) Scalar: switching x{N} -> w{N} (same number, same Rn width) must
+        //     change ONLY bit sf[31] — the fixed/opc fields are identical for
+        //     both widths (contrast REV/REV32 whose opc swaps with width).
+        // (2) Vector: switching .8b -> .16b (same registers) must change ONLY
+        //     bit Q[30]; bit31 stays 0.
+        #[test]
+        fn prop_differentials(
+            num in 0u32..=30u32,
+            rn in 0u32..=30u32,
+            vnum in 0u32..=31u32,
+            vrn in 0u32..=31u32,
+        ) {
+            // (1) scalar width differential
+            let s64 = vec![Operand::Reg(format!("x{}", num)), Operand::Reg(format!("x{}", rn))];
+            let s32 = vec![Operand::Reg(format!("w{}", num)), Operand::Reg(format!("w{}", rn))];
+            prop_assert_eq!(enc(&s64) ^ enc(&s32), MASK_SF,
+                "scalar X vs W must differ only in bit sf[31]");
+
+            // (2) vector arrangement differential
+            let v8 = vec![
+                Operand::RegArrangement { reg: format!("v{}", vnum), arrangement: "8b".into() },
+                Operand::RegArrangement { reg: format!("v{}", vrn), arrangement: "8b".into() },
+            ];
+            let v16 = vec![
+                Operand::RegArrangement { reg: format!("v{}", vnum), arrangement: "16b".into() },
+                Operand::RegArrangement { reg: format!("v{}", vrn), arrangement: "16b".into() },
+            ];
+            prop_assert_eq!(enc(&v8) ^ enc(&v16), MASK_Q,
+                "vector 8b vs 16b must differ only in bit Q[30]");
+        }
+
+        // Property E — malformed-operands negative contract (should pass).
+        // Scalar RBIT takes two register operands; the vector form takes two
+        // RegArrangement operands and dispatches on operands[0]. A missing
+        // operand, a non-register in a fixed slot, or the wrong dispatch type
+        // must yield Err rather than a silently-wrong word.
+        #[test]
+        fn prop_rejects_malformed_operands(
+            kind in prop_oneof![
+                Just(0u8), Just(1u8), Just(2u8), Just(3u8), Just(4u8), Just(5u8),
+            ],
+            n in 0u32..=30u32,
+            v in -16i64..=16i64,
+        ) {
+            let r = match kind {
+                // scalar: empty
+                0 => encode_rbit(&[]),
+                // scalar: one operand
+                1 => encode_rbit(&[Operand::Reg(reg_name(n, true))]),
+                // scalar: slot 0 not a register
+                2 => encode_rbit(&[Operand::Imm(v), Operand::Reg("x1".into())]),
+                // scalar: slot 1 not a register
+                3 => encode_rbit(&[Operand::Reg(reg_name(n, true)), Operand::Imm(v)]),
+                // vector: only one arrangement operand
+                4 => encode_rbit(&[Operand::RegArrangement {
+                    reg: format!("v{}", n), arrangement: "8b".into() }]),
+                // vector: slot 1 not an arrangement register
+                _ => encode_rbit(&[
+                    Operand::RegArrangement { reg: format!("v{}", n), arrangement: "8b".into() },
+                    Operand::Imm(v),
+                ]),
+            };
+            prop_assert!(r.is_err(), "expected Err, got {:?}", r);
+        }
+
+        // Property F — NEGATIVE CONTRACT (the finding).
+        // RBIT (vector) is CONSTRAINED by the ARM ARM to <T> ∈ {8B, 16B} only
+        // (it reverses bits within each byte; there is no size field and no
+        // other arrangement is allocated). An assembler MUST therefore reject
+        // every other arrangement (.4h/.8h/.2s/.4s/.1d/.2d) with a clean Err.
+        //
+        // The current encoder performs NO arrangement validation: it sets
+        // Q = if arr_d == "16b" { 1 } else { 0 } and otherwise uses the byte
+        // op word verbatim, so:
+        //   * a halfword/word/doubleword arrangement is SILENTLY accepted and
+        //     encoded as the 8B RBIT instruction (Q=0) — a different
+        //     instruction than the mnemonic+arrangement denote;
+        //   * the SOURCE arrangement (operands[1]) is ignored entirely, so a
+        //     mismatched pair like `RBIT v0.16b, v1.8b` is also silently taken.
+        // This property is EXPECTED TO FAIL and documents the missing
+        // arrangement validation in the NEON branch of encode_rbit.
+        #[test]
+        fn prop_rejects_invalid_vector_arrangements(
+            bad in prop_oneof![
+                Just("4h"), Just("8h"), Just("2s"), Just("4s"), Just("1d"), Just("2d"),
+            ],
+            rd in 0u32..=31u32,
+            rn in 0u32..=31u32,
+        ) {
+            // An invalid arrangement must be rejected (Ok here is the bug).
+            let same = vec![
+                Operand::RegArrangement { reg: format!("v{}", rd), arrangement: bad.into() },
+                Operand::RegArrangement { reg: format!("v{}", rn), arrangement: bad.into() },
+            ];
+            match encode_rbit(&same) {
+                Ok(EncodeResult::Word(w)) => prop_assert!(false,
+                    "RBIT v{}.{}, v{}.{} should be Err (invalid arrangement), got Ok({:#010X})",
+                    rd, bad, rn, bad, w),
+                Ok(other) => prop_assert!(false,
+                    "RBIT v{}.{}, v{}.{} should be Err (invalid arrangement), got Ok({:?})",
+                    rd, bad, rn, bad, other),
+                Err(_) => {}
+            }
+            // Mismatched source arrangement must also be rejected; the
+            // current code ignores it and returns the dest-arrangement word.
+            let mismatch = vec![
+                Operand::RegArrangement { reg: format!("v{}", rd), arrangement: "16b".into() },
+                Operand::RegArrangement { reg: format!("v{}", rn), arrangement: "8b".into() },
+            ];
+            match encode_rbit(&mismatch) {
+                Ok(EncodeResult::Word(w)) => prop_assert!(false,
+                    "RBIT v{}.16b, v{}.8b should be Err (mismatched arrangement), got Ok({:#010X})",
+                    rd, rn, w),
+                Ok(other) => prop_assert!(false,
+                    "RBIT v{}.16b, v{}.8b should be Err (mismatched arrangement), got Ok({:?})",
+                    rd, rn, other),
+                Err(_) => {}
+            }
+        }
+    }
+}
