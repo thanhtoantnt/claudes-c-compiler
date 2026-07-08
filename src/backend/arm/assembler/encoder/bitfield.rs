@@ -2816,6 +2816,125 @@ mod prop_encode_rev32_tests {
 }
 
 #[cfg(test)]
+mod prop_encode_rev32_neon_neg_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── REV32 VECTOR form: negative contracts on the arrangement field ───
+    //
+    // This module targets the NEON (vector) form of encode_rev32, which the
+    // sibling `prop_encode_rev32_tests` module covers structurally but only for
+    // the *valid* arrangements (it `prop_assume!`s away size > 01). The ARM
+    // ARM constrains REV32 <Vd>.<T>, <Vn>.<T> to element sizes of byte (size=00)
+    // and halfword (size=01) ONLY; size=10 (2s/4s) and size=11 (1d/2d) are
+    // UNALLOCATED encodings and an assembler MUST reject them.
+    //
+    // The encoder delegates arrangement parsing to neon_arr_to_q_size, which
+    // accepts ALL eight arrangements and returns (Q,size) for each — so size
+    // 10/11 are silently encoded rather than rejected. Property A documents
+    // this as a finding (expected to FAIL).
+    //
+    // Vector encoding (per encode_rev32):
+    //   0 Q 1 01110 size 1 00000 0000 10 Rn Rd
+    //   bit30=Q, bits[23:22]=size, bit21=1, bits[20:16]=0,
+    //   bits[15:10]=000010, bits[9:5]=Rn, bits[4:0]=Rd.
+
+    const MASK_Q: u32 = 1 << 30;
+    const MASK_SIZE: u32 = 0b11 << 22;
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn vec_ops(rd: u32, rn: u32, arr: &str) -> Vec<Operand> {
+        vec![
+            Operand::RegArrangement { reg: format!("v{}", rd), arrangement: arr.into() },
+            Operand::RegArrangement { reg: format!("v{}", rn), arrangement: arr.into() },
+        ]
+    }
+
+    proptest! {
+        // Property A — Q-only differential for valid element sizes (passes).
+        // For a fixed element size, the two valid arrangements differ only in
+        // the Q bit (bit 30): 8b/16b (size=00), 4h/8h (size=01). Encoded words
+        // must therefore differ in EXACTLY bit 30 and nothing else. This pins
+        // the arrangement -> (Q,size) mapping and guards against arrangement
+        // leakage into other fields.
+        #[test]
+        fn prop_neon_q_only_differs_by_width(
+            rd in 0u32..=31u32,
+            rn in 0u32..=31u32,
+            size_group in prop_oneof![
+                Just(("8b", "16b")),
+                Just(("4h", "8h")),
+            ],
+        ) {
+            let (narrow, wide) = size_group;
+            let narrow_w = word(encode_rev32(&vec_ops(rd, rn, narrow)));
+            let wide_w = word(encode_rev32(&vec_ops(rd, rn, wide)));
+            let diff = narrow_w ^ wide_w;
+            prop_assert_eq!(diff, MASK_Q,
+                "arrangement {} vs {} must differ only in bit30 (Q), got diff={:#010X}",
+                narrow, wide, diff);
+            // Both must agree on the size field.
+            prop_assert_eq!(narrow_w & MASK_SIZE, wide_w & MASK_SIZE);
+        }
+
+        // Property B — NEGATIVE CONTRACT (THE FINDING, expected to FAIL).
+        // REV32 vector is architecturally defined ONLY for size in {00 (bytes),
+        // 01 (halfwords)}. The arrangements 2s/4s (size=10) and 1d/2d (size=11)
+        // are UNALLOCATED encodings (ARM ARM, REV32 vector). An assembler MUST
+        // reject them rather than emit a word with size=10/11. The current
+        // encoder accepts them via neon_arr_to_q_size and emits a well-formed-
+        // looking but unallocated instruction, so every assertion here fails.
+        #[test]
+        fn prop_neon_rejects_unallocated_sizes(
+            rd in 0u32..=31u32,
+            rn in 0u32..=31u32,
+            bad in prop_oneof![
+                Just("2s"), Just("4s"), Just("1d"), Just("2d"),
+            ],
+        ) {
+            let res = encode_rev32(&vec_ops(rd, rn, bad));
+            prop_assert!(res.is_err(),
+                "REV32 v{}.{}/v{}.{}: size 10/11 is UNALLOCATED and must be rejected, \
+                 but encoder accepted it as {:?}",
+                rd, bad, rn, bad, res);
+            // If it (incorrectly) returns Ok, the size field must NOT carry
+            // 10/11 — belt-and-braces check that also documents the leaked value.
+            if let Ok(EncodeResult::Word(w)) = res {
+                let size = (w & MASK_SIZE) >> 22;
+                prop_assert!(size <= 0b01,
+                    "UNALLOCATED size field {} leaked for arrangement {}", size, bad);
+            }
+        }
+
+        // Property C — unknown-arrangement negative contract (passes).
+        // Garbage arrangement strings must be rejected (neon_arr_to_q_size
+        // errors on anything outside the fixed set). Guards the error path that
+        // Property B depends on, and confirms the encoder is not blanket-
+        // accepting arbitrary strings.
+        #[test]
+        fn prop_neon_rejects_unknown_arrangement(
+            rd in 0u32..=31u32,
+            rn in 0u32..=31u32,
+            bad in "\x21..\x7e",  // printable ASCII, broad sample
+        ) {
+            // Only test strings that are genuinely not a known arrangement
+            // (so the property stays well-defined).
+            prop_assume!(!matches!(bad.as_str(),
+                "8b" | "16b" | "4h" | "8h" | "2s" | "4s" | "1d" | "2d"));
+            let res = encode_rev32(&vec_ops(rd, rn, &bad));
+            prop_assert!(res.is_err(),
+                "unknown arrangement {:?} must be rejected, got {:?}", bad, res);
+        }
+    }
+}
+
+#[cfg(test)]
 mod prop_encode_rev16_tests {
     use super::*;
     use proptest::prelude::*;
@@ -2963,6 +3082,43 @@ mod prop_encode_rev16_tests {
                 _ => encode_rev16(&[Operand::Reg(reg_name(n, true)), Operand::Imm(v)]),
             };
             prop_assert!(r.is_err(), "expected Err, got {:?}", r);
+        }
+
+        // Property F — determinism. The same operand list always yields the
+        // same 32-bit word (the encoder is a pure function).
+        #[test]
+        fn prop_deterministic(
+            is_64 in any::<bool>(),
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+        ) {
+            let ops = vec![Operand::Reg(reg_name(rd, is_64)), Operand::Reg(reg_name(rn, is_64))];
+            prop_assert_eq!(enc(&ops), enc(&ops));
+        }
+
+        // Property G — NEGATIVE CONTRACT (the finding): width-consistency.
+        // The REV16 encoding carries a SINGLE sf bit, so the ARM ARM requires
+        // Rd and Rn to share the same width: REV16 Xd, Wn and REV16 Wd, Xn
+        // are UNPREDICTABLE / UNALLOCATED and a correct assembler MUST reject
+        // them. The current encoder derives sf ONLY from Rd
+        // (`let (rn, _) = get_reg(operands, 1)?`) and silently accepts a
+        // mismatched-width source register, emitting a word whose Rn encodes
+        // a register of the wrong width. This property is EXPECTED TO FAIL
+        // and documents the missing validation (same bug as encode_rev).
+        #[test]
+        fn prop_rejects_mismatched_widths(
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+            rd_is_64 in any::<bool>(),
+        ) {
+            let ops = vec![
+                Operand::Reg(reg_name(rd, rd_is_64)),
+                Operand::Reg(reg_name(rn, !rd_is_64)), // intentionally opposite width
+            ];
+            let r = encode_rev16(&ops);
+            prop_assert!(r.is_err(),
+                "REV16 with mismatched Rd/Rn widths ({},{}) should be rejected, got {:?}",
+                reg_name(rd, rd_is_64), reg_name(rn, !rd_is_64), r);
         }
     }
 }
@@ -3898,4 +4054,3 @@ mod prop_encode_rev_tests {
         }
     }
 }
-
