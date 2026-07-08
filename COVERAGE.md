@@ -179,3 +179,64 @@ pub(crate) fn encode_sbc(operands: &[Operand], set_flags: bool) -> Result<Encode
 
 - **Report:** `pbt-out/bug_reports/encode_sbc_silent_mixed_width.md`
 - **Suggested fix:** compare the `is_64` flags returned by `get_reg` for all three operands and return `Err` when they differ.
+
+---
+
+# PBT Coverage — `encode_msub`
+
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_msub`
+**Suite:** inline `proptest!` block in `mod tests` (6 properties; all pass)
+
+## Function under test
+
+```rust
+pub(crate) fn encode_msub(operands: &[Operand]) -> Result<EncodeResult, String> {
+    let (rd, is_64) = get_reg(operands, 0)?;
+    let (rn, _) = get_reg(operands, 1)?;
+    let (rm, _) = get_reg(operands, 2)?;
+    let (ra, _) = get_reg(operands, 3)?;
+    let sf = sf_bit(is_64);
+    let word = (sf << 31) | (0b0011011000 << 21) | (rm << 16) | (1 << 15) | (ra << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+```
+
+Encodes `MSUB Xd, Xn, Xm, Xa` (Rd = Ra − Rn*Rm), the Data-processing (3 source)
+form: `sf 00 11011 000 Rm o0 Ra Rn Rd`, with `o0` (bit 15) = 1 distinguishing
+MSUB from MADD.
+
+## Properties (all PASS)
+
+1. **`msub_field_placement`** — for the full valid register range 0..=31,
+   every fixed field (`sf=1`, bits30:21 = `0b0011011000`, o0=1) and every
+   register field (Rm[20:16], Ra[14:10], Rn[9:5], Rd[4:0]) lands per the
+   ARMv8 spec.
+2. **`msub_o0_bit_always_set`** — bit 15 is always 1 (the MSUB discriminator).
+3. **`msub_sf_tracks_width`** — `sf` (bit 31) reflects destination width:
+   W→0, X→1.
+4. **`msub_vs_madd_differs_only_in_o0`** — differential: MSUB ^ MADD for
+   identical operands == exactly `1<<15`; no other bit differs.
+5. **`msub_register_field_independence`** — flipping one operand changes only
+   its own 5-bit field; all other bits stay constant.
+6. **`msub_rejects_invalid_operands`** — error contract: <4 operands or a
+   non-register 4th operand returns `Err` (never a partial encoding).
+
+## Findings
+
+**1 functional finding filed:** `pbt-out/bug_reports/encode_msub_mixed_width_operands.md`
+
+`encode_msub` derives `sf` only from `Rd` and discards the width of `Rn`/`Rm`/`Ra`
+(bound to `_`). Mixed-width operands (e.g. `msub x0, w1, x2, x3`) are silently
+accepted and encoded with `sf` from `Rd` alone — confirmed via repro: returns
+`Ok(Word(0x9B028C20))` with `sf=1` despite the 32-bit `w1`. A reference
+assembler rejects this; the encoder should validate all four operands share
+`Rd`'s width.
+
+Other notes (non-findings, no separate report):
+- **No silent truncation:** register numbers >31 are rejected by `parse_reg_num`
+  (returns `None` → `get_reg` propagates `Err`); the encoder never masks/clamps
+  register fields.
+- **No reserved/unallocated encoding:** all 0..=31 register combinations produce
+  a valid MSUB bit pattern.
+- **No panic risk:** the function returns `Result` on every path and always
+  yields `EncodeResult::Word`. See the bug report for the fix.
