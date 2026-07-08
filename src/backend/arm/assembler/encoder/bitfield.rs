@@ -2392,3 +2392,256 @@ mod prop_encode_sbfiz_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_extr_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Field layout of the EXTR word (ARM ARM, Extract register) ────────
+    //   EXTR <Rd>, <Rn>, <Rm>, #<lsb>
+    //   sf [31] | opc=00 [30:29] | 100111 [28:23] | N [22] | o0=0 [21]
+    //   | Rm [20:16] | imms [15:10] (= lsb) | Rn [9:5] | Rd [4:0]
+    //
+    // Architectural constraints (ARM ARM, Extract register):
+    //   64-bit: sf=1, N=1, 0 <= lsb <= 63
+    //   32-bit: sf=0, N=0, 0 <= lsb <= 31   (imms[5] must be 0)
+    //   o0 (bit 21) is fixed 0; N must equal sf (CONSTRAINED).
+    //   imms is a 6-bit field ([15:10]).
+    const MASK_SF: u32 = 0x8000_0000;
+    const FIXED_30_29: u32 = 0b00 << 29; // 0x0000_0000
+    const MASK_30_29: u32 = 0b11 << 29; // 0x6000_0000
+    const FIXED_28_23: u32 = 0b100111 << 23; // 0x1380_0000
+    const MASK_28_23: u32 = 0b111111 << 23; // 0x1F80_0000
+    const MASK_N: u32 = 1 << 22; // 0x0040_0000
+    const MASK_O0: u32 = 1 << 21; // 0x0020_0000 — must be 0
+    const MASK_RM: u32 = 0x001F_0000; // bits [20:16]
+    const MASK_IMMS: u32 = 0x0000_FC00; // bits [15:10]
+    const MASK_RN: u32 = 0x0000_03E0; // bits [9:5]
+    const MASK_RD: u32 = 0x0000_001F; // bits [4:0]
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word(encode_extr(ops))
+    }
+
+    fn reg_name(num: u32, is_64: bool) -> String {
+        if is_64 {
+            format!("x{}", num)
+        } else {
+            format!("w{}", num)
+        }
+    }
+
+    /// (rd_name, rd_num, rn_name, rn_num, rm_name, rm_num, lsb, is_64) with
+    /// lsb constrained to the architecturally-valid range for the register
+    /// width (64-bit: 0..=63, 32-bit: 0..=31).
+    fn arb_valid_case() -> impl Strategy<Value = (String, u32, String, u32, String, u32, u32, bool)> {
+        (
+            any::<bool>(),
+            0u32..=30u32,
+            0u32..=30u32,
+            0u32..=30u32,
+            0u32..=63u32,
+        )
+            .prop_filter("lsb within regsize", |&(is_64, _, _, _, lsb)| {
+                let max = if is_64 { 63 } else { 31 };
+                lsb <= max
+            })
+            .prop_map(|(is_64, rd, rn, rm, lsb)| {
+                (
+                    reg_name(rd, is_64),
+                    rd,
+                    reg_name(rn, is_64),
+                    rn,
+                    reg_name(rm, is_64),
+                    rm,
+                    lsb,
+                    is_64,
+                )
+            })
+    }
+
+    // Property B — known-encoding spot check (reference oracle).
+    // EXTR x0, x1, x2, #5 is the canonical reference: sf=1, opc=00,
+    // 100111, N=1, o0=0, Rm=2, imms=5, Rn=1, Rd=0 => 0x93C21420.
+    // (Standalone #[test]: proptest! requires >=1 generated argument.)
+    #[test]
+    fn prop_extr_canonical_encoding() {
+        let ops = vec![
+            Operand::Reg("x0".into()),
+            Operand::Reg("x1".into()),
+            Operand::Reg("x2".into()),
+            Operand::Imm(5),
+        ];
+        assert_eq!(enc(&ops), 0x93C21420u32);
+    }
+
+    proptest! {
+        // Property A — structural / field-placement oracle.
+        // Every fixed opcode bit and every variable field lands exactly
+        // where the EXTR encoding mandates; imms reconstructs to lsb; o0[21]
+        // is always 0; opc[30:29] is 00; and the [28:23] opcode is 100111.
+        #[test]
+        fn prop_extr_field_placement(c in arb_valid_case()) {
+            let (rd_name, rd, rn_name, rn, rm_name, rm, lsb, is_64) = c;
+            let ops = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name),
+                Operand::Reg(rm_name),
+                Operand::Imm(lsb as i64),
+            ];
+            let w = enc(&ops);
+
+            prop_assert_eq!(w & MASK_30_29, FIXED_30_29, "EXTR opc[30:29] must be 00");
+            prop_assert_eq!(w & MASK_28_23, FIXED_28_23, "EXTR [28:23] must be 100111");
+            prop_assert_eq!(w & MASK_SF, if is_64 { MASK_SF } else { 0 });
+            prop_assert_eq!(w & MASK_N, if is_64 { MASK_N } else { 0 });
+            prop_assert_eq!(w & MASK_O0, 0, "o0 (bit 21) must be 0");
+            prop_assert_eq!((w & MASK_RM) >> 16, rm);
+            prop_assert_eq!((w & MASK_IMMS) >> 10, lsb);
+            prop_assert_eq!((w & MASK_RN) >> 5, rn);
+            prop_assert_eq!(w & MASK_RD, rd);
+            // N == sf invariant (ARM ARM: constrained N == sf for EXTR).
+            prop_assert_eq!((w >> 31) & 1, (w >> 22) & 1);
+        }
+
+        // Property C — register-width differential. Encoding x{N} vs w{N}
+        // (same reg number for all three registers, same lsb within the
+        // 32-bit-valid range) differs only in sf[31] and N[22].
+        #[test]
+        fn prop_width_changes_only_sf_and_n(
+            num in 0u32..=30u32,
+            lsb in 0u32..=31u32, // valid for both 32- and 64-bit
+        ) {
+            let ops64 = vec![
+                Operand::Reg(format!("x{}", num)),
+                Operand::Reg("x1".into()),
+                Operand::Reg("x2".into()),
+                Operand::Imm(lsb as i64),
+            ];
+            let ops32 = vec![
+                Operand::Reg(format!("w{}", num)),
+                Operand::Reg("w1".into()),
+                Operand::Reg("w2".into()),
+                Operand::Imm(lsb as i64),
+            ];
+            let diff = enc(&ops64) ^ enc(&ops32);
+            prop_assert_eq!(diff, MASK_SF | MASK_N);
+        }
+
+        // Property D — determinism. The same operand list always yields the
+        // same 32-bit word (encoder is pure).
+        #[test]
+        fn prop_deterministic(c in arb_valid_case()) {
+            let (rd_name, _rd, rn_name, _rn, rm_name, _rm, lsb, _is_64) = c;
+            let ops = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name),
+                Operand::Reg(rm_name),
+                Operand::Imm(lsb as i64),
+            ];
+            prop_assert_eq!(enc(&ops), enc(&ops));
+        }
+
+        // Property E — malformed-operands negative contract (should pass).
+        // EXTR takes 4 operands: Reg, Reg, Reg, Imm. Missing operands or a
+        // wrong-typed operand in any fixed slot must yield Err.
+        #[test]
+        fn prop_rejects_malformed_operands(
+            bad in prop_oneof![
+                Just(0u8), Just(1u8), Just(2u8), Just(3u8), Just(4u8), Just(5u8),
+            ],
+            n in 0u32..=30u32,
+            v in -16i64..=16i64,
+        ) {
+            let r = match bad {
+                0 => encode_extr(&[]),
+                // too few operands (missing the immediate)
+                1 => encode_extr(&[
+                    Operand::Reg(reg_name(n, true)),
+                    Operand::Reg("x1".into()),
+                    Operand::Reg("x2".into()),
+                ]),
+                // slot 0 not a register
+                2 => encode_extr(&[
+                    Operand::Imm(v),
+                    Operand::Reg("x1".into()),
+                    Operand::Reg("x2".into()),
+                    Operand::Imm(0),
+                ]),
+                // slot 1 not a register
+                3 => encode_extr(&[
+                    Operand::Reg("x0".into()),
+                    Operand::Imm(v),
+                    Operand::Reg("x2".into()),
+                    Operand::Imm(0),
+                ]),
+                // slot 2 not a register
+                4 => encode_extr(&[
+                    Operand::Reg("x0".into()),
+                    Operand::Reg("x1".into()),
+                    Operand::Imm(v),
+                    Operand::Imm(0),
+                ]),
+                // slot 3 not an immediate
+                _ => encode_extr(&[
+                    Operand::Reg("x0".into()),
+                    Operand::Reg("x1".into()),
+                    Operand::Reg("x2".into()),
+                    Operand::Reg(reg_name(n, true)),
+                ]),
+            };
+            prop_assert!(r.is_err(), "expected Err, got {:?}", r);
+        }
+
+        // Property F — NEGATIVE CONTRACT (the finding).
+        // EXTR's imms field is 6 bits ([15:10]). The ARM ARM constrains the
+        // lsb (encoded in imms) to: 64-bit 0..=63, 32-bit 0..=31 (for which
+        // imms[5] must be 0). An assembler MUST reject:
+        //   * lsb >= 64  — overflows the 6-bit imms field, OR-ing garbage into
+        //     the Rn field ([9:5]) and beyond;
+        //   * lsb in 32..=63 with a 32-bit (W) register — imms[5] set, which is
+        //     an architecturally UNDEFINED / unpreferrable encoding;
+        //   * negative lsb — the `as u32` cast wraps to ~0, overflowing every
+        //     upper field.
+        // The current encoder performs NO range validation (only an `as u32`
+        // cast), so this property is EXPECTED TO FAIL and documents the same
+        // bug class as encode_ubfm/encode_sbfm/encode_bfm, plus the EXTR-
+        // specific 32-bit imms[5] constraint that lets w-form EXTR silently
+        // emit an invalid instruction for 32 <= lsb <= 63.
+        #[test]
+        fn prop_rejects_out_of_range_lsb(
+            is_64 in any::<bool>(),
+            big_lsb in 64u32..=4095u32,
+            mid_lsb in 32u32..=63u32,
+            neg_imm in (-4096i64)..(-1i64),
+        ) {
+            let mk = |lsb: i64, w64: bool| {
+                encode_extr(&[
+                    Operand::Reg(reg_name(0, w64)),
+                    Operand::Reg(reg_name(1, w64)),
+                    Operand::Reg(reg_name(2, w64)),
+                    Operand::Imm(lsb),
+                ])
+            };
+            // lsb beyond the 6-bit field must be rejected (both widths).
+            prop_assert!(mk(big_lsb as i64, is_64).is_err(),
+                "lsb={} (>63) should be rejected, got {:?}",
+                big_lsb, mk(big_lsb as i64, is_64));
+            // 32-bit form: 32 <= lsb <= 63 sets imms[5] -> must be rejected.
+            prop_assert!(mk(mid_lsb as i64, false).is_err(),
+                "w-form lsb={} (32..=63, sets imms[5]) should be rejected, got {:?}",
+                mid_lsb, mk(mid_lsb as i64, false));
+            // negative lsb must be rejected (cast `as u32` wraps today).
+            prop_assert!(mk(neg_imm, is_64).is_err(),
+                "lsb={} (<0) should be rejected, got {:?}", neg_imm, mk(neg_imm, is_64));
+        }
+    }
+}
