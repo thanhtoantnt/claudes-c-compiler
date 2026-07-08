@@ -1,74 +1,82 @@
-# REPORT — `encode_madd`
+# REPORT — `encode_sxtb`
 
 ## Summary
 
-Generated a property-based test suite for `encode_madd`
-(`src/backend/arm/assembler/encoder/data_processing.rs:598`), the AArch64
-`MADD <Rd>, <Rn>, <Rm>, <Ra>` encoder. Five properties were written; **four pass,
-one fails**. The failing property is a legitimate spec-violation witness:
-`encode_madd` does not validate that all four operands share the same register
-width, so mixed W/X operands are silently encoded as the `Rd` width.
+Generated a property-based test suite for `encode_sxtb`
+(`src/backend/arm/assembler/encoder/data_processing.rs:872`), the AArch64
+`SXTB <Rd>, <Rn>` encoder (alias of `SBFM <Rd>, <Rn>, #0, #7`). Six properties
+were written; **five pass, one fails**. The failing property is a legitimate
+spec-violation witness: `encode_sxtb` does not validate that the source and
+destination registers share the same width, so a 32-bit destination paired with a
+64-bit source (`sxtb w0, x0`) is silently emitted as a 32-bit `SBFM` word
+instead of being rejected.
 
-(Pre-existing context: the `data_processing` test binary already had ~46 failing
-tests from prior campaigns — unrelated to this work; results below are isolated
-to `data_processing::madd_props`.)
+The five passing properties independently confirm the encoding is otherwise
+correct for both widths and the full register range, cross-checked against the
+reference assembler `llvm-mc-18`.
 
 ## Modules Tested
 
 | Module | Target | Oracle | Properties | Result |
 |---|---|---|---|---|
-| `data_processing::madd_props` | `encode_madd` (data_processing.rs:598) | reference constant + field placement + differential (vs `encode_msub`) + negative contract | 5 | 4 pass / 1 fail |
+| `data_processing::sxtb_props` | `encode_sxtb` (data_processing.rs:872) | differential (llvm-mc-18 reference constant) + field placement + width-invariance + negative contract (arity / operand type / mixed width) | 6 | 5 pass / 1 fail |
 
 ## Bugs Found
 
-**`encode_madd` silently accepts mixed-width register operands** —
-full report: `pbt-out/bug_reports/encode_madd_mixed_width_operands.md`.
+**`encode_sxtb` silently accepts an architecturally invalid mixed-width source operand** —
+full report: `pbt-out/bug_reports/encode_sxtb_silent_mixed_width_source.md`.
 
-`sf` is derived only from `Rd` (operand 0); the widths of `Rn`/`Rm`/`Ra` are
-bound to `_` and discarded, so `madd x0, w0, x0, x0` encodes as a 64-bit `MADD`
-instead of erroring. The ARMv8 ARM requires all four MADD operands to share one
-width.
+`sf`/`N` are derived only from `Rd` (operand 0); the source `Rn` width is bound
+to `_` and discarded, so `sxtb w0, x0` encodes as a 32-bit `SBFM w0, w0, #0, #7`
+word (`0x13001C00`) instead of erroring. Per the ARMv8 ARM, `SXTB` is a `SBFM`
+alias and the source/destination must be the same width (`N == sf`); llvm-mc-18
+rejects `sxtb w0, x0` with "error: invalid operand for instruction".
+
+The defect is **one-directional**: the reverse form `sxtb x0, w0` (64-bit
+destination, 32-bit source) is genuinely valid — llvm-mc-18 canonicalizes
+`sxtb x0, x0` to `sxtb x0, w0` (both → `0x93401c00`) — so the source width
+legitimately does not matter for a 64-bit destination. Property
+`sxtb_source_width_irrelevant_for_64bit_destination` verifies this and passes.
+This verified-correct behavior bounds the bug and is intentionally **not** filed
+as a defect.
 
 Witness (failing, shrunk PBT property):
-- **property:** `madd_rejects_mixed_width_operands` (mod `madd_props`,
-  data_processing.rs:6013)
-- **reproduce:** `cargo test --lib data_processing::madd_props::madd_rejects_mixed_width_operands`
+- **property:** `sxtb_rejects_w_destination_with_x_source` (mod `sxtb_props`,
+  data_processing.rs:7243)
+- **reproduce:** `cargo test --lib data_processing::sxtb_props::sxtb_rejects_w_destination_with_x_source`
 - **Falsifiable / minimal failing input:** `n = 0` (successes before failure: 0)
-- **counterexample:** `ops = [Reg("x0"), Reg("w0"), Reg("x0"), Reg("x0")]`
-  → `madd x0, w0, x0, x0`
-- **actual:** `Ok(EncodeResult::Word(…))` with `sf = 1`
+- **counterexample:** `ops = [Reg("w0"), Reg("x0")]` → `sxtb w0, x0`
+- **actual:** `Ok(EncodeResult::Word(318774272))` (= `0x13001C00`, `sf = 0`)
 - **expected:** `Err`
 
-The same defect class affects the adjacent `encode_msub` (line 608) and
-`encode_mul` (line 584); each has / needs its own report
-(`encode_msub_mixed_width_operands.md` already exists in `pbt-out/bug_reports/`).
+The same defect class (`let (rn, _) = get_reg(...)`) affects the sibling
+sign/zero-extend encoders `encode_sxth` (line 863, already reported in
+`encode_sxth_silent_mixed_width_source.md`), `encode_uxth`, and `encode_uxtb`;
+each needs the same one-directional width guard.
 
 ## Design Caveats
 
-- **Register 31 encodes as XZR/WZR and is valid for MADD.** The generated
-  register range (`0u32..=31`) includes 31; P1/P2 verify it encodes correctly.
-  This is spec-correct (ARMv8 ARM, Data-processing (3 source): the zero register
-  is permitted in every MADD operand), not a defect — hence not filed.
-  *Doc evidence:* existing differential/characterization convention in
-  `data_processing.rs` (`encode_madd`/`encode_msub` both place Ra=31 for the
-  XZR alias, e.g. `encode_mul` line 594 `0b11111 << 10`).
-- **No other evidence-backed intentional-behavior caveats.** The mixed-width
-  acceptance was the only non-spec-correct behavior observed; per reporting
-  rules it is reclassified as a bug (see ## Bugs Found), not a caveat.
+- **Register 31 encodes as the zero register (XZR/WZR) and is valid for SXTB.**
+  The generated register range (`0u32..=31`) includes 31; P1/P2 verify it encodes
+  correctly (e.g. `sxtb xzr, wzr` → `0x93401fff`, cross-checked against
+  llvm-mc-18). This is an intentional, codebase-wide design — register 31 is the
+  zero register for non-load/store/non-add-sub instructions like `SBFM`/`SXTB`.
+  *Doc evidence:* `src/backend/arm/assembler/encoder/mod.rs:135` —
+  `parse_reg_num` maps `"xzr" | "wzr" => Some(31)`.
 
 ## Test Files Created
 
 | File | Change | Type |
 |---|---|---|
-| `src/backend/arm/assembler/encoder/data_processing.rs` | appended `#[cfg(test)] mod madd_props` (~135 lines, 5 `proptest!` properties) | inline PBT module |
+| `src/backend/arm/assembler/encoder/data_processing.rs` | appended `#[cfg(test)] mod sxtb_props` (~135 lines, 6 `proptest!` properties) | inline PBT module |
 
 No new top-level test files; the suite was appended as a sibling
-`#[cfg(test)] mod madd_props` to match the file's existing convention
-(`mod smull_props`, `mod smaddl_props`, `mod mvn_props`, …).
+`#[cfg(test)] mod sxtb_props` to match the file's existing convention
+(`mod smull_props`, `mod sxth_props`, `mod madd_props`, …).
 
 ## Output Directories
 
 | Path | Contents |
 |---|---|
-| `pbt-out/bug_reports/encode_madd_mixed_width_operands.md` | Bug report for the mixed-width finding (failing-property witness) |
+| `pbt-out/bug_reports/encode_sxtb_silent_mixed_width_source.md` | Bug report for the mixed-width finding (failing-property witness) |
 | `pbt-out/REPORT.md` | This report |

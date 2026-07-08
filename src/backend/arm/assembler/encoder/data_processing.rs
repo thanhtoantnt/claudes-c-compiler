@@ -7116,3 +7116,142 @@ mod sxth_props {
         }
     }
 }
+
+mod sxtb_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+
+    fn expect_word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    // SBFM field extractors. SXTB Rd, Rn aliases SBFM Rd, Rn, #0, #7:
+    //   sf opc(2) 100110 N immr(6) imms(6) Rn Rd
+    fn sf_of(w: u32) -> u32    { (w >> 31) & 1 }      // bit 31
+    fn opc_of(w: u32) -> u32   { (w >> 29) & 0x3 }    // bits 30:29
+    fn fixed_of(w: u32) -> u32 { (w >> 23) & 0x3F }   // bits 28:23
+    fn n_of(w: u32) -> u32     { (w >> 22) & 1 }      // bit 22
+    fn immr_of(w: u32) -> u32  { (w >> 16) & 0x3F }   // bits 21:16
+    fn imms_of(w: u32) -> u32  { (w >> 10) & 0x3F }   // bits 15:10
+    fn rn_of(w: u32) -> u32    { (w >> 5) & 0x1F }    // bits 9:5
+    fn rd_of(w: u32) -> u32    { w & 0x1F }           // bits 4:0
+
+    proptest! {
+        // ── encode_sxtb: SXTB <Rd>, <Rn> aliases SBFM <Rd>, <Rn>, #0, #7 ───────
+        //
+        // SBFM bit-string: sf opc 100110 N immr imms Rn Rd, with immr=0, imms=7.
+        // Independently derived and cross-checked against the reference assembler:
+        //   llvm-mc-18 --triple=aarch64 --show-encoding
+        //     sxtb x0, w0    -> 0x93401c00     sxtb w5, w7   -> 0x13001ce5
+        //     sxtb xzr, wzr  -> 0x93401fff
+        // => 64-bit base 0x93401C00, 32-bit base 0x13001C00, registers OR'd in.
+
+        // P1. Differential reference oracle: the encoded word equals the
+        //     spec/llvm-mc-derived constant with Rn/Rd placed in their fields,
+        //     for both the 32- and 64-bit forms, across the full register range.
+        #[test]
+        fn sxtb_reference_encoding(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+        ) {
+            let w64 = expect_word(encode_sxtb(&[xreg(rd), xreg(rn)]));
+            prop_assert_eq!(w64, 0x93401C00u32 | (rn << 5) | rd);
+
+            let w32 = expect_word(encode_sxtb(&[wreg(rd), wreg(rn)]));
+            prop_assert_eq!(w32, 0x13001C00u32 | (rn << 5) | rd);
+        }
+
+        // P2. Field placement: every fixed opcode bit-group lands exactly where
+        //     the ARMv8 SBFM encoding dictates, N tracks sf, and immr/imms are
+        //     pinned to the SXTB alias values (#0 / #7).
+        #[test]
+        fn sxtb_field_placement(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            is_64 in any::<bool>(),
+        ) {
+            let dst = if is_64 { xreg(rd) } else { wreg(rd) };
+            let w = expect_word(encode_sxtb(&[dst, xreg(rn)]));
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(opc_of(w), 0b00);                // opc = 00 (SBFM)
+            prop_assert_eq!(fixed_of(w), 0b100110);          // fixed opcode bits
+            prop_assert_eq!(n_of(w), if is_64 { 1 } else { 0 }); // N == sf
+            prop_assert_eq!(immr_of(w), 0);                  // SXTB: immr = #0
+            prop_assert_eq!(imms_of(w), 7);                  // SXTB: imms = #7
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // P3. The source register's width is architecturally irrelevant for a
+        //     64-bit destination: llvm-mc canonicalizes `sxtb x0, x0` to
+        //     `sxtb x0, w0`, and both assemble to the identical word (verified:
+        //     0x93401c00). The encoder must therefore produce identical bytes
+        //     whether the source is written as Xn or Wn (its number is what
+        //     enters the Rn field).
+        #[test]
+        fn sxtb_source_width_irrelevant_for_64bit_destination(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+        ) {
+            let via_x = expect_word(encode_sxtb(&[xreg(rd), xreg(rn)]));
+            let via_w = expect_word(encode_sxtb(&[xreg(rd), wreg(rn)]));
+            prop_assert_eq!(via_x, via_w);
+        }
+
+        // P4. Negative contract: SXTB requires exactly two register operands;
+        //     fewer than two must be rejected with Err.
+        #[test]
+        fn sxtb_rejects_too_few_operands(
+            n in 0u32..=31,
+            missing in 1u32..=2,
+        ) {
+            let mut ops = vec![xreg(n), xreg(n)];
+            for _ in 0..missing { ops.pop(); }
+            prop_assert!(encode_sxtb(&ops).is_err());
+        }
+
+        // P5. Negative contract: SXTB takes no immediates. A non-register
+        //     operand in either position must be rejected with Err.
+        #[test]
+        fn sxtb_rejects_non_register_operands(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            bad_pos in 0u32..2,
+        ) {
+            let mut ops = vec![xreg(rd), xreg(rn)];
+            ops[bad_pos as usize] = Operand::Imm(5);
+            prop_assert!(encode_sxtb(&ops).is_err());
+        }
+
+        // P6. Negative contract (SPEC BUG — FAILS): per the ARMv8 ARM and the
+        //     reference assembler, SXTB requires source and destination to be
+        //     the same width. A 32-bit (W) destination with a 64-bit (X) source
+        //     has no valid SBFM encoding (N must equal sf) and is rejected:
+        //
+        //       $ echo 'sxtb w0, x0' | llvm-mc-18 --triple=aarch64
+        //       <stdin>:1:10: error: invalid operand for instruction
+        //
+        //     A conforming encoder MUST return Err. `encode_sxtb` instead
+        //     ignores the source width (the `let (rn, _) = get_reg(...)` binds
+        //     the width to `_`) and silently emits a 32-bit SBFM word,
+        //     accepting an architecturally invalid form. Sibling encoders
+        //     sxth/uxth/uxtb share the same defect.
+        #[test]
+        fn sxtb_rejects_w_destination_with_x_source(
+            n in 0u32..=31,
+        ) {
+            let ops = vec![wreg(n), xreg(n)]; // sxtb wN, xN -- invalid
+            prop_assert!(
+                encode_sxtb(&ops).is_err(),
+                "W destination + X source is architecturally invalid for SXTB; got {:?}",
+                encode_sxtb(&ops)
+            );
+        }
+    }
+}
