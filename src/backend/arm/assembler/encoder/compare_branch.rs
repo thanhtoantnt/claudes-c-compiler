@@ -2690,3 +2690,205 @@ mod prop_encode_cinc_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_cinv_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ---- CINV opcode constants (ARM ARM C4.1.66, "Conditional Select (inverted)") ----
+    // CINV Rd, Rn, cond is an alias of CSINV Rd, Rn, Rn, invert(cond):
+    //   CSINV = sf 1 0 11010100 Rm cond 0 0 Rn Rd   with Rm == Rn, cond inverted.
+    //   [31]    sf        — 1 = 64-bit (X), 0 = 32-bit (W); taken from Rd ONLY
+    //   [30]    1         — op (selects the CSINV/CSNEG inverted-select family)
+    //   [29]    0         — S = 0
+    //   [28:21] 11010100  — fixed opcode for the conditional-select group
+    //   [20:16] Rm        — aliased onto Rn
+    //   [15:12] cond      — invert(input condition)
+    //   [11:10] 00        — o2=0, o1=0 (selects CSINV within the group)
+    //   [9:5]   Rn
+    //   [4:0]   Rd
+    const OP_BIT: u32 = 1u32 << 30;            // bit [30] must be ONE
+    const OPCODE: u32 = 0b11010100u32 << 21;   // bits [28:21] == 0x1A80_0000
+    const OPCODE_MASK: u32 = 0x1FE0_0000;      // bits [28:21]
+    // Bits that must be ZERO for CINV: [29] (S), [11] (o2), [10] (o1).
+    const FIXED_ZERO: u32 = (1u32 << 29) | (1u32 << 11) | (1u32 << 10); // == 0x2000_0800
+
+    /// Canonical ARM condition-code table mirroring `encode_cond`.
+    const COND_TABLE: &[(&str, u32)] = &[
+        ("eq", 0), ("ne", 1), ("cs", 2), ("hs", 2), ("cc", 3), ("lo", 3),
+        ("mi", 4), ("pl", 5), ("vs", 6), ("vc", 7), ("hi", 8), ("ls", 9),
+        ("ge", 10), ("lt", 11), ("gt", 12), ("le", 13), ("al", 14), ("nv", 15),
+    ];
+
+    /// Map a condition value back to one canonical name (for building the
+    /// inverted-condition operand that `encode_cinv` must match).
+    fn name_of_cond(v: u32) -> &'static str {
+        match v {
+            0 => "eq", 1 => "ne", 2 => "cs", 3 => "cc", 4 => "mi", 5 => "pl",
+            6 => "vs", 7 => "vc", 8 => "hi", 9 => "ls", 10 => "ge", 11 => "lt",
+            12 => "gt", 13 => "le", 14 => "al", _ => "nv",
+        }
+    }
+
+    fn word_of(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word_of(encode_cinv(ops))
+    }
+
+    prop_compose! {
+        fn arb_gp_reg()(n in 0u32..=30u32, is_64 in any::<bool>()) -> (String, u32) {
+            let name = if is_64 { format!("x{}", n) } else { format!("w{}", n) };
+            (name, n)
+        }
+    }
+
+    proptest! {
+        // Property A — full structural / field-placement oracle.
+        // The encoded word is fully determined: bit 30 set, opcode 11010100 in
+        // [28:21], bits [29,11,10] zero, sf tracks Rd's width, cond is the
+        // INVERTED input condition, and the CINV alias collapses Rm onto Rn
+        // (Rm field == Rn field == rn). Reconstructing from the fields
+        // reproduces the whole word — nothing else is set.
+        #[test]
+        fn prop_opcode_structure_and_fields(
+            (rd_name, rd_num) in arb_gp_reg(),
+            rn_num in 0u32..=30u32,
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let (cond_name, cond_val) = COND_TABLE[cond_idx];
+            let inv_cond = cond_val ^ 1;
+            let ops = vec![
+                Operand::Reg(rd_name.clone()),
+                Operand::Reg(format!("x{}", rn_num)),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            let word = enc(&ops);
+
+            // Fixed opcode bits.
+            prop_assert_eq!(word & OP_BIT, OP_BIT);
+            prop_assert_eq!(word & OPCODE_MASK, OPCODE);
+            prop_assert_eq!(word & FIXED_ZERO, 0u32);
+            // sf bit [31] tracks Rd's width.
+            let expected_sf = if rd_name.starts_with('x') { 1u32 } else { 0u32 };
+            prop_assert_eq!((word >> 31) & 1, expected_sf);
+            // Rm [20:16] is aliased onto Rn: both equal rn_num.
+            prop_assert_eq!((word >> 16) & 0x1F, rn_num);
+            // cond [15:12] is the INVERTED input condition.
+            prop_assert_eq!((word >> 12) & 0xF, inv_cond);
+            // Rn [9:5] and Rd [4:0].
+            prop_assert_eq!((word >> 5) & 0x1F, rn_num);
+            prop_assert_eq!(word & 0x1F, rd_num);
+            // CINV-distinct invariant: Rm field must equal Rn field.
+            prop_assert_eq!((word >> 16) & 0x1F, (word >> 5) & 0x1F);
+            // Full reconstruction — the word is exactly the OR of its fields.
+            prop_assert_eq!(
+                word,
+                (expected_sf << 31) | OP_BIT | OPCODE | (rn_num << 16)
+                    | (inv_cond << 12) | (rn_num << 5) | rd_num
+            );
+        }
+
+        // Property B — defining semantic oracle (differential).
+        // CINV Rd, Rn, cond  ==  CSINV Rd, Rn, Rn, invert(cond).
+        // The alias must produce the bit-identical encoding of its base form
+        // for every register pair and every condition code (incl. al<->nv).
+        #[test]
+        fn prop_cinv_equals_csinv_rn_rn_inverted(
+            (rd_name, rd_num) in arb_gp_reg(),
+            rn_num in 0u32..=30u32,
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let (cond_name, cond_val) = COND_TABLE[cond_idx];
+            let inv_name = name_of_cond(cond_val ^ 1);
+            let cinv_ops = vec![
+                Operand::Reg(rd_name.clone()),
+                Operand::Reg(format!("x{}", rn_num)),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            let csinv_ops = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(format!("x{}", rn_num)),
+                Operand::Reg(format!("x{}", rn_num)),   // Rm == Rn
+                Operand::Cond(inv_name.to_string()),     // inverted cond
+            ];
+            prop_assert_eq!(enc(&cinv_ops), word_of(encode_csinv(&csinv_ops)));
+        }
+
+        // Property C — differential: 64- vs 32-bit Rd differ ONLY in bit 31.
+        // sf is derived solely from Rd (operand 0); the Rn source register's
+        // own width is ignored (only its number is read), so flipping x<->w on
+        // Rd changes exactly one bit and leaves every other field untouched.
+        #[test]
+        fn prop_sf_bit_is_bit31(
+            n in 0u32..=30u32,
+            rn_num in 0u32..=30u32,
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let cond_name = COND_TABLE[cond_idx].0;
+            let mk = |rd: String| vec![
+                Operand::Reg(rd),
+                Operand::Reg(format!("x{}", rn_num)),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            let w64 = enc(&mk(format!("x{}", n)));
+            let w32 = enc(&mk(format!("w{}", n)));
+            prop_assert_eq!(w64 ^ w32, 1u32 << 31);
+        }
+
+        // Property D — negative contract on operand shape. CINV takes exactly
+        // three operands: Rd, Rn, cond. Lists that are too short, that lack a
+        // trailing condition, or that place a non-register in the Rd/Rn slots
+        // must make encode_cinv return Err — no silent encoding, no panic.
+        #[test]
+        fn prop_rejects_invalid_operands(case in 0usize..10usize) {
+            let r = Operand::Reg("x0".into());
+            let c = Operand::Cond("eq".into());
+            let result = match case {
+                0 => encode_cinv(&[]),                                            // no operands
+                1 => encode_cinv(&[r.clone()]),                                   // only Rd
+                2 => encode_cinv(&[r.clone(), r.clone()]),                        // Rd, Rn (no cond)
+                3 => encode_cinv(&[r.clone(), r.clone(), r.clone()]),             // 3rd not a Cond
+                4 => encode_cinv(&[Operand::Imm(0), r.clone(), c.clone()]),       // Rd not a reg
+                5 => encode_cinv(&[r.clone(), Operand::Imm(1), c.clone()]),       // Rn not a reg
+                6 => encode_cinv(&[r.clone(), r.clone(), Operand::Imm(4)]),       // cond is Imm
+                7 => encode_cinv(&[r.clone(), r.clone(), Operand::Symbol("s".into())]), // cond is Symbol
+                8 => encode_cinv(&[Operand::Reg("xyz".into()), r.clone(), c.clone()]), // malformed Rd
+                _ => encode_cinv(&[r.clone(), Operand::Reg("zz".into()), c.clone()]),  // malformed Rn
+            };
+            prop_assert!(result.is_err(), "encode_cinv should reject case {} (got {:?})", case, result);
+        }
+
+        // Property E — register-class negative contract. CINV/CSINV are defined
+        // ONLY on general-purpose (X/W) registers (ARM ARM C4.1.66). FP/SIMD
+        // register names (d/s/q/v/h/b) must therefore be rejected rather than
+        // silently re-encoded with their numeric index as if they were GP
+        // registers.
+        #[test]
+        fn prop_rejects_fp_simd_registers(
+            prefix in "[dsvhbq]",
+            n in 0u32..=31u32,
+            slot in 0usize..2,   // Rd or Rn slot
+        ) {
+            let bad = format!("{}{}", prefix, n);
+            let mut ops = vec![
+                Operand::Reg("x0".into()),
+                Operand::Reg("x1".into()),
+                Operand::Cond("eq".into()),
+            ];
+            ops[slot] = Operand::Reg(bad);
+            let result = encode_cinv(&ops);
+            prop_assert!(
+                result.is_err(),
+                "encode_cinv should reject FP/SIMD register in slot {} (got {:?})",
+                slot, result
+            );
+        }
+    }
+}
