@@ -1192,6 +1192,52 @@ mod prop_encode_cbz_tests {
             };
             prop_assert!(result.is_err(), "encode_cbz should reject case {} (got {:?})", case, result);
         }
+
+        // Property F — KNOWN-BUG characterization (differential). Per the ARM ARM
+        // (C5.6.21/22), CBZ/CBNZ's `<Rt>` operand is a *general-purpose* register;
+        // the Rt field value 31 denotes **XZR/WZR**, and there is NO SP-using form.
+        // Therefore `cbz sp, <target>` and `cbz wsp, <target>` are UNPREDICTABLE /
+        // unallocated encodings that a conforming assembler must reject.
+        //
+        // This encoder accepts them because the shared `get_reg`->`parse_reg_num`
+        // helper maps `sp`/`wsp` -> 31 (correct for SP-aware ADD/SUB/LDR, wrong for
+        // every XZR-only instruction), silently producing a branch on the ZERO
+        // register. The assertions below pin that buggy, bit-identical aliasing so
+        // the regression is caught the moment it is fixed (then flip them to `is_err`).
+        //
+        // Sibling encoders suffer the identical defect — see
+        // `encode_mul_sp_operand_silently_accepted_as_xzr`, `encode_div_sp_...`, etc.
+        #[test]
+        fn prop_sp_silently_aliased_to_xzr(
+            sym in "[a-z][a-z0-9_]{0,7}",
+            is_nz in any::<bool>(),
+        ) {
+            let mk = |r: &str| vec![Operand::Reg(r.to_string()), Operand::Symbol(sym.clone())];
+
+            // 64-bit: `sp` and `xzr` both encode as Rt=31, sf=1 — bit-identical.
+            let sp_word = enc(&mk("sp"), is_nz);
+            let xzr_word = enc(&mk("xzr"), is_nz);
+            prop_assert_eq!(sp_word, xzr_word,
+                "cbz/cbnz sp == cbz/cbnz xzr (SP silently aliased to XZR)");
+            // Rt field == 31 (XZR) and sf == 1 (64-bit).
+            prop_assert_eq!(sp_word & RT_MASK, 31);
+            prop_assert_eq!((sp_word >> 31) & 1, 1);
+
+            // 32-bit: `wsp` and `wzr` both encode as Rt=31, sf=0 — bit-identical.
+            let wsp_word = enc(&mk("wsp"), is_nz);
+            let wzr_word = enc(&mk("wzr"), is_nz);
+            prop_assert_eq!(wsp_word, wzr_word,
+                "cbz/cbnz wsp == cbz/cbnz wzr (WSP silently aliased to WZR)");
+            prop_assert_eq!(wsp_word & RT_MASK, 31);
+            prop_assert_eq!((wsp_word >> 31) & 1, 0);
+
+            // The encoder currently returns Ok for these (the bug); a fixed
+            // assembler must return Err. Pinning the acceptance here.
+            prop_assert!(encode_cbz(&mk("sp"), is_nz).is_ok(),
+                "BUG: cbz sp is accepted, not rejected");
+            prop_assert!(encode_cbz(&mk("wsp"), is_nz).is_ok(),
+                "BUG: cbz wsp is accepted, not rejected");
+        }
     }
 }
 
