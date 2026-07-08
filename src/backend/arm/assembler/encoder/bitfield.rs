@@ -1119,3 +1119,214 @@ mod prop_encode_bfm_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_sbfx_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Field layout of the SBFM (SBFX alias) word (ARM ARM §C4.1.69) ────
+    //   sf [31] | opc=00 [30:29] | 100110 [28:23] | N [22]
+    //   | immr [21:16] | imms [15:10] | Rn [9:5] | Rd [4:0]
+    //
+    // SBFX Rd, Rn, #lsb, #width is the alias  SBFM Rd, Rn, #lsb, #(lsb+width-1)
+    //   so immr == lsb and imms == lsb + width - 1.
+    // ARM ARM operand constraints:
+    //   64-bit: 0 <= lsb <= 63, 1 <= width <= 64 - lsb
+    //   32-bit: 0 <= lsb <= 31, 1 <= width <= 32 - lsb
+    // and the encoding constrains N == sf.
+    const MASK_SF: u32 = 0x8000_0000;
+    const FIXED_30_29: u32 = 0b00 << 29; // SBFM opc=00 -> 0x0000_0000
+    const MASK_30_29: u32 = 0b11 << 29; // 0x6000_0000
+    const FIXED_28_23: u32 = 0b100110 << 23; // 0x1300_0000
+    const MASK_28_23: u32 = 0b111111 << 23; // 0x1F80_0000
+    const MASK_N: u32 = 1 << 22; // 0x0040_0000
+    const MASK_IMMR: u32 = 0x003F_0000; // bits [21:16]
+    const MASK_IMMS: u32 = 0x0000_FC00; // bits [15:10]
+    const MASK_RN: u32 = 0x0000_03E0; // bits [9:5]
+    const MASK_RD: u32 = 0x0000_001F; // bits [4:0]
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word(encode_sbfx(ops))
+    }
+
+    fn reg_name(num: u32, is_64: bool) -> String {
+        if is_64 {
+            format!("x{}", num)
+        } else {
+            format!("w{}", num)
+        }
+    }
+
+    /// (rd_name, rd_num, rn_name, rn_num, lsb, width, is_64) with lsb/width
+    /// constrained to the architecturally-valid ranges so immr/imms fit their
+    /// 6-bit fields without wrapping.
+    fn arb_valid_case() -> impl Strategy<Value = (String, u32, String, u32, u32, u32, bool)> {
+        (any::<bool>(), 0u32..=30u32, 0u32..=30u32, 0u32..=63u32, 1u32..=64u32)
+            .prop_filter(
+                "lsb+width must fit regsize",
+                |&(is_64, _rd, _rn, lsb, width)| {
+                    let max = if is_64 { 64 } else { 32 };
+                    lsb < max && width >= 1 && lsb + width <= max
+                },
+            )
+            .prop_map(|(is_64, rd, rn, lsb, width)| {
+                (reg_name(rd, is_64), rd, reg_name(rn, is_64), rn, lsb, width, is_64)
+            })
+    }
+
+    /// Broad (possibly out-of-range) lsb/width for differential tests where
+    /// identical wrapping behaviour is what we compare.
+    fn arb_broad_case() -> impl Strategy<Value = (String, u32, String, u32, u32, u32, bool)> {
+        (any::<bool>(), 0u32..=30u32, 0u32..=30u32, 0u32..=63u32, 1u32..=64u32).prop_map(
+            |(is_64, rd, rn, lsb, width)| {
+                (reg_name(rd, is_64), rd, reg_name(rn, is_64), rn, lsb, width, is_64)
+            },
+        )
+    }
+
+    proptest! {
+        // Property A — structural / field-placement oracle.
+        // Every fixed opcode bit and every variable field lands in its
+        // mandated position; opc[30:29]=00 (the SBFM opcode that distinguishes
+        // SBFX from UBFX=10 / BFXIL=01); immr==lsb and imms==lsb+width-1;
+        // N == sf (ARM ARM constraint).
+        #[test]
+        fn prop_sbfx_field_placement(c in arb_valid_case()) {
+            let (rd_name, rd, rn_name, rn, lsb, width, is_64) = c;
+            let ops = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(width as i64),
+            ];
+            let w = enc(&ops);
+
+            prop_assert_eq!(w & MASK_30_29, FIXED_30_29, "SBFX opc[30:29] must be 00");
+            prop_assert_eq!(w & MASK_28_23, FIXED_28_23);
+            prop_assert_eq!(w & MASK_SF, if is_64 { MASK_SF } else { 0 });
+            prop_assert_eq!(w & MASK_N, if is_64 { MASK_N } else { 0 });
+            prop_assert_eq!((w & MASK_IMMR) >> 16, lsb);
+            prop_assert_eq!((w & MASK_IMMS) >> 10, lsb + width - 1);
+            prop_assert_eq!((w & MASK_RN) >> 5, rn);
+            prop_assert_eq!(w & MASK_RD, rd);
+            // N == sf invariant (ARM ARM: constrained N == sf for SBFM).
+            prop_assert_eq!((w >> 31) & 1, (w >> 22) & 1);
+        }
+
+        // Property B — differential oracle vs the raw SBFM encoder.
+        // SBFX Rd, Rn, #lsb, #width is defined as the alias
+        //   SBFM Rd, Rn, #lsb, #(lsb+width-1).
+        // Feeding both encoders the alias-equivalent operands must yield a
+        // bit-identical word. Holds even for out-of-range lsb/width because
+        // both encoders wrap identically (same `as u32` + same arithmetic).
+        #[test]
+        fn prop_sbfx_equals_sbfm_alias(c in arb_broad_case()) {
+            let (rd_name, _rd, rn_name, _rn, lsb, width, _is_64) = c;
+            let sbfx = vec![
+                Operand::Reg(rd_name.clone()),
+                Operand::Reg(rn_name.clone()),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(width as i64),
+            ];
+            let sbfm = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name),
+                Operand::Imm(lsb as i64),                 // immr = lsb
+                Operand::Imm((lsb + width - 1) as i64),   // imms = lsb+width-1
+            ];
+            prop_assert_eq!(enc(&sbfx), word(encode_sbfm(&sbfm)));
+        }
+
+        // Property C — register-width differential. Encoding with x{N} vs w{N}
+        // (same numeric register, same lsb/width) must differ in exactly the
+        // sf bit [31] and the N bit [22], and nowhere else.
+        #[test]
+        fn prop_width_changes_only_sf_and_n(
+            num in 0u32..=30u32,
+            lsb in 0u32..=31u32,
+            width in 1u32..=32u32,
+        ) {
+            let ops64 = vec![
+                Operand::Reg(format!("x{}", num)),
+                Operand::Reg("x0".into()),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(width as i64),
+            ];
+            let ops32 = vec![
+                Operand::Reg(format!("w{}", num)),
+                Operand::Reg("w0".into()),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(width as i64),
+            ];
+            let diff = enc(&ops64) ^ enc(&ops32);
+            prop_assert_eq!(diff, MASK_SF | MASK_N);
+        }
+
+        // Property D — determinism. The encoder is pure: the same operand
+        // list always yields the same 32-bit word.
+        #[test]
+        fn prop_deterministic(c in arb_valid_case()) {
+            let (rd_name, _rd, rn_name, _rn, lsb, width, _is_64) = c;
+            let ops = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(width as i64),
+            ];
+            prop_assert_eq!(enc(&ops), enc(&ops));
+        }
+
+        // Property E — NEGATIVE CONTRACT (the finding).
+        // SBFX <Xd>,<Xn>,#<lsb>,#<width>: ARM ARM §C4.1.69 constrains
+        //   64-bit: 0 <= lsb <= 63, 1 <= width <= 64 - lsb
+        //   32-bit: 0 <= lsb <= 31, 1 <= width <= 32 - lsb
+        // An assembler MUST reject out-of-range lsb/width rather than
+        // silently OR-ing overflow into the N/Rn/Rd fields — and notably the
+        // `imms = lsb + width - 1` underflows (wraps to ~0) when width == 0.
+        // The current `as u32` cast performs NO range validation, so this
+        // property is EXPECTED TO FAIL and documents the missing contract.
+        #[test]
+        fn prop_rejects_out_of_range_lsb_width(
+            is_64 in any::<bool>(),
+            big_lsb in 64u32..=4095u32,
+            big_width in 65u32..=4095u32,
+            neg in (-4096i64)..(-1i64),
+        ) {
+            let max = if is_64 { 64 } else { 32 };
+            let over_lsb = max as u32;          // lsb == regsize (out of range)
+            let over_width = (max + 1) as u32;  // width > regsize
+            let mk = |lsb: i64, width: i64| {
+                encode_sbfx(&[
+                    Operand::Reg(reg_name(0, is_64)),
+                    Operand::Reg(reg_name(1, is_64)),
+                    Operand::Imm(lsb),
+                    Operand::Imm(width),
+                ])
+            };
+            // width == 0 -> imms underflow
+            prop_assert!(mk(0, 0).is_err(), "width=0 must be rejected, got {:?}", mk(0, 0));
+            // lsb == regsize
+            prop_assert!(mk(over_lsb as i64, 1).is_err(),
+                "lsb={} must be rejected, got {:?}", over_lsb, mk(over_lsb as i64, 1));
+            // width > regsize
+            prop_assert!(mk(0, over_width as i64).is_err(),
+                "width={} must be rejected, got {:?}", over_width, mk(0, over_width as i64));
+            // large lsb / width
+            prop_assert!(mk(big_lsb as i64, 1).is_err(),
+                "lsb={} must be rejected, got {:?}", big_lsb, mk(big_lsb as i64, 1));
+            prop_assert!(mk(0, big_width as i64).is_err(),
+                "width={} must be rejected, got {:?}", big_width, mk(0, big_width as i64));
+            // negative lsb / width
+            prop_assert!(mk(neg, 1).is_err(), "lsb={} must be rejected, got {:?}", neg, mk(neg, 1));
+            prop_assert!(mk(0, neg).is_err(), "width={} must be rejected, got {:?}", neg, mk(0, neg));
+        }
+    }
+}
