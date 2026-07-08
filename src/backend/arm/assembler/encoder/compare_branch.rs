@@ -4555,3 +4555,225 @@ mod prop_encode_cmp_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_tst_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ---- TST semantics (ARM ARM C6.2.x — "ANDS (immediate / shifted register)") ----
+    // TST Rn, op -> ANDS XZR/WZR, Rn, op, i.e. encode_logical(.., opc = 0b11).
+    //   opc field [30:29] = 0b11   (ANDS = AND-with-flags)
+    //   S  bit  [29]      = 1      (sets condition flags — the whole point of TST)
+    //   sf bit  [31]      tracks the width of Rn (via the prepended xzr/wzr)
+    //   Rd field [4:0] = 31       (xzr / wzr: result discarded, only flags matter)
+    //
+    // Two operand shapes forwarded to encode_logical:
+    //   * shifted register:  sf opc 01010 shift 0 Rm imm6 Rn Rd   (bits [28:24]=01010)
+    //   * bitmask immediate: sf opc 100100 N immr imms Rn Rd      (bits [28:23]=100100)
+    const OPC_BITS: u32 = 0b11u32 << 29;       // [30:29] = 0b11 (ANDS)
+    const OPC_MASK: u32 = 0x6000_0000;         // [30:29]
+    const SF_BIT: u32 = 1u32 << 31;            // [31]
+    const S_BIT: u32 = 1u32 << 29;             // [29]
+    const RD_MASK: u32 = 0x1F;                 // [4:0]
+    const REG_OPCODE: u32 = 0b01010u32 << 24;  // == 0x0A00_0000, shifted-reg opcode [28:24]
+    const REG_OPCODE_MASK: u32 = 0x1F00_0000;  // [28:24]
+    const IMM_OPCODE: u32 = 0b100100u32 << 23; // == 0x1200_0000, immediate opcode [28:23]
+    const IMM_OPCODE_MASK: u32 = 0x1F80_0000;  // [28:23]
+    const BIT21: u32 = 1u32 << 21;             // must be 0 in shifted-register form
+
+    fn word_of(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word_of(encode_tst(ops))
+    }
+
+    prop_compose! {
+        fn arb_reg()(n in 0u32..=30u32, is_64 in any::<bool>()) -> (String, u32) {
+            let name = if is_64 { format!("x{}", n) } else { format!("w{}", n) };
+            (name, n)
+        }
+    }
+
+    /// Curated (element_size, ones_width, rotation) triples. Each builds a
+    /// repeating contiguous-1s pattern — the exact class `encode_bitmask_imm`
+    /// accepts — so every value is a guaranteed-valid bitmask immediate.
+    const BITMASK_PATTERNS: &[(u32, u32, u32)] = &[
+        (2, 1, 0), (2, 1, 1),
+        (4, 1, 0), (4, 2, 0), (4, 3, 1),
+        (8, 1, 0), (8, 4, 0), (8, 7, 2),
+        (16, 1, 0), (16, 8, 0),
+        (32, 1, 0), (32, 16, 0),
+        (64, 1, 0), (64, 32, 0),
+    ];
+
+    /// Inverse of `encode_bitmask_imm`: build a bitmask immediate for `width`
+    /// from a repeating element that is a contiguous run of `w` ones, right-
+    /// rotated by `r` within an `s`-bit element. w in 1..s guarantees the
+    /// element is neither all-zeros nor all-ones, so encoding always succeeds.
+    fn make_valid_bitmask(is_64: bool, s: u32, w: u32, r: u32) -> u64 {
+        let width = if is_64 { 64 } else { 32 };
+        let elem_mask: u64 = if s >= 64 { u64::MAX } else { (1u64 << s) - 1 };
+        let base: u64 = ((1u64 << w) - 1) & elem_mask;
+        let rot: u64 = if r == 0 {
+            base
+        } else {
+            ((base >> r) | (base << (s - r))) & elem_mask
+        };
+        let mut val: u64 = rot;
+        let mut pos = s;
+        while pos < width {
+            val |= rot << pos;
+            pos += s;
+        }
+        val
+    }
+
+    proptest! {
+        // Property A — shifted-register structural / field-placement oracle.
+        // TST Rn, Rm -> ANDS XZR/WZR, Rn, Rm. Verifies every populated field:
+        // sf tracks Rn width, opc=0b11 (ANDS), S bit set, opcode [28:24]=01010,
+        // no shift, bit 21 = 0, Rm/imm6/Rn correct, and Rd == 31 (zr).
+        #[test]
+        fn prop_register_form_structure(
+            (rn_name, rn_num) in arb_reg(),
+            (rm_name, rm_num) in arb_reg(),
+        ) {
+            let ops = vec![Operand::Reg(rn_name.clone()), Operand::Reg(rm_name.clone())];
+            let word = enc(&ops);
+
+            let expected_sf = u32::from(rn_name.starts_with('x'));
+            prop_assert_eq!(word & SF_BIT, expected_sf << 31);
+            prop_assert_eq!(word & OPC_MASK, OPC_BITS);
+            prop_assert_eq!(word & S_BIT, S_BIT);
+            prop_assert_eq!(word & REG_OPCODE_MASK, REG_OPCODE);
+            prop_assert_eq!((word >> 22) & 0x3, 0u32); // shift type = LSL (none)
+            prop_assert_eq!(word & BIT21, 0u32);
+            prop_assert_eq!((word >> 16) & 0x1F, rm_num);
+            prop_assert_eq!((word >> 10) & 0x3F, 0u32); // imm6 = 0
+            prop_assert_eq!((word >> 5) & 0x1F, rn_num);
+            prop_assert_eq!(word & RD_MASK, 31u32);
+        }
+
+        // Property B — bitmask-immediate structural / field-placement oracle.
+        // TST Rn, #imm -> ANDS XZR/WZR, Rn, #imm. Verifies sf tracks Rn width,
+        // opc=0b11, S bit set, immediate opcode [28:23]=100100, Rn field, Rd=31,
+        // and (for 32-bit) the N bit [22] is RES0 == 0 per ARM ARM.
+        #[test]
+        fn prop_immediate_form_structure(
+            rn_num in 0u32..=30u32,
+            is_64 in any::<bool>(),
+            idx in 0usize..BITMASK_PATTERNS.len(),
+        ) {
+            let (s, w, r) = BITMASK_PATTERNS[idx];
+            // A 32-bit register cannot use a 64-bit element pattern.
+            prop_assume!(is_64 || s <= 32);
+            let rn_name = if is_64 { format!("x{}", rn_num) } else { format!("w{}", rn_num) };
+            let val = make_valid_bitmask(is_64, s, w, r);
+            let ops = vec![Operand::Reg(rn_name.clone()), Operand::Imm(val as i64)];
+            let word = enc(&ops);
+
+            let expected_sf = u32::from(rn_name.starts_with('x'));
+            prop_assert_eq!(word & SF_BIT, expected_sf << 31);
+            prop_assert_eq!(word & OPC_MASK, OPC_BITS);
+            prop_assert_eq!(word & S_BIT, S_BIT);
+            prop_assert_eq!(word & IMM_OPCODE_MASK, IMM_OPCODE);
+            if !rn_name.starts_with('x') {
+                // N is RES0 when sf == 0.
+                prop_assert_eq!((word >> 22) & 1, 0u32);
+            }
+            prop_assert_eq!((word >> 5) & 0x1F, rn_num);
+            prop_assert_eq!(word & RD_MASK, 31u32);
+        }
+
+        // Property C — differential: 64- vs 32-bit Rn differ ONLY in bit 31 (sf).
+        #[test]
+        fn prop_sf_bit_is_bit31(
+            rn_num in 0u32..=30u32,
+            rm_num in 0u32..=30u32,
+        ) {
+            let ops64 = vec![Operand::Reg(format!("x{}", rn_num)),
+                             Operand::Reg(format!("x{}", rm_num))];
+            let ops32 = vec![Operand::Reg(format!("w{}", rn_num)),
+                             Operand::Reg(format!("x{}", rm_num))];
+            prop_assert_eq!(enc(&ops64) ^ enc(&ops32), SF_BIT);
+        }
+
+        // Property D — differential: TST is ANDS. (1) encode_tst must produce
+        // exactly what encode_logical(zr-prefixed, opc=0b11) produces, and
+        // (2) ANDS vs AND (opc=0b00) differ ONLY in the opc field [30:29].
+        #[test]
+        fn prop_tst_is_ands_and_differs_only_in_opc(
+            (rn_name, _) in arb_reg(),
+            (rm_name, _) in arb_reg(),
+        ) {
+            let is_32 = rn_name.starts_with('w');
+            let zr = if is_32 { "wzr".to_string() } else { "xzr".to_string() };
+            let fwd = vec![Operand::Reg(zr),
+                           Operand::Reg(rn_name.clone()),
+                           Operand::Reg(rm_name.clone())];
+            let tst_word = enc(&[Operand::Reg(rn_name.clone()), Operand::Reg(rm_name.clone())]);
+            let ands_via_logical = word_of(encode_logical(&fwd, 0b11));
+            let and_via_logical = word_of(encode_logical(&fwd, 0b00));
+            // encode_tst forwards faithfully to encode_logical(.., opc=0b11).
+            prop_assert_eq!(tst_word, ands_via_logical);
+            // opc is the ONLY field that distinguishes ANDS from AND.
+            prop_assert_eq!(ands_via_logical ^ and_via_logical, OPC_MASK);
+        }
+
+        // Property E — negative contract (input validation).
+        // * `#0` is never a valid bitmask immediate (encode_bitmask_imm rejects it).
+        // * An out-of-range register (x32) is rejected by get_reg.
+        // * Fewer than 2 user operands cannot form a logical op (needs 3 after
+        //   prepending zr).
+        #[test]
+        fn prop_rejects_invalid_inputs(_seed in 0u32..=0u32) {
+            let zero_imm = vec![Operand::Reg("x0".into()), Operand::Imm(0)];
+            prop_assert!(encode_tst(&zero_imm).is_err(),
+                "tst x0, #0 (#0 is not a valid bitmask immediate) must be rejected");
+
+            let bad_reg = vec![Operand::Reg("x32".into()), Operand::Reg("x1".into())];
+            prop_assert!(encode_tst(&bad_reg).is_err(),
+                "tst x32, x1 (x32 out of range) must be rejected");
+
+            let too_few = vec![Operand::Reg("x0".into())];
+            prop_assert!(encode_tst(&too_few).is_err(),
+                "tst x0 (too few operands) must be rejected");
+        }
+
+        // Property F — negative contract (shift-amount range validation).
+        // Per ARM ARM ("Logical (shifted register)"), imm6 is the shift amount
+        // and is valid 0..=31 for 32-bit (sf=0) and 0..=63 for 64-bit (sf=1);
+        // imm6 above those bounds is RESERVED. The implementation masks the
+        // amount with `& 0x3F` in encode_logical, so out-of-range amounts are
+        // SILENTLY accepted/truncated instead of rejected. GAS / llvm-mc reject
+        // these. No cited spec permits wrapping for the shift-amount field.
+        #[test]
+        fn prop_rejects_oversized_shift(
+            is_64 in any::<bool>(),
+            excess in 1u32..=64u32,
+        ) {
+            let max = if is_64 { 63u32 } else { 31u32 };
+            let amount = max + excess; // strictly above the legal maximum
+            let rn = if is_64 { "x5".to_string() } else { "w5".to_string() };
+            let rm = if is_64 { "x6".to_string() } else { "w6".to_string() };
+            let ops = vec![
+                Operand::Reg(rn),
+                Operand::Reg(rm),
+                Operand::Shift { kind: "lsl".to_string(), amount },
+            ];
+            let res = encode_tst(&ops);
+            prop_assert!(
+                res.is_err(),
+                "shift amount {} exceeds legal max {} for {}-bit and MUST be \
+                 rejected (encoder silently masks with & 0x3F); got {:?}",
+                amount, max, if is_64 { 64 } else { 32 }, res
+            );
+        }
+    }
+}
