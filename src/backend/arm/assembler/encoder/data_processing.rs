@@ -1350,6 +1350,109 @@ mod tests {
         }
     }
 
+    // ── encode_add_sub: S-bit / addend / imm-field-range contracts ─────────
+    proptest! {
+        // 12. POSITIVE GAP: ADDS/SUBS immediate form must set the S bit (bit 29).
+        #[test]
+        fn adds_immediate_form_sets_s_bit(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            imm in 0i64..=0xFFF,
+            is_sub in any::<bool>(),
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), Operand::Imm(imm)];
+            let w = expect_word(encode_add_sub(&ops, is_sub, true));
+            prop_assert_eq!(s_of(w), 1); // set_flags => S=1
+            prop_assert_eq!(opcode5_of(w), 0b10001);
+            prop_assert_eq!(op_of(w), if is_sub { 1 } else { 0 });
+            prop_assert_eq!(imm12_of(w), imm as u32);
+        }
+
+        // 13. POSITIVE GAP: ADD Rd, Rn, :lo12:sym+off must carry the addend
+        //     through to Relocation.addend unchanged.
+        #[test]
+        fn modoffset_lo12_preserves_addend(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            sym_id in 0u32..=1000u32,
+            offset in -1000i64..=1000i64,
+        ) {
+            let sym = format!("sym{}", sym_id);
+            let ops = vec![xreg(rd), xreg(rn),
+                           Operand::ModifierOffset { kind: "lo12".into(),
+                                                     symbol: sym.clone(),
+                                                     offset }];
+            let reloc = match encode_add_sub(&ops, false, false) {
+                Ok(EncodeResult::WordWithReloc { word, reloc }) => {
+                    prop_assert_eq!(imm12_of(word), 0);
+                    reloc
+                }
+                Ok(other) => return Err(proptest::test_runner::TestCaseError::fail(
+                    format!("expected WordWithReloc, got {:?}", other))),
+                Err(e) => return Err(proptest::test_runner::TestCaseError::fail(
+                    format!("encode_add_sub failed: {}", e))),
+            };
+            prop_assert_eq!(format!("{:?}", reloc.reloc_type), "AddAbsLo12");
+            prop_assert_eq!(reloc.symbol, sym);
+            prop_assert_eq!(reloc.addend, offset);
+        }
+
+        // 14. NEGATIVE CONTRACT: the extended-register imm3 field is 3 bits
+        //     (0..=7). An extend shift amount >= 8 cannot be represented and
+        //     MUST be rejected (ARMv8 ARM), not silently masked with `& 0x7`.
+        #[test]
+        fn extend_amount_above_7_must_be_rejected(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            ek in 0u32..=7u32,
+            amount in 8u32..=255u32,
+        ) {
+            let kind = match ek {
+                0 => "uxtb", 1 => "uxth", 2 => "uxtw", 3 => "uxtx",
+                4 => "sxtb", 5 => "sxth", 6 => "sxtw", _ => "sxtx",
+            };
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm),
+                           Operand::Extend { kind: kind.into(), amount }];
+            prop_assert!(encode_add_sub(&ops, false, false).is_err());
+        }
+
+        // 15. NEGATIVE CONTRACT: for 64-bit (X) shifted-register LSL, imm6 is
+        //     0..=63; `lsl #64` and above are UNDEFINED and MUST be rejected,
+        //     not silently masked into the imm6 field via `& 0x3F`.
+        #[test]
+        fn xreg_lsl_shift_above_63_must_be_rejected(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            amount in 64u32..=255u32,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm),
+                           Operand::Shift { kind: "lsl".into(), amount }];
+            prop_assert!(encode_add_sub(&ops, false, false).is_err());
+        }
+
+        // 16. POSITIVE GAP: SUBS immediate form full field placement — op=1,
+        //     S=1, fixed opcode, unshifted, imm12/rn/rd all land per spec.
+        #[test]
+        fn subs_immediate_form_fields(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            imm in 0i64..=0xFFF,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), Operand::Imm(imm)];
+            let w = expect_word(encode_add_sub(&ops, true, true));
+            prop_assert_eq!(sf_of(w), 1);
+            prop_assert_eq!(op_of(w), 1);            // SUB
+            prop_assert_eq!(s_of(w), 1);             // SUBS
+            prop_assert_eq!(opcode5_of(w), 0b10001);
+            prop_assert_eq!(sh_of(w), 0);
+            prop_assert_eq!(imm12_of(w), imm as u32);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+    }
+
     // ── MOVZ field extractors ─────────────────────────────────────────────
     // ARMv8 MOVZ (wide immediate): sf 10 100101 hw imm16 Rd
     //   bit 31      : sf
