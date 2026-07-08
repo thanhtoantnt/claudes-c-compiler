@@ -59,3 +59,36 @@ for both widths and the full register range). One functional finding: see
 silently accepts `sxth wN, xN` (32-bit destination + 64-bit source), which the
 reference assembler rejects. Sibling encoders `encode_sxtb`, `encode_uxth`,
 `encode_uxtb` share the defect.
+
+---
+
+# PBT Coverage — `encode_uxth` (data_processing.rs)
+
+## Target
+`encode_uxth(operands: &[Operand]) -> Result<EncodeResult, String>`
+in `src/backend/arm/assembler/encoder/data_processing.rs`.
+
+UXTH `<Wd>,<Wn>` is the ARMv8 alias of `UBFM <Wd>,<Wn>,#0,#15`. It is a
+**32-bit-only** alias — there is no 64-bit UXTH form. Valid word:
+`0 10 100110 0 immr=000000 imms=001111 Rn Rd` = `0x53003C00 | (Rn<<5) | Rd`.
+
+## Properties (module `uxth_props`, 6 tests: 5 PASS, 1 FAILS — real bug)
+| # | Property | Oracle |
+|---|----------|--------|
+| P1 | `uxth_reference_encoding_32bit` — word == `0x53003C00` OR'd with Rn/Rd | reference constant (llvm-mc) |
+| P2 | `uxth_field_placement` — sf=0, opc=10, fixed=`100110`, N=0, immr=0, imms=15, Rn/Rd | field extraction |
+| P3 | `uxth_source_width_irrelevant_for_32bit_destination` — `uxth w0,w0`==`uxth w0,x0` | structural |
+| P4 | `uxth_rejects_too_few_operands` — <2 regs → Err | negative contract |
+| P5 | `uxth_rejects_non_register_operands` — `Operand::Imm` in either slot → Err | negative contract |
+| P6 | `uxth_rejects_64bit_destination_form` — `uxth xN,xM` → Err | negative contract (llvm-mc) |
+
+## Result
+The legal 32-bit form encodes correctly (P1–P3, cross-checked against
+`llvm-mc-18` across the full W register range). **One functional finding,
+PROVEN by failing P6:** `encode_uxth` silently accepts the architecturally
+invalid `uxth xN, xM` (64-bit destination) and emits `0xD3403C00`, which
+disassembles as `ubfx xN, xM, #0, #16` — a different instruction. See
+`pbt-out/bug_reports/encode_uxth_silent_64bit_destination.md`.
+
+Note: this is a **distinct** defect from the `sxth` mixed-width bug — UXTH has
+no 64-bit form at all, whereas SXTH's 64-bit form is legal.
