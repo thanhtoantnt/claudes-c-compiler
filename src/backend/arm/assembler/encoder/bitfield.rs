@@ -885,3 +885,237 @@ mod prop_encode_sbfm_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_bfm_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Field layout of the BFM word (ARM ARM, Bitfield encoding) ──────
+    //   sf [31] | opc=01 [30:29] | 100110 [28:23] | N [22]
+    //   | immr [21:16] | imms [15:10] | Rn [9:5] | Rd [4:0]
+    //
+    // BFM shares the UBFM/SBFM template but with opc[30:29]=01
+    // (SBFM=00, BFM=01, UBFM=10). immr/imms are architecturally 6-bit
+    // fields (0..63); the ARM ARM constrains N == sf.
+    const MASK_SF: u32 = 0x8000_0000;
+    const FIXED_30_29: u32 = 0b01 << 29; // BFM opc=01 → 0x2000_0000
+    const MASK_30_29: u32 = 0b11 << 29; // 0x6000_0000
+    const FIXED_28_23: u32 = 0b100110 << 23; // 0x1300_0000
+    const MASK_28_23: u32 = 0b111111 << 23; // 0x1F80_0000
+    const MASK_N: u32 = 1 << 22; // 0x0040_0000
+    const MASK_IMMR: u32 = 0x003F_0000; // bits [21:16]
+    const MASK_IMMS: u32 = 0x0000_FC00; // bits [15:10]
+    const MASK_RN: u32 = 0x0000_03E0; // bits [9:5]
+    const MASK_RD: u32 = 0x0000_001F; // bits [4:0]
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word(encode_bfm(ops))
+    }
+
+    fn reg_name(num: u32, is_64: bool) -> String {
+        if is_64 {
+            format!("x{}", num)
+        } else {
+            format!("w{}", num)
+        }
+    }
+
+    /// (rd_name, rd_num, rn_name, rn_num, immr, imms, is_64) with immr/imms
+    /// constrained to the architecturally-valid 6-bit range.
+    fn arb_valid_case() -> impl Strategy<Value = (String, u32, String, u32, u32, u32, bool)> {
+        (any::<bool>(), 0u32..=30u32, 0u32..=30u32, 0u32..=63u32, 0u32..=63u32).prop_map(
+            |(is_64, rd, rn, immr, imms)| {
+                (reg_name(rd, is_64), rd, reg_name(rn, is_64), rn, immr, imms, is_64)
+            },
+        )
+    }
+
+    proptest! {
+        // Property A — structural / field-placement oracle.
+        // Every fixed opcode bit and every variable field lands exactly
+        // where the BFM encoding mandates; opc[30:29] is 01 (distinguishing
+        // BFM from SBFM=00 / UBFM=10); immr/imms reconstruct to inputs;
+        // and N == sf (ARM ARM constraint).
+        #[test]
+        fn prop_bfm_field_placement(c in arb_valid_case()) {
+            let (rd_name, rd, rn_name, rn, immr, imms, is_64) = c;
+            let ops = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name),
+                Operand::Imm(immr as i64),
+                Operand::Imm(imms as i64),
+            ];
+            let w = enc(&ops);
+
+            prop_assert_eq!(w & MASK_30_29, FIXED_30_29, "BFM opc[30:29] must be 01");
+            prop_assert_eq!(w & MASK_28_23, FIXED_28_23);
+            prop_assert_eq!(w & MASK_SF, if is_64 { MASK_SF } else { 0 });
+            prop_assert_eq!(w & MASK_N, if is_64 { MASK_N } else { 0 });
+            prop_assert_eq!((w & MASK_IMMR) >> 16, immr);
+            prop_assert_eq!((w & MASK_IMMS) >> 10, imms);
+            prop_assert_eq!((w & MASK_RN) >> 5, rn);
+            prop_assert_eq!(w & MASK_RD, rd);
+            prop_assert_eq!((w >> 31) & 1, (w >> 22) & 1);
+        }
+
+        // Property B — differential oracle vs sibling encoders.
+        // BFM, SBFM and UBFM share an identical encoding template and differ
+        // ONLY in opc[30:29]: BFM=01, SBFM=00, UBFM=10. Feeding identical
+        // operands must therefore produce words whose XOR is exactly the
+        // opc field: BFM ^ UBFM = 0b11<<29 = 0x6000_0000; BFM ^ SBFM = 0b01<<29.
+        #[test]
+        fn prop_bfm_xor_siblings(c in arb_valid_case()) {
+            let (rd_name, _rd, rn_name, _rn, immr, imms, _is_64) = c;
+            let ops = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name),
+                Operand::Imm(immr as i64),
+                Operand::Imm(imms as i64),
+            ];
+            let bfm = enc(&ops);
+            let ubfm = word(encode_ubfm(&ops));
+            let sbfm = word(encode_sbfm(&ops));
+            prop_assert_eq!(bfm ^ ubfm, 0x6000_0000, "BFM ^ UBFM must be exactly bits [30:29]");
+            prop_assert_eq!(bfm ^ sbfm, 0x2000_0000, "BFM ^ SBFM must be exactly bit 29");
+        }
+
+        // Property C — differential oracle vs the BFXIL alias.
+        // BFXIL Rd, Rn, #lsb, #width is defined as the alias
+        //   BFM Rd, Rn, #lsb, #(lsb+width-1)
+        // So for valid lsb/width, BFM(immr=lsb, imms=lsb+width-1) must be
+        // bit-identical to BFXIL(lsb, width).
+        #[test]
+        fn prop_bfm_equals_bfxil_alias(
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+            is_64 in any::<bool>(),
+            lsb in 0u32..=62u32,
+            width in 1u32..=63u32,
+        ) {
+            let max = if is_64 { 64 } else { 32 };
+            prop_assume!(lsb < max && lsb + width <= max, "within regsize");
+            let imms = lsb + width - 1;
+            let bfm = vec![
+                Operand::Reg(reg_name(rd, is_64)),
+                Operand::Reg(reg_name(rn, is_64)),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(imms as i64),
+            ];
+            let bfxil = vec![
+                Operand::Reg(reg_name(rd, is_64)),
+                Operand::Reg(reg_name(rn, is_64)),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(width as i64),
+            ];
+            prop_assert_eq!(enc(&bfm), word(encode_bfxil(&bfxil)));
+        }
+
+        // Property D — register-width differential. Encoding x{N} vs w{N}
+        // (same reg number, same immr/imms) differs only in sf[31] and N[22].
+        #[test]
+        fn prop_width_changes_only_sf_and_n(
+            num in 0u32..=30u32,
+            immr in 0u32..=63u32,
+            imms in 0u32..=63u32,
+        ) {
+            let ops64 = vec![
+                Operand::Reg(format!("x{}", num)),
+                Operand::Reg("x0".into()),
+                Operand::Imm(immr as i64),
+                Operand::Imm(imms as i64),
+            ];
+            let ops32 = vec![
+                Operand::Reg(format!("w{}", num)),
+                Operand::Reg("w0".into()),
+                Operand::Imm(immr as i64),
+                Operand::Imm(imms as i64),
+            ];
+            let diff = enc(&ops64) ^ enc(&ops32);
+            prop_assert_eq!(diff, MASK_SF | MASK_N);
+        }
+
+        // Property E — NEGATIVE CONTRACT (the finding).
+        // immr and imms are 6-bit fields ([21:16] / [15:10]); the AArch64
+        // BFM encoding (ARM ARM Bitfield) requires 0 <= immr,imms <= 63.
+        // An assembler MUST reject out-of-range immediates rather than
+        // silently OR-ing the overflow into the N bit (immr=64) or the Rn
+        // field (imms=64), and must reject negatives rather than letting
+        // the `as u32` cast wrap into the upper opcode bits. The current
+        // cast performs NO range validation, so this property is EXPECTED
+        // TO FAIL and documents the bug shared with encode_ubfm/sbfm.
+        #[test]
+        fn prop_rejects_out_of_range_immediates(
+            bad_immr in 64u32..=4095u32,
+            bad_imms in 64u32..=4095u32,
+            neg_imm in (-4096i64)..(-1i64),
+        ) {
+            let mk = |immr: i64, imms: i64| {
+                encode_bfm(&[
+                    Operand::Reg("x0".into()),
+                    Operand::Reg("x1".into()),
+                    Operand::Imm(immr),
+                    Operand::Imm(imms),
+                ])
+            };
+            prop_assert!(mk(bad_immr as i64, 0).is_err(),
+                "immr={} (>63) should be rejected, got {:?}", bad_immr, mk(bad_immr as i64, 0));
+            prop_assert!(mk(0, bad_imms as i64).is_err(),
+                "imms={} (>63) should be rejected, got {:?}", bad_imms, mk(0, bad_imms as i64));
+            prop_assert!(mk(neg_imm, 0).is_err(),
+                "immr={} (<0) should be rejected, got {:?}", neg_imm, mk(neg_imm, 0));
+            prop_assert!(mk(0, neg_imm).is_err(),
+                "imms={} (<0) should be rejected, got {:?}", neg_imm, mk(0, neg_imm));
+        }
+
+        // Property F — malformed-operands negative contract (should pass).
+        // Missing operands / wrong types in fixed slots must yield Err.
+        #[test]
+        fn prop_rejects_malformed_operands(
+            bad in prop_oneof![Just(0u8), Just(1u8), Just(2u8), Just(3u8), Just(4u8), Just(5u8)],
+            n in 0u32..=30u32,
+            v in -16i64..=16i64,
+        ) {
+            let r = match bad {
+                0 => encode_bfm(&[]),
+                1 => encode_bfm(&[
+                    Operand::Reg(reg_name(n, true)),
+                    Operand::Reg("x1".into()),
+                    Operand::Imm(v),
+                ]),
+                2 => encode_bfm(&[
+                    Operand::Imm(v),
+                    Operand::Reg("x1".into()),
+                    Operand::Imm(0),
+                    Operand::Imm(0),
+                ]),
+                3 => encode_bfm(&[
+                    Operand::Reg("x0".into()),
+                    Operand::Imm(v),
+                    Operand::Imm(0),
+                    Operand::Imm(0),
+                ]),
+                4 => encode_bfm(&[
+                    Operand::Reg("x0".into()),
+                    Operand::Reg("x1".into()),
+                    Operand::Reg(reg_name(n, true)),
+                    Operand::Imm(0),
+                ]),
+                _ => encode_bfm(&[
+                    Operand::Reg("x0".into()),
+                    Operand::Reg("x1".into()),
+                    Operand::Imm(0),
+                    Operand::Reg(reg_name(n, true)),
+                ]),
+            };
+            prop_assert!(r.is_err(), "expected Err, got {:?}", r);
+        }
+    }
+}
