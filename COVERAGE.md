@@ -30,3 +30,32 @@ destination register (operand 0); source widths are not validated, so
 design of every multiply-family encoder here (and is codified by the
 existing `mul` tests' own "sf tracks destination width only" property),
 so it is treated as intended rather than a defect.
+
+---
+
+# PBT Coverage — `encode_sxth` (data_processing.rs)
+
+## Target
+`encode_sxth(operands: &[Operand]) -> Result<EncodeResult, String>`
+in `src/backend/arm/assembler/encoder/data_processing.rs`.
+
+`SXTH <Rd>,<Rn>` is the ARMv8 alias of `SBFM <Rd>,<Rn>,#0,#15`.
+Encoded word: `sf 00 100110 N immr=0 imms=15 Rn Rd`.
+
+## Properties (module `sxth_props`, 6 tests; 5 PASS, 1 FAIL documenting a bug)
+| # | Property | Oracle | Result |
+|---|----------|--------|--------|
+| P1 | `sxth_reference_encoding` — full word == `0x93403C00`(64)/`0x13003C00`(32) OR'd Rn/Rd | llvm-mc-18 differential | PASS |
+| P2 | `sxth_field_placement` — sf, opc=00, fixed=`100110`, N==sf, immr=0, imms=15, Rn/Rd | field extraction | PASS |
+| P3 | `sxth_source_width_irrelevant_for_64bit_destination` — `xN,xM` == `xN,wM` | llvm-mc canonicalization | PASS |
+| P4 | `sxth_rejects_too_few_operands` — <2 regs → Err | negative contract | PASS |
+| P5 | `sxth_rejects_non_register_operands` — Imm in pos 0/1 → Err | negative contract | PASS |
+| P6 | `sxth_rejects_w_destination_with_x_source` — `sxth w0,x0` must be Err | negative contract (spec/llvm-mc) | **FAIL** |
+
+## Result
+Encoding of legal forms is correct (P1–P3, cross-checked against `llvm-mc-18`
+for both widths and the full register range). One functional finding: see
+`pbt-out/bug_reports/encode_sxth_silent_mixed_width_source.md` — the encoder
+silently accepts `sxth wN, xN` (32-bit destination + 64-bit source), which the
+reference assembler rejects. Sibling encoders `encode_sxtb`, `encode_uxth`,
+`encode_uxtb` share the defect.
