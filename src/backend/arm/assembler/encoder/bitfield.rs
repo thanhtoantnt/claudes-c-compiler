@@ -442,6 +442,54 @@ mod prop_encode_ubfx_tests {
             };
             prop_assert!(r.is_err(), "expected Err, got {:?}", r);
         }
+
+        // Property F — NEGATIVE CONTRACT (the finding).
+        // UBFX Rd, Rn, #lsb, #width maps to UBFM with imms = lsb+width-1.
+        // ARM ARM operand constraints (Bitfield, §C4.1.69):
+        //   64-bit: 0 <= lsb <= 63, 1 <= width <= 64 - lsb
+        //   32-bit: 0 <= lsb <= 31, 1 <= width <= 32 - lsb
+        // so that immr (=lsb) and imms (=lsb+width-1) each fit their 6-bit
+        // fields ([21:16] / [15:10]). An assembler MUST reject out-of-range
+        // immediates rather than silently truncating: today the `as u32`
+        // cast wraps negatives into the upper opcode bits, and the OR into
+        // the word lets immr>=64 overflow into the N bit [22] and imms>=64
+        // overflow into the Rn field [9:5]. width==0 with lsb==0 underflows
+        // imms to u32::MAX. The current encoder performs NO range validation,
+        // so this property is EXPECTED TO FAIL and documents the bug shared
+        // with encode_ubfm/encode_sbfm/encode_bfm.
+        #[test]
+        fn prop_rejects_out_of_range_immediates(
+            is_64 in any::<bool>(),
+            bad_lsb in 64u32..=1023u32,
+            bad_width in 65u32..=1023u32,
+            neg_imm in (-1024i64)..(-1i64),
+        ) {
+            let mk = |lsb: i64, width: i64, w64: bool| {
+                encode_ubfx(&[
+                    Operand::Reg(reg_name(0, w64)),
+                    Operand::Reg("x1".into()),
+                    Operand::Imm(lsb),
+                    Operand::Imm(width),
+                ])
+            };
+            // lsb beyond the 6-bit / register-width field must be rejected.
+            prop_assert!(mk(bad_lsb as i64, 1, is_64).is_err(),
+                "lsb={} (>{}) should be rejected, got {:?}",
+                bad_lsb, if is_64 { 63 } else { 31 }, mk(bad_lsb as i64, 1, is_64));
+            // width that pushes imms = lsb+width-1 out of range must be rejected.
+            prop_assert!(mk(0, bad_width as i64, is_64).is_err(),
+                "width={} (imms overflow) should be rejected, got {:?}",
+                bad_width, mk(0, bad_width as i64, is_64));
+            // width == 0 -> imms = lsb - 1 underflow; must be rejected.
+            prop_assert!(mk(0, 0, is_64).is_err(),
+                "width=0 (imms underflow) should be rejected, got {:?}",
+                mk(0, 0, is_64));
+            // negative immediates must be rejected (cast `as u32` wraps today).
+            prop_assert!(mk(neg_imm, 1, is_64).is_err(),
+                "lsb={} (<0) should be rejected, got {:?}", neg_imm, mk(neg_imm, 1, is_64));
+            prop_assert!(mk(1, neg_imm, is_64).is_err(),
+                "width={} (<0) should be rejected, got {:?}", neg_imm, mk(1, neg_imm, is_64));
+        }
     }
 }
 
