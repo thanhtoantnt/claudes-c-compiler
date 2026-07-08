@@ -2118,3 +2118,277 @@ mod prop_encode_ubfiz_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_sbfiz_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::panic;
+
+    // ── Field layout of the SBFM (SBFIZ alias) word (ARM ARM §C4.1.67) ────
+    //   sf [31] | opc=00 [30:29] | 100110 [28:23] | N [22]
+    //   | immr [21:16] | imms [15:10] | Rn [9:5] | Rd [4:0]
+    //
+    // SBFIZ Rd, Rn, #lsb, #width is the alias
+    //   SBFM Rd, Rn, #(-lsb MOD regsize), #(width-1)
+    // so immr == (regsize - lsb) & (regsize - 1)  and  imms == width - 1.
+    // It differs from the sibling UBFIZ alias ONLY in opc[30:29] (00 vs 10),
+    // i.e. in bit 30. ARM ARM operand constraints:
+    //   64-bit: 0 <= lsb <= 63, 1 <= width <= 64 - lsb
+    //   32-bit: 0 <= lsb <= 31, 1 <= width <= 32 - lsb
+    // and the encoding constrains N == sf.
+    const MASK_SF: u32 = 0x8000_0000;
+    const FIXED_30_29: u32 = 0b00 << 29; // SBFM opc=00 -> 0x0000_0000
+    const MASK_30_29: u32 = 0b11 << 29; // 0x6000_0000
+    const FIXED_28_23: u32 = 0b100110 << 23; // 0x1300_0000
+    const MASK_28_23: u32 = 0b111111 << 23; // 0x1F80_0000
+    const MASK_N: u32 = 1 << 22; // 0x0040_0000
+    const MASK_IMMR: u32 = 0x003F_0000; // bits [21:16]
+    const MASK_IMMS: u32 = 0x0000_FC00; // bits [15:10]
+    const MASK_RN: u32 = 0x0000_03E0; // bits [9:5]
+    const MASK_RD: u32 = 0x0000_001F; // bits [4:0]
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word(encode_sbfiz(ops))
+    }
+
+    fn reg_name(num: u32, is_64: bool) -> String {
+        if is_64 {
+            format!("x{}", num)
+        } else {
+            format!("w{}", num)
+        }
+    }
+
+    /// (rd_name, rd_num, rn_name, rn_num, lsb, width, is_64) with lsb/width
+    /// constrained to architecturally-valid ranges so that immr = (regsize-lsb)
+    /// and imms = width-1 each fit their 6-bit field without wrap/underflow.
+    fn arb_valid_case() -> impl Strategy<Value = (String, u32, String, u32, u32, u32, bool)> {
+        (any::<bool>(), 0u32..=30u32, 0u32..=30u32, 0u32..63u32, 1u32..=64u32)
+            .prop_filter(
+                "lsb+width must fit regsize",
+                |&(is_64, _rd, _rn, lsb, width)| {
+                    let max = if is_64 { 64 } else { 32 };
+                    lsb < max && lsb + width <= max
+                },
+            )
+            .prop_map(|(is_64, rd, rn, lsb, width)| {
+                (reg_name(rd, is_64), rd, reg_name(rn, is_64), rn, lsb, width, is_64)
+            })
+    }
+
+    proptest! {
+        // Property A — structural / field-placement oracle.
+        // Every fixed opcode bit and every variable field lands in its
+        // mandated position. SBFIZ maps to SBFM, so opc[30:29] must be 00
+        // (this is the bit that distinguishes SBFIZ from UBFIZ=10). imms
+        // reconstructs exactly to width-1, the SBFIZ-specific immr equals
+        // (regsize - lsb) & (regsize - 1), and N == sf (ARM ARM constraint).
+        #[test]
+        fn prop_sbfiz_field_placement(c in arb_valid_case()) {
+            let (rd_name, rd, rn_name, rn, lsb, width, is_64) = c;
+            let ops = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(width as i64),
+            ];
+            let w = enc(&ops);
+            let regsize: u32 = if is_64 { 64 } else { 32 };
+            let exp_immr = (regsize.wrapping_sub(lsb)) & (regsize - 1);
+            let exp_imms = width - 1;
+
+            prop_assert_eq!(w & MASK_30_29, FIXED_30_29, "SBFIZ opc[30:29] must be 00 (SBFM)");
+            prop_assert_eq!(w & MASK_28_23, FIXED_28_23);
+            prop_assert_eq!(w & MASK_SF, if is_64 { MASK_SF } else { 0 });
+            prop_assert_eq!(w & MASK_N, if is_64 { MASK_N } else { 0 });
+            prop_assert_eq!((w & MASK_IMMR) >> 16, exp_immr);
+            prop_assert_eq!((w & MASK_IMMS) >> 10, exp_imms);
+            prop_assert_eq!((w & MASK_RN) >> 5, rn);
+            prop_assert_eq!(w & MASK_RD, rd);
+            // N == sf invariant (ARM ARM: constrained N == sf for SBFM).
+            prop_assert_eq!((w >> 31) & 1, (w >> 22) & 1);
+        }
+
+        // Property B — the SBFIZ alias formula: immr == -lsb MOD regsize.
+        // For every valid lsb in [0, regsize), immr must equal (regsize-lsb)
+        // mod regsize (so lsb=0 -> immr=0; lsb=1 -> immr=regsize-1; ...).
+        // This is the SBFIZ-specific invariant that distinguishes it from SBFX.
+        #[test]
+        fn prop_immr_is_neg_lsb_mod_regsize(
+            is_64 in any::<bool>(),
+            lsb in 0u32..63u32,
+            width in 1u32..=64u32,
+        ) {
+            let regsize: u32 = if is_64 { 64 } else { 32 };
+            prop_assume!(lsb < regsize && lsb + width <= regsize);
+            let ops = vec![
+                Operand::Reg(reg_name(0, is_64)),
+                Operand::Reg("x1".into()),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(width as i64),
+            ];
+            let w = enc(&ops);
+            let exp_immr = (regsize - lsb) % regsize;
+            prop_assert_eq!((w & MASK_IMMR) >> 16, exp_immr);
+        }
+
+        // Property C — differential oracle against the raw SBFM encoder.
+        // SBFIZ Rd, Rn, #lsb, #width is defined as the alias
+        //   SBFM Rd, Rn, #(-lsb MOD regsize), #(width-1)
+        // so feeding SBFM the converted immediates must yield a bit-identical
+        // word. This verifies the SBFIZ->SBFM alias formula is consistent with
+        // the raw SBFM path (the canonical reference for SBFIZ).
+        #[test]
+        fn prop_sbfiz_equals_sbfm_with_converted_immediates(c in arb_valid_case()) {
+            let (rd_name, _rd, rn_name, _rn, lsb, width, is_64) = c;
+            let regsize: u32 = if is_64 { 64 } else { 32 };
+            let immr = ((regsize.wrapping_sub(lsb)) & (regsize - 1)) as i64;
+            let imms = (width - 1) as i64;
+            let sbfiz = vec![
+                Operand::Reg(rd_name.clone()),
+                Operand::Reg(rn_name.clone()),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(width as i64),
+            ];
+            let sbfm = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name),
+                Operand::Imm(immr),
+                Operand::Imm(imms),
+            ];
+            prop_assert_eq!(enc(&sbfiz), word(encode_sbfm(&sbfm)));
+        }
+
+        // Property D — differential oracle vs the sibling UBFIZ encoder.
+        // SBFIZ and UBFIZ share an identical encoding template and differ ONLY
+        // in opc[30:29]: SBFIZ=00, UBFIZ=10. Feeding identical operands must
+        // therefore produce words that differ in exactly bit 30.
+        #[test]
+        fn prop_sbfiz_xor_ubfiz_is_only_bit_30(c in arb_valid_case()) {
+            let (rd_name, _rd, rn_name, _rn, lsb, width, _is_64) = c;
+            let ops = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(width as i64),
+            ];
+            let diff = enc(&ops) ^ word(encode_ubfiz(&ops));
+            prop_assert_eq!(diff, 0x4000_0000, "SBFIZ ^ UBFIZ must be exactly bit 30");
+        }
+
+        // Property E — NEGATIVE CONTRACT (the finding).
+        // SBFIZ Rd, Rn, #lsb, #width maps to SBFM with immr = -lsb mod regsize
+        // and imms = width-1. ARM ARM operand constraints (Bitfield, SBFIZ):
+        //   64-bit: 0 <= lsb <= 63, 1 <= width <= 64 - lsb
+        //   32-bit: 0 <= lsb <= 31, 1 <= width <= 32 - lsb
+        // so that immr/imms each fit their 6-bit fields ([21:16]/[15:10]).
+        // An assembler MUST reject out-of-range immediates rather than silently
+        // truncating: today the `as u32` cast wraps negatives into the upper
+        // opcode bits, an out-of-range lsb silently maps immr to garbage via
+        // wrapping_sub, an oversized width overflows imms into the Rn field,
+        // and width==0 underflows imms to u32::MAX (a debug-mode panic). The
+        // current encoder performs NO range validation, so this property is
+        // EXPECTED TO FAIL and documents the bug shared with the sibling
+        // UBFIZ/UBFX/UBFM/SBFM/BFM family.
+        #[test]
+        fn prop_rejects_out_of_range_immediates(
+            is_64 in any::<bool>(),
+            over_lsb in 64u32..=1023u32,
+            over_width in 65u32..=1023u32,
+            neg in (-1024i64)..(-1i64),
+        ) {
+            // width == 0 underflows imms = width-1 -> panic in debug, so wrap
+            // it in catch_unwind to treat a panic as a contract failure too.
+            let mk_panic = |lsb: i64, width: i64, w64: bool| {
+                let ops = vec![
+                    Operand::Reg(reg_name(0, w64)),
+                    Operand::Reg(reg_name(1, w64)),
+                    Operand::Imm(lsb),
+                    Operand::Imm(width),
+                ];
+                panic::catch_unwind(panic::AssertUnwindSafe(|| encode_sbfiz(&ops)))
+            };
+            // width == 0 (imms underflow) must be rejected.
+            match mk_panic(0, 0, is_64) {
+                Ok(Ok(w)) => prop_assert!(false,
+                    "width=0 (imms underflow) should be Err, got Ok({:?})", w),
+                Ok(Err(_)) => {}
+                Err(_) => prop_assert!(false,
+                    "width=0 (imms underflow) should be Err but PANICKED"),
+            }
+            // The remaining cases don't panic, so check them directly.
+            let mk = |lsb: i64, width: i64, w64: bool| {
+                encode_sbfiz(&[
+                    Operand::Reg(reg_name(0, w64)),
+                    Operand::Reg(reg_name(1, w64)),
+                    Operand::Imm(lsb),
+                    Operand::Imm(width),
+                ])
+            };
+            // lsb beyond the 6-bit / register-width field must be rejected.
+            prop_assert!(mk(over_lsb as i64, 1, is_64).is_err(),
+                "lsb={} (>{}) should be rejected, got {:?}",
+                over_lsb, if is_64 { 63 } else { 31 }, mk(over_lsb as i64, 1, is_64));
+            // width that pushes imms = width-1 out of range must be rejected.
+            prop_assert!(mk(0, over_width as i64, is_64).is_err(),
+                "width={} (imms overflow) should be rejected, got {:?}",
+                over_width, mk(0, over_width as i64, is_64));
+            // negative immediates must be rejected (cast `as u32` wraps today).
+            prop_assert!(mk(neg, 1, is_64).is_err(),
+                "lsb={} (<0) should be rejected, got {:?}", neg, mk(neg, 1, is_64));
+            prop_assert!(mk(1, neg, is_64).is_err(),
+                "width={} (<0) should be rejected, got {:?}", neg, mk(1, neg, is_64));
+        }
+
+        // Property F — malformed-operands negative contract (should pass).
+        // Missing operands / wrong types in fixed slots must yield Err.
+        #[test]
+        fn prop_rejects_malformed_operands(
+            bad in prop_oneof![Just(0u8), Just(1u8), Just(2u8), Just(3u8), Just(4u8), Just(5u8)],
+            n in 0u32..=30u32,
+            v in -16i64..=16i64,
+        ) {
+            let r = match bad {
+                0 => encode_sbfiz(&[]),
+                1 => encode_sbfiz(&[
+                    Operand::Reg(reg_name(n, true)),
+                    Operand::Reg("x1".into()),
+                    Operand::Imm(v),
+                ]),
+                2 => encode_sbfiz(&[
+                    Operand::Imm(v),
+                    Operand::Reg("x1".into()),
+                    Operand::Imm(0),
+                    Operand::Imm(1),
+                ]),
+                3 => encode_sbfiz(&[
+                    Operand::Reg("x0".into()),
+                    Operand::Imm(v),
+                    Operand::Imm(0),
+                    Operand::Imm(1),
+                ]),
+                4 => encode_sbfiz(&[
+                    Operand::Reg("x0".into()),
+                    Operand::Reg("x1".into()),
+                    Operand::Reg(reg_name(n, true)),
+                    Operand::Imm(1),
+                ]),
+                _ => encode_sbfiz(&[
+                    Operand::Reg("x0".into()),
+                    Operand::Reg("x1".into()),
+                    Operand::Imm(0),
+                    Operand::Reg(reg_name(n, true)),
+                ]),
+            };
+            prop_assert!(r.is_err(), "expected Err, got {:?}", r);
+        }
+    }
+}
