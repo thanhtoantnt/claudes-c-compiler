@@ -4642,3 +4642,140 @@ mod tests {
         }
     }
 }
+
+// ── encode_mvn property tests ────────────────────────────────────────────
+// Scalar MVN Xd, Xm [, shift] is an alias of ORN Xd, XZR, Xm [, shift]:
+//   sf opc[30:29]=01 01010[28:24] shift[23:22] N[21]=1 Rm[20:16] imm6[15:10] Rn[9:5]=11111 Rd[4:0]
+#[cfg(test)]
+mod mvn_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn sf_of(w: u32) -> u32         { (w >> 31) & 1 }
+    fn opc_of(w: u32) -> u32        { (w >> 29) & 0x3 }
+    fn opcode5_of(w: u32) -> u32    { (w >> 24) & 0x1F }
+    fn shift_type_of(w: u32) -> u32 { (w >> 22) & 0x3 }
+    fn n_of(w: u32) -> u32          { (w >> 21) & 1 }
+    fn rm_of(w: u32) -> u32         { (w >> 16) & 0x1F }
+    fn imm6_of(w: u32) -> u32       { (w >> 10) & 0x3F }
+    fn rn_of(w: u32) -> u32         { (w >> 5) & 0x1F }
+    fn rd_of(w: u32) -> u32         { w & 0x1F }
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+    fn shift(kind: &str, amount: u32) -> Operand {
+        Operand::Shift { kind: kind.into(), amount }
+    }
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        // 1. Default form MVN Xd, Xm: every fixed field matches the ARMv8 ORN
+        //    encoding that MVN aliases. sf=1, opc=01, 01010, N=1, Rn=31 (XZR),
+        //    shift=0, and Rm/Rd land in their exact bitfields.
+        #[test]
+        fn mvn_default_form_field_placement(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let ops = vec![xreg(rd), xreg(rm)];
+            let w = word(encode_mvn(&ops));
+            prop_assert_eq!(sf_of(w), 1);
+            prop_assert_eq!(opc_of(w), 0b01);          // ORN
+            prop_assert_eq!(opcode5_of(w), 0b01010);   // logical shifted register
+            prop_assert_eq!(n_of(w), 1);               // ORN sets N=1
+            prop_assert_eq!(rn_of(w), 31);             // Rn == XZR
+            prop_assert_eq!(shift_type_of(w), 0);      // LSL
+            prop_assert_eq!(imm6_of(w), 0);            // no shift
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 2. The Rn field is ALWAYS 31 (XZR) regardless of registers/shift/width.
+        //    This is the defining invariant of MVN -> ORN Rd, XZR, Rm.
+        #[test]
+        fn rn_field_always_xzr(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+            sk in 0u32..=3u32,
+            amount in 0u32..=63u32,
+            is_64 in any::<bool>(),
+        ) {
+            let kind = ["lsl", "lsr", "asr", "ror"][sk as usize];
+            let mk = |n: u32| if is_64 { xreg(n) } else { wreg(n) };
+            let ops = vec![mk(rd), mk(rm), shift(kind, amount)];
+            let w = word(encode_mvn(&ops));
+            prop_assert_eq!(rn_of(w), 31);
+        }
+
+        // 3. Shift type and amount land in their exact bitfields for all four
+        //    shift kinds; imm6 faithfully carries 0..=63.
+        #[test]
+        fn mvn_shift_type_and_amount_fields(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+            sk in 0u32..=3u32,
+            amount in 0u32..=63u32,
+        ) {
+            let (kind, want_st) = match sk {
+                0 => ("lsl", 0u32),
+                1 => ("lsr", 1u32),
+                2 => ("asr", 2u32),
+                _ => ("ror", 3u32),
+            };
+            let ops = vec![xreg(rd), xreg(rm), shift(kind, amount)];
+            let w = word(encode_mvn(&ops));
+            prop_assert_eq!(shift_type_of(w), want_st);
+            prop_assert_eq!(imm6_of(w), amount);
+        }
+
+        // 4. sf (bit 31) tracks register width: W -> 0, X -> 1.
+        #[test]
+        fn sf_bit_tracks_register_width(
+            n in 0u32..=30,
+            is_w in any::<bool>(),
+        ) {
+            let mk = |n: u32| if is_w { wreg(n) } else { xreg(n) };
+            let ops = vec![mk(n), mk(n)];
+            let w = word(encode_mvn(&ops));
+            prop_assert_eq!(sf_of(w), if is_w { 0 } else { 1 });
+        }
+
+        // 5. Differential oracle: MVN Xd, Xm [, shift] must encode identically
+        //    to the explicit ORN Xd, XZR, Xm [, shift] it aliases.
+        #[test]
+        fn mvn_equals_orn_with_xzr_rn(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+            sk in 0u32..=3u32,
+            amount in 0u32..=63u32,
+            is_64 in any::<bool>(),
+        ) {
+            let kind = ["lsl", "lsr", "asr", "ror"][sk as usize];
+            let mk = |n: u32| if is_64 { xreg(n) } else { wreg(n) };
+            let mvn_ops = vec![mk(rd), mk(rm), shift(kind, amount)];
+            let orn_ops = vec![mk(rd), Operand::Reg("xzr".into()), mk(rm), shift(kind, amount)];
+            let mvn_w = word(encode_mvn(&mvn_ops));
+            let orn_w = word(encode_orn(&orn_ops));
+            prop_assert_eq!(mvn_w, orn_w);
+        }
+
+        // 6. Negative contract: a shift amount outside the imm6 range (> 63) is
+        //    architecturally illegal. Reference assemblers (GAS) reject it with
+        //    "immediate value out of range"; encode_mvn must return Err rather
+        //    than silently truncate with `& 0x3F`.
+        #[test]
+        fn out_of_range_shift_amount_is_rejected(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+            amount in 64u32..=1000u32,
+        ) {
+            let ops = vec![xreg(rd), xreg(rm), shift("lsl", amount)];
+            prop_assert!(encode_mvn(&ops).is_err());
+        }
+    }
+}
