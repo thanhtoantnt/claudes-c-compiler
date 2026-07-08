@@ -789,4 +789,127 @@ mod tests {
             );
         }
     }
+
+    // ── encode_fcvt_rounding (FP<->integer conversion with rounding mode) ===
+    // ARMv8-A "Floating-point<->integer conversions" layout:
+    //   sf 0 0 1 1 1 1 0 ftype 1 rmode opcode 0 0 0 0 0 0 Rn Rd
+    //   bit31=sf, bits[30:24]=0011110 (0x1E), bits[23:22]=ftype,
+    //   bit21=1, bits[20:19]=rmode (2-bit), bits[18:16]=opcode (3-bit),
+    //   bits[15:10]=000000, bits[9:5]=Rn, bits[4:0]=Rd.
+    //   (Cross-checked: FCVTZS <Xd>,<Dn> = 0x9E780000 => sf=1,ftype=01,
+    //    bit21=1,rmode=11,opcode=000,000000,Rn,Rd.)
+    fn fcvt_rmode_of(w: u32) -> u32 { (w >> 19) & 0x3 }
+    fn fcvt_opcode_of(w: u32) -> u32 { (w >> 16) & 0x7 }
+
+    proptest! {
+        // Oracle: reference / field layout. A valid GP destination (Wd/Xd)
+        // and FP source (Sn/Dn) with in-range rmode/opcode => every field
+        // lands at its canonical ARMv8 bit position with no truncation.
+        #[test]
+        fn prop_fcvt_rounding_places_fields(
+            rd in 0u32..32, rn in 0u32..32,
+            dbl_src in any::<bool>(), dbl_dst in any::<bool>(),
+            rmode in 0u32..4u32, opcode in 0u32..8u32,
+        ) {
+            let (dst_reg, sf) = if dbl_dst {
+                (format!("x{}", rd), 1u32)
+            } else {
+                (format!("w{}", rd), 0u32)
+            };
+            let src_reg = if dbl_src { format!("d{}", rn) } else { format!("s{}", rn) };
+            let ftype = if dbl_src { 0b01u32 } else { 0b00u32 };
+            let ops = vec![Operand::Reg(dst_reg), Operand::Reg(src_reg)];
+            let w = expect_word(encode_fcvt_rounding(&ops, rmode, opcode));
+
+            // Fixed bits of the FP<->int conversion encoding.
+            prop_assert_eq!((w >> 24) & 0x7F, 0x1Eu32); // bits[30:24] = 0011110
+            prop_assert_eq!((w >> 21) & 1, 1u32);       // bit 21 = 1
+            prop_assert_eq!((w >> 10) & 0x3F, 0u32);    // bits[15:10] = 000000
+
+            // sf (bit31), ftype[23:22], rmode[20:19], opcode[18:16].
+            prop_assert_eq!(sf_of(w), sf);
+            prop_assert_eq!(ftype_of(w), ftype);
+            prop_assert_eq!(fcvt_rmode_of(w), rmode);
+            prop_assert_eq!(fcvt_opcode_of(w), opcode);
+
+            // Register fields round-trip exactly into their 5-bit slots.
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(rn_of(w), rn);
+
+            // Reference reconstruction.
+            let expected = (sf << 31) | (0x1Eu32 << 24) | (ftype << 22)
+                | (1u32 << 21) | (rmode << 19) | (opcode << 16) | (rn << 5) | rd;
+            prop_assert_eq!(w, expected);
+        }
+
+        // Oracle: precision / sf derivation. sf comes from the destination's
+        // GP width (X=>1, W=>0); ftype comes solely from the source prefix
+        // ('d'=>01 double, else=>00 single). The two are independent.
+        #[test]
+        fn prop_fcvt_rounding_sf_and_ftype_derivation(
+            rd in 0u32..32, rn in 0u32..32,
+            dbl_src in any::<bool>(), dbl_dst in any::<bool>(),
+        ) {
+            let dst_reg = if dbl_dst { format!("x{}", rd) } else { format!("w{}", rd) };
+            let src_reg = if dbl_src { format!("d{}", rn) } else { format!("s{}", rn) };
+            let ops = vec![Operand::Reg(dst_reg), Operand::Reg(src_reg)];
+            let w = expect_word(encode_fcvt_rounding(&ops, 0, 0));
+            prop_assert_eq!(sf_of(w), if dbl_dst { 1 } else { 0 });
+            prop_assert_eq!(ftype_of(w), if dbl_src { 0b01 } else { 0b00 });
+        }
+
+        // Oracle: determinism. Same operands+rmode+opcode => identical word.
+        #[test]
+        fn prop_fcvt_rounding_is_deterministic(
+            rd in 0u32..32, rn in 0u32..32, rmode in 0u32..4u32, opcode in 0u32..8u32,
+        ) {
+            let ops = vec![Operand::Reg(format!("w{}", rd)), Operand::Reg(format!("d{}", rn))];
+            let w1 = expect_word(encode_fcvt_rounding(&ops, rmode, opcode));
+            let w2 = expect_word(encode_fcvt_rounding(&ops, rmode, opcode));
+            prop_assert_eq!(w1, w2);
+        }
+
+        // Negative contract (validated, PASSES): out-of-range register numbers
+        // (>= 32) MUST be rejected by get_reg, not masked into 5 bits; and
+        // non-register operands / too-few operands must be rejected.
+        #[test]
+        fn prop_fcvt_rounding_rejects_bad_regs_and_arity(
+            n in 32u32..256u32, pos in 0u32..2u32, bad_imm in any::<i64>(),
+        ) {
+            let prefix = if pos == 0 { "w" } else { "d" };
+            let mut names = vec!["w0".to_string(), "d0".to_string()];
+            names[pos as usize] = format!("{}{}", prefix, n);
+            let ops: Vec<Operand> = names.into_iter().map(Operand::Reg).collect();
+            prop_assert!(
+                encode_fcvt_rounding(&ops, 0, 0).is_err(),
+                "register {}{} must be rejected (5-bit field), not silently masked", prefix, n
+            );
+            // Too few operands.
+            prop_assert!(encode_fcvt_rounding(&[], 0, 0).is_err());
+            prop_assert!(encode_fcvt_rounding(&[Operand::Reg("w0".into())], 0, 0).is_err());
+            // Non-register source operand.
+            let bad = vec![Operand::Reg("w0".into()), Operand::Imm(bad_imm)];
+            prop_assert!(encode_fcvt_rounding(&bad, 0, 0).is_err());
+        }
+
+        // Negative contract (FINDING — FAILS): rmode is a 2-bit field [20:19]
+        // and opcode is a 3-bit field [18:16]. Values outside these ranges are
+        // OR'd into the word with NO range check, silently corrupting the
+        // fixed bit 21, the ftype field, and the neighbouring rmode/opcode
+        // bits. They MUST be rejected.
+        #[test]
+        fn prop_fcvt_rounding_rejects_oversized_rmode_and_opcode(
+            bad_rmode in 4u32..32u32, bad_opcode in 8u32..128u32,
+        ) {
+            let ops = vec![Operand::Reg("w0".into()), Operand::Reg("d0".into())];
+            prop_assert!(
+                encode_fcvt_rounding(&ops, bad_rmode, 0).is_err(),
+                "rmode {} must be rejected (2-bit field [20:19]); it overflows into bit21/ftype", bad_rmode
+            );
+            prop_assert!(
+                encode_fcvt_rounding(&ops, 0, bad_opcode).is_err(),
+                "opcode {} must be rejected (3-bit field [18:16]); it overflows into the rmode field", bad_opcode
+            );
+        }
+    }
 }
