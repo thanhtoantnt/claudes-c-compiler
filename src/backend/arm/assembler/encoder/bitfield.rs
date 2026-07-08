@@ -3578,3 +3578,324 @@ mod prop_encode_crc32_tests {
         }
     }
 }
+#[cfg(test)]
+mod prop_encode_cls_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Field layout of the CLS word (ARM ARM, Data-processing (1 source)) ──
+    //   sf [31] | 10 [30:29] | 11010110 [28:21] | op2=00000 [20:16]
+    //   | opcode=000101 [15:10] | Rn [9:5] | Rd [4:0]
+    //
+    // CLS shares its template with CLZ (opcode 000100) and differs ONLY in
+    // bit 10 (CLS opcode 000101 vs CLZ 000100). There is a single shared
+    // sf field, so Rd and Rn must agree on width (ARM ARM CLS operand
+    // constraint: same register size for both operands).
+    const MASK_SF: u32 = 0x8000_0000;
+    const FIXED_30_29: u32 = 0b10 << 29; // 0x4000_0000
+    const MASK_30_29: u32 = 0b11 << 29; // 0x6000_0000
+    const FIXED_28_21: u32 = 0b11010110u32 << 21; // 0x1AC0_0000
+    const MASK_28_21: u32 = 0xFFu32 << 21; // 0x1FE0_0000
+    const MASK_OP2: u32 = 0x1Fu32 << 16; // bits [20:16], must be 0
+    const FIXED_15_10: u32 = 0b000101u32 << 10; // 0x1400 (CLS opcode)
+    const MASK_15_10: u32 = 0x3Fu32 << 10; // 0x0000_FC00
+    const MASK_RN: u32 = 0x1Fu32 << 5; // bits [9:5]
+    const MASK_RD: u32 = 0x0000_001F; // bits [4:0]
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word(encode_cls(ops))
+    }
+
+    fn reg_name(num: u32, is_64: bool) -> String {
+        if is_64 {
+            format!("x{}", num)
+        } else {
+            format!("w{}", num)
+        }
+    }
+
+    /// (rd_name, rd_num, rn_name, rn_num, is_64) over valid same-width
+    /// CLS Rd, Rn operands. Register numbers are 0..=30 (x31 is XZR, which
+    /// is also legal but kept out of the broad band for clarity).
+    fn arb_case() -> impl Strategy<Value = (String, u32, String, u32, bool)> {
+        (any::<bool>(), 0u32..=30u32, 0u32..=30u32).prop_map(|(is_64, rd, rn)| {
+            (reg_name(rd, is_64), rd, reg_name(rn, is_64), rn, is_64)
+        })
+    }
+
+    proptest! {
+        // Property A — structural / field-placement oracle.
+        // Every fixed opcode bit and every variable field lands exactly
+        // where the CLS encoding mandates; op2[20:16] is zero; sf tracks
+        // the (shared) register width; Rn/Rd reconstruct to inputs.
+        #[test]
+        fn prop_cls_field_placement(c in arb_case()) {
+            let (rd_name, rd, rn_name, rn, is_64) = c;
+            let ops = vec![Operand::Reg(rd_name), Operand::Reg(rn_name)];
+            let w = enc(&ops);
+
+            prop_assert_eq!(w & MASK_30_29, FIXED_30_29, "[30:29] must be 10");
+            prop_assert_eq!(w & MASK_28_21, FIXED_28_21, "[28:21] must be 11010110");
+            prop_assert_eq!(w & MASK_OP2, 0, "op2[20:16] must be 00000");
+            prop_assert_eq!(w & MASK_15_10, FIXED_15_10, "[15:10] must be 000101 (CLS)");
+            prop_assert_eq!(w & MASK_SF, if is_64 { MASK_SF } else { 0 });
+            prop_assert_eq!((w & MASK_RN) >> 5, rn);
+            prop_assert_eq!(w & MASK_RD, rd);
+        }
+
+        // Property B — differential oracle vs the sibling CLZ encoder.
+        // CLS and CLZ share an identical template and differ ONLY in the
+        // [15:10] opcode (CLS=000101, CLZ=000100), i.e. exactly bit 10.
+        #[test]
+        fn prop_cls_xor_clz_is_only_bit_10(c in arb_case()) {
+            let (rd_name, _rd, rn_name, _rn, is_64) = c;
+            let ops = vec![Operand::Reg(rd_name), Operand::Reg(rn_name)];
+            let _ = is_64;
+            let diff = enc(&ops) ^ word(encode_clz(&ops));
+            prop_assert_eq!(diff, 0x0000_0400u32, "CLS ^ CLZ must be exactly bit 10");
+        }
+
+        // Property C — register-width differential. Encoding CLS x{N}, x0
+        // vs CLS w{N}, w0 (same register number) differs only in sf[31].
+        #[test]
+        fn prop_width_changes_only_sf(num in 0u32..=30u32) {
+            let ops64 = vec![Operand::Reg(format!("x{}", num)), Operand::Reg("x0".into())];
+            let ops32 = vec![Operand::Reg(format!("w{}", num)), Operand::Reg("w0".into())];
+            let diff = enc(&ops64) ^ enc(&ops32);
+            prop_assert_eq!(diff, MASK_SF);
+        }
+
+        // Property E — malformed-operands negative contract (should pass).
+        // Missing operands or a non-register in a fixed slot must be Err.
+        // (Extra trailing operands are a separate finding — the encoder
+        // silently ignores them — so they are deliberately excluded from
+        // this must-fail set and noted in the bug report instead.)
+        #[test]
+        fn prop_rejects_malformed_operands(
+            bad in prop_oneof![Just(0u8), Just(1u8), Just(2u8)],
+            n in 0u32..=30u32,
+            v in -16i64..=16i64,
+        ) {
+            let r = match bad {
+                0 => encode_cls(&[]),
+                1 => encode_cls(&[Operand::Reg(reg_name(n, true))]),
+                2 => encode_cls(&[Operand::Imm(v), Operand::Reg("x1".into())]),
+                _ => unreachable!(),
+            };
+            prop_assert!(r.is_err(), "expected Err, got {:?}", r);
+        }
+
+        // Property F — NEGATIVE CONTRACT (the finding).
+        // CLS has a single shared sf field: Rd and Rn must be the SAME
+        // register width (ARM ARM, CLS). A correct AArch64 assembler MUST
+        // reject mixed-width pairs such as `CLS x0, w1` or `CLS w0, x1`.
+        // The current encoder discards Rn's width (`let (rn, _) = ...`) and
+        // derives sf solely from Rd, so it silently encodes these as if the
+        // operands agreed. This property is EXPECTED TO FAIL and documents
+        // the missing width-coherence validation in encode_cls.
+        #[test]
+        fn prop_rejects_mixed_width_operands(
+            d in 0u32..=30u32,
+            n in 0u32..=30u32,
+        ) {
+            let mixed_a = vec![Operand::Reg(format!("x{}", d)), Operand::Reg(format!("w{}", n))];
+            let mixed_b = vec![Operand::Reg(format!("w{}", d)), Operand::Reg(format!("x{}", n))];
+            let ra = encode_cls(&mixed_a);
+            let rb = encode_cls(&mixed_b);
+            prop_assert!(ra.is_err(),
+                "CLS x{}, w{} mixes widths and should be rejected, got {:?}",
+                d, n, ra);
+            prop_assert!(rb.is_err(),
+                "CLS w{}, x{} mixes widths and should be rejected, got {:?}",
+                d, n, rb);
+        }
+    }
+
+    // Property A2 — known-constant anchor (ARM ARM), outside proptest!
+    // because it takes no generated inputs. CLS X0,X0 = 0xDAC01400 ;
+    // CLS W0,W0 = 0x5AC01400.
+    #[test]
+    fn prop_cls_known_constants() {
+        let w64 = enc(&[Operand::Reg("x0".into()), Operand::Reg("x0".into())]);
+        let w32 = enc(&[Operand::Reg("w0".into()), Operand::Reg("w0".into())]);
+        assert_eq!(w64, 0xDAC0_1400u32);
+        assert_eq!(w32, 0x5AC0_1400u32);
+    }
+}
+
+#[cfg(test)]
+mod prop_encode_rev_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── REV encoding (ARM ARM, Data-processing (1 source)) ────────────────
+    //
+    // REV <Rd>, <Rn>   (Rd/Rn are W or X — available in BOTH widths)
+    //   sf 1 0 11010110 00000 opc[15:10] Rn Rd
+    //
+    // The (sf, opc) decode is a bijection; REV correctly SWAPS opc with sf:
+    //   32-bit (W): sf=0 opc=000010  -> base 0x5AC00800
+    //   64-bit (X): sf=1 opc=000011  -> base 0xDAC00C00
+    // (Contrast the sibling encoders in this file: REV32 mirrors this and
+    //  is buggy; REV16 keeps a single opc and is correct for the opposite
+    //  reason.) Because the encoding has a SINGLE sf bit, ARM ARM requires
+    //  Rd and Rn to share the same width — a mismatched pair is
+    //  UNPREDICTABLE/UNALLOCATED.
+    const BASE_64: u32 = 0xDAC0_0C00;
+    const BASE_32: u32 = 0x5AC0_0800;
+
+    const MASK_SF: u32 = 0x8000_0000;
+    const MASK_30_29: u32 = 0b11 << 29; // 0x6000_0000
+    const MASK_28_21: u32 = 0xFF << 21; // 0x1FE0_0000
+    const MASK_20_16: u32 = 0x1F << 16; // 0x001F_0000
+    const MASK_OPC: u32 = 0x3F << 10; // bits [15:10]
+    const MASK_RN: u32 = 0x1F << 5; // bits [9:5]
+    const MASK_RD: u32 = 0x1F; // bits [4:0]
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word(encode_rev(ops))
+    }
+
+    fn reg_name(num: u32, is_64: bool) -> String {
+        if is_64 { format!("x{}", num) } else { format!("w{}", num) }
+    }
+
+    /// ARM ARM reference word for REV, both widths.
+    fn ref_rev(is_64: bool, rn: u32, rd: u32) -> u32 {
+        let base = if is_64 { BASE_64 } else { BASE_32 };
+        base | (rn << 5) | rd
+    }
+
+    proptest! {
+        // Property A — structural / field-placement oracle.
+        // Every fixed bit lands where the ARM ARM mandates: bit30=1, bit29=0,
+        // bits[28:21]=11010110 (0xD6), bits[20:16]=0; the opc field [15:10]
+        // is 000010 for W and 000011 for X (the defining correctness point
+        // that distinguishes REV from the buggy REV32); sf tracks the width;
+        // and Rn/Rd reconstruct exactly to the inputs.
+        #[test]
+        fn prop_field_placement(
+            is_64 in any::<bool>(),
+            rd in 0u32..=31u32,
+            rn in 0u32..=31u32,
+        ) {
+            let ops = vec![Operand::Reg(reg_name(rd, is_64)), Operand::Reg(reg_name(rn, is_64))];
+            let w = enc(&ops);
+            prop_assert_eq!(w & MASK_SF, if is_64 { MASK_SF } else { 0 }, "sf must track width");
+            prop_assert_eq!(w & MASK_30_29, 0b10 << 29, "bit30=1, bit29=0");
+            prop_assert_eq!(w & MASK_28_21, 0xD6 << 21, "bits[28:21] must be 11010110");
+            prop_assert_eq!(w & MASK_20_16, 0, "bits[20:16] must be 0");
+            let want_opc: u32 = if is_64 { 0b000011 } else { 0b000010 };
+            prop_assert_eq!((w & MASK_OPC) >> 10, want_opc, "opc must vary with width");
+            prop_assert_eq!((w & MASK_RN) >> 5, rn, "Rn reconstruct");
+            prop_assert_eq!(w & MASK_RD, rd, "Rd reconstruct");
+        }
+
+        // Property B — reference oracle against the full ARM ARM word.
+        // The emitted word must equal the hand-derived base for the given
+        // width OR'd with (Rn<<5)|Rd, for BOTH widths. (Passing for both
+        // widths is precisely what makes encode_rev correct — the same
+        // property fails for the buggy encode_rev32, which hardcodes 64-bit.)
+        #[test]
+        fn prop_matches_arm_reference(
+            is_64 in any::<bool>(),
+            rd in 0u32..=31u32,
+            rn in 0u32..=31u32,
+        ) {
+            let ops = vec![Operand::Reg(reg_name(rd, is_64)), Operand::Reg(reg_name(rn, is_64))];
+            let got = enc(&ops);
+            let want = ref_rev(is_64, rn, rd);
+            let w = if is_64 { 'x' } else { 'w' };
+            prop_assert_eq!(got, want,
+                "REV {}{}, {}{} (is_64={}): expected {:#010X}, got {:#010X}",
+                w, rd, w, rn, is_64, want, got);
+        }
+
+        // Property C — register-width differential.
+        // Switching the same register number between X and W must change
+        // exactly two bits: sf[31] and the low bit of opc[10] (since opc is
+        // 000011 for X and 000010 for W). No other field may move.
+        #[test]
+        fn prop_width_changes_only_sf_and_opc_bit0(
+            num in 0u32..=31u32,
+            rn in 0u32..=31u32,
+        ) {
+            let ops64 = vec![Operand::Reg(format!("x{}", num)), Operand::Reg(format!("x{}", rn))];
+            let ops32 = vec![Operand::Reg(format!("w{}", num)), Operand::Reg(format!("w{}", rn))];
+            let diff = enc(&ops64) ^ enc(&ops32);
+            prop_assert_eq!(diff, MASK_SF | (1u32 << 10),
+                "X vs W must differ only in sf[31] and opc bit0 [10]");
+        }
+
+        // Property D — determinism. The same operand list always yields the
+        // same 32-bit word (the encoder is a pure function).
+        #[test]
+        fn prop_deterministic(
+            is_64 in any::<bool>(),
+            rd in 0u32..=31u32,
+            rn in 0u32..=31u32,
+        ) {
+            let ops = vec![Operand::Reg(reg_name(rd, is_64)), Operand::Reg(reg_name(rn, is_64))];
+            prop_assert_eq!(enc(&ops), enc(&ops));
+        }
+
+        // Property E — malformed-operands negative contract (should pass).
+        // REV requires two register operands (Rd, Rn) and reads exactly
+        // operands[0..2]; a missing operand or a non-register in either fixed
+        // slot must yield Err rather than a silently-wrong word.
+        #[test]
+        fn prop_rejects_malformed_operands(
+            kind in prop_oneof![Just(0u8), Just(1u8), Just(2u8), Just(3u8)],
+            n in 0u32..=31u32,
+            v in -16i64..=16i64,
+        ) {
+            let r = match kind {
+                0 => encode_rev(&[]),
+                1 => encode_rev(&[Operand::Reg(reg_name(n, true))]),
+                2 => encode_rev(&[Operand::Imm(v), Operand::Reg("x1".into())]),
+                _ => encode_rev(&[Operand::Reg(reg_name(n, true)), Operand::Imm(v)]),
+            };
+            prop_assert!(r.is_err(), "expected Err, got {:?}", r);
+        }
+
+        // Property F — NEGATIVE CONTRACT (the finding): width-consistency.
+        // The REV encoding carries a SINGLE sf bit, so the ARM ARM requires
+        // Rd and Rn to share the same width: REV Xd, Wn and REV Wd, Xn are
+        // UNPREDICTABLE / UNALLOCATED and a correct assembler MUST reject
+        // them. The current encoder derives sf ONLY from Rd
+        // (`let (rn, _) = get_reg(operands, 1)?`) and silently accepts a
+        // mismatched-width source register, emitting a word whose Rn encodes
+        // a register of the wrong width. This property is EXPECTED TO FAIL
+        // and documents the missing validation.
+        #[test]
+        fn prop_rejects_mismatched_widths(
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+            rd_is_64 in any::<bool>(),
+        ) {
+            let ops = vec![
+                Operand::Reg(reg_name(rd, rd_is_64)),
+                Operand::Reg(reg_name(rn, !rd_is_64)), // intentionally opposite width
+            ];
+            let r = encode_rev(&ops);
+            prop_assert!(r.is_err(),
+                "REV with mismatched Rd/Rn widths ({},{}) should be rejected, got {:?}",
+                reg_name(rd, rd_is_64), reg_name(rn, !rd_is_64), r);
+        }
+    }
+}
+
