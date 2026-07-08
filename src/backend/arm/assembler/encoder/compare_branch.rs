@@ -3531,3 +3531,202 @@ mod prop_encode_bl_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_br_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ---- BR opcode constants (ARM ARM C5.6.17, "Branch to register") ----
+    // BR <Xn> = 1101 0110 0001 1111 0000 00 Rn 00000
+    //   [31:10] fixed opcode  == 0xD61F_0000
+    //   [9:5]   Rn            (5-bit register field)
+    //   [4:0]   00000         (reserved, must be zero)
+    const OPCODE: u32 = 0xD61F_0000;
+    const RN_MASK: u32 = 0x1Fu32 << 5;   // bits [9:5]
+    const LOW5: u32 = 0x1Fu32;           // bits [4:0] (reserved zero)
+
+    fn word_of(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word_of(encode_br(ops))
+    }
+
+    // General-purpose register: x{n}/w{n} for n in 0..=30 (avoid the
+    // xzr/sp-encoded 31 so structural assertions are unambiguous).
+    prop_compose! {
+        fn arb_gp_reg()(n in 0u32..=30u32, is_64 in any::<bool>()) -> (String, u32) {
+            let name = if is_64 { format!("x{}", n) } else { format!("w{}", n) };
+            (name, n)
+        }
+    }
+
+
+
+
+    proptest! {
+        // Property A — full structural / field-placement oracle.
+        // For a valid GP register the encoded word is fully determined: every
+        // bit outside [9:5] is fixed to the BR opcode, the low 5 bits are
+        // reserved-zero, and Rn occupies [9:5]. Reconstruction must match.
+        #[test]
+        fn prop_opcode_structure_and_fields(
+            (rn_name, rn_num) in arb_gp_reg(),
+        ) {
+            let ops = vec![Operand::Reg(rn_name.clone())];
+            let word = enc(&ops);
+
+            // Every bit outside the Rn field is the fixed opcode.
+            prop_assert_eq!(word & !RN_MASK, OPCODE);
+            // Low 5 reserved bits are zero.
+            prop_assert_eq!(word & LOW5, 0u32);
+            // Rn field [9:5] carries the register number.
+            prop_assert_eq!((word >> 5) & 0x1F, rn_num);
+            // Whole word reconstructs exactly from opcode + shifted Rn.
+            prop_assert_eq!(word, OPCODE | (rn_num << 5));
+        }
+
+        // Property B — register-number range validation (negative contract).
+        // The Rn field is a 5-bit UNSIGNED value, valid only 0..=31. A
+        // register number above 31 MUST be rejected with Err rather than
+        // silently masked via `rn << 5` (which would wrap/truncate). The
+        // shared parse_reg_num helper enforces `num <= 31`.
+        #[test]
+        fn prop_rejects_register_number_above_31(
+            n in 32u32..=999u32,
+            is_64 in any::<bool>(),
+        ) {
+            let name = if is_64 { format!("x{}", n) } else { format!("w{}", n) };
+            let ops = vec![Operand::Reg(name.clone())];
+            prop_assert!(
+                encode_br(&ops).is_err(),
+                "register {} (valid 0..=31) must be rejected, got {:?}",
+                name, encode_br(&ops)
+            );
+        }
+
+        // Property C — dead-parameter / width-independence characterization
+        // (FINDING). encode_br binds `(rn, _) = get_reg(...)` and DISCARDS the
+        // `is_64` flag, so `br x{n}` and `br w{n}` encode bit-identically. Per
+        // the ARM ARM (C5.6.17) BR's sole operand is `<Xn>`: the 32-bit W form
+        // is unallocated and a conforming assembler (e.g. GAS) rejects
+        // `br w0`. This encoder accepts it. The differential below pins that
+        // dead-`is_64` behavior; flip to `is_err` once width is validated.
+        #[test]
+        fn prop_width_independent_w_form_accepted(
+            n in 0u32..=30u32,
+        ) {
+            let x = enc(&[Operand::Reg(format!("x{}", n))]);
+            let w = enc(&[Operand::Reg(format!("w{}", n))]);
+            // Currently bit-identical (is_64 discarded).
+            prop_assert_eq!(x, w, "br x{} == br w{} (is_64 dead; W form wrongly accepted)", n, n);
+            // The acceptance itself is the bug — currently Ok, should be Err.
+            prop_assert!(encode_br(&[Operand::Reg(format!("w{}", n))]).is_ok(),
+                "BUG: br w{} is accepted, not rejected", n);
+        }
+
+        // Property D — sp silently aliased to xzr (KNOWN-BUG characterization).
+        // Per the ARM ARM, BR's Rn field value 31 denotes XZR (there is NO
+        // SP-using form of BR). The shared parse_reg_num maps both `sp` and
+        // `xzr` to 31, so `br sp` silently produces a branch to address 0
+        // (== `br xzr`) instead of being rejected as an unallocated encoding.
+        // Sibling encoders (CBZ/CBNZ, etc.) exhibit the identical defect.
+        #[test]
+        fn prop_sp_silently_aliased_to_xzr(
+            _dummy in 0u32..=0u32,
+        ) {
+            let sp = enc(&[Operand::Reg("sp".into())]);
+            let xzr = enc(&[Operand::Reg("xzr".into())]);
+            prop_assert_eq!(sp, xzr, "br sp == br xzr (SP silently aliased to XZR)");
+            prop_assert_eq!((sp >> 5) & 0x1F, 31);
+            prop_assert_eq!(sp & !RN_MASK, OPCODE);
+            // 64-bit accepted (bug) — a fixed assembler must reject `br sp`.
+            prop_assert!(encode_br(&[Operand::Reg("sp".into())]).is_ok(),
+                "BUG: br sp is accepted, not rejected");
+
+            // 32-bit twin: wsp == wzr.
+            let wsp = enc(&[Operand::Reg("wsp".into())]);
+            let wzr = enc(&[Operand::Reg("wzr".into())]);
+            prop_assert_eq!(wsp, wzr, "br wsp == br wzr (WSP silently aliased to WZR)");
+            prop_assert_eq!((wsp >> 5) & 0x1F, 31);
+        }
+
+        // Property E — FP/SIMD register silently accepted (FINDING).
+        // BR's `<Xn>` operand is a GENERAL-PURPOSE register; FP/SIMD operands
+        // (`d/s/q/v/h/b`) are the wrong register class and `br d0`, `br v5`,
+        // etc. are unallocated encodings a conforming assembler must reject.
+        // The shared parse_reg_num accepts those prefixes, so they silently
+        // encode as `br x{n}`. The acceptance below pins the bug.
+        #[test]
+        fn prop_fp_simd_registers_wrongly_accepted(
+            prefix_idx in 0usize..6usize,
+            n in 0u32..=31u32,
+        ) {
+            let prefixes = ["d", "s", "q", "v", "h", "b"];
+            let prefix = prefixes[prefix_idx];
+            let name = format!("{}{}", prefix, n);
+            let ops = vec![Operand::Reg(name.clone())];
+
+            // Currently accepted — the bug.
+            prop_assert!(encode_br(&ops).is_ok(),
+                "BUG: br {} is accepted (FP/SIMD register), should be rejected", name);
+            // And it encodes identically to the GP register of the same number.
+            let fp_word = enc(&ops);
+            let gp_word = enc(&[Operand::Reg(format!("x{}", n))]);
+            prop_assert_eq!(fp_word, gp_word,
+                "br {} silently encodes as br x{} (wrong register class)", name, n);
+        }
+
+        // Property F — non-register operand negative contract.
+        // Operand kinds that get_reg does NOT accept (and an empty operand
+        // vector) must make encode_br return Err; no silent encoding of a
+        // non-register branch target, and no panic on missing operands.
+        #[test]
+        fn prop_rejects_non_register_operands(
+            case in 0usize..12usize,
+        ) {
+            let rejected: Vec<Operand> = vec![
+                Operand::Imm(42),
+                Operand::Symbol("tgt".into()),
+                Operand::Label("tgt".into()),
+                Operand::SymbolOffset("tgt".into(), 8),
+                Operand::Mem { base: "x0".into(), offset: 0 },
+                Operand::MemExpr {
+                    base: "x0".into(), expr: "foo".into(), writeback: false,
+                },
+                Operand::MemPreIndex { base: "x0".into(), offset: 8 },
+                Operand::MemPostIndex { base: "x0".into(), offset: 8 },
+                Operand::Shift { kind: "lsl".into(), amount: 2 },
+                Operand::Cond("eq".into()),
+                Operand::Expr("a + b".into()),
+                Operand::RegList(vec![Operand::Reg("x0".into())]),
+            ];
+            let result = match case {
+                0 => encode_br(&[]),                       // empty vector
+                _ => {
+                    let op = rejected[case - 1].clone();
+                    encode_br(&[op])
+                }
+            };
+            prop_assert!(result.is_err(),
+                "encode_br should reject case {} (got {:?})", case, result);
+        }
+
+        // Property G — determinism / purity. Encoding the same operand twice
+        // yields a bit-identical word; encode_br is a pure function of its
+        // operand (no relocation, no hidden state).
+        #[test]
+        fn prop_encoding_is_deterministic(
+            (rn_name, _) in arb_gp_reg(),
+        ) {
+            let ops = vec![Operand::Reg(rn_name)];
+            prop_assert_eq!(enc(&ops), enc(&ops));
+            prop_assert_eq!(enc(&ops), enc(&ops));
+        }
+    }
+}
