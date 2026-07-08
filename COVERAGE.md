@@ -225,3 +225,67 @@ contract, and `CondBr19` symbol/addend forwarding are all correct. The one non-t
 beyond the structural oracle — case-insensitive condition matching — is intended
 (`to_lowercase()` is explicit, and consistent with the `b.<cond>` dispatcher which lowers the
 whole mnemonic first) and is now pinned by Property 7 rather than left implicit.
+
+---
+
+# PBT Coverage — `encode_branch`
+
+**Target:** `src/backend/arm/assembler/encoder/compare_branch.rs` → `encode_branch`
+**Result:** 8/8 properties pass. **1 functional bug found** (silent acceptance of
+`Reg`/`Cond`/`Barrier` operands as branch targets) — see BUG below.
+
+## What the function does
+Encodes the AArch64 unconditional branch `B <target>` (ARM ARM C5.6.5):
+```
+word   = 0b000101 << 26          // == 0x1400_0000; imm26 [25:0] left 0 for the linker
+result = WordWithReloc { word, reloc: Jump26 { symbol, addend } }
+```
+`get_symbol(operands, 0)` resolves the branch target into a `(symbol, addend)` pair
+forwarded into a `Jump26` relocation; the `imm26` branch-offset field is intentionally
+left zero and patched by the linker. There is no immediate operand to validate — the
+encoder accepts only a symbol-like operand and otherwise returns `Err`.
+
+## Properties verified (module `prop_encode_branch_tests`)
+1. `prop_opcode_structure_and_imm26_zero` — opcode `0b000101` in [31:26], imm26 [25:0] zero;
+   word is exactly `0x1400_0000` for a `Symbol` target (reference oracle).
+2. `prop_branch_vs_bl_differ_only_bit31` — `encode_branch ⊕ encode_bl == 1<<31` exactly
+   (differential oracle against the BL sibling — the link bit).
+3. `prop_reloc_is_jump26_primary_forms` — `Jump26` relocation with exact symbol/addend
+   forwarding for the `Symbol` and `SymbolOffset` forms.
+4. `prop_symbol_forwarding_all_accepted_kinds` — `Jump26` relocation with exact symbol/addend
+   forwarding across all 8 operand kinds `get_symbol` accepts (Symbol/Label/SymbolOffset/
+   Modifier/ModifierOffset/Reg/Cond/Barrier).
+5. `prop_rejects_non_symbol_operands` — negative contract: every operand kind `get_symbol`
+   rejects (Imm/Mem*/Shift/Extend/Expr/RegArrangement/RegLane) → `Err`; no silent encoding
+   of an invalid branch target.
+6. **`prop_word_is_operand_independent`** (new) — the instruction word is the constant
+   `0x1400_0000` for EVERY accepted operand kind; the operand influences only the
+   relocation. Generalises Property 1 (which only checks the `Symbol` form) and complements
+   Property 4 (which only checks the relocation across kinds).
+7. **`prop_empty_operands_rejected`** (new) — arity / negative contract: a branch with no
+   target operand → `Err`. Property 5 covers the wrong *type* of operand; this closes the
+   *missing*-operand edge (`get_symbol` reads `operands[0]` unconditionally).
+8. **`prop_encoding_is_deterministic`** (new) — purity: encoding the same operand repeatedly
+   yields bit-identical word AND relocation (symbol + addend).
+
+## Bugs Found
+
+### BUG: `encode_branch` silently accepts `Reg`/`Cond`/`Barrier` operands as branch targets
+`b x0`, `b wzr`, `b eq`, `b sy` are silently accepted as `Jump26` relocations against
+spurious symbols named `"x0"`/`"wzr"`/`"eq"`/`"sy"` (word `0x1400_0000`) instead of being
+rejected. The `B` instruction takes only a label/offset (register-branch is `BR`); the
+acceptance stems from `get_symbol` forwarding `Reg`/`Cond`/`Barrier` tokens as relocation
+symbols. Harm: a confusing unresolved-symbol link error pointing at a register name, or — if a
+same-named label exists — a silent mis-targeted branch with no diagnostic. Confirmed by the
+passing characterization `prop_symbol_forwarding_all_accepted_kinds`.
+
+- **Report:** `pbt-out/bug_reports/encode_branch_silently_accepts_reg_cond_barrier_operands.md`
+- **Repro:** `cargo test --lib prop_encode_branch_tests::prop_symbol_forwarding_all_accepted_kinds -- --nocapture`
+- **Evidence:** `b x0 -> Ok(WordWithReloc { word: 0x1400_0000, reloc: Jump26 { symbol: "x0", addend: 0 } })`
+- **Suggested fix:** add a `get_symbol_strict` (Symbol/Label/SymbolOffset/Modifier only) used by
+  the direct-branch encoders; scope the label-collision workaround to the parser.
+
+The encoding itself is otherwise spec-correct: the fixed opcode `0b000101 << 26` is right, the
+`imm26` linker-reserved field is left zero, and the `Jump26` relocation correctly forwards
+`(symbol, addend)` for genuine symbol operands. There is no immediate operand, so the
+truncation/range concern that applies to TBZ/CBZ/CCMP does not arise here.

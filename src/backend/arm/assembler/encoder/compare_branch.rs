@@ -861,6 +861,52 @@ mod prop_encode_branch_tests {
                 "encode_branch should reject this operand"
             );
         }
+
+        // Property F — word invariance across ALL accepted operand kinds.
+        // Property A only proves the constant word 0x1400_0000 for the
+        // `Symbol` form; Property D only checks the *relocation* across
+        // kinds. This closes the gap: the instruction word must be the
+        // fixed base for EVERY kind `get_symbol` accepts, because the
+        // operand influences ONLY the relocation, never the word.
+        #[test]
+        fn prop_word_is_operand_independent(
+            (op, _sym, _off) in arb_accepted_symbol(),
+        ) {
+            let ops = vec![op];
+            prop_assert_eq!(word_of(encode_branch(&ops)), B_OPCODE);
+        }
+
+        // Property G — arity / negative contract. Property E covers the wrong
+        // *type* of operand; this covers the *missing* operand. A branch
+        // with no target must return Err — `get_symbol` reads operands[0]
+        // unconditionally, so an empty vector cannot yield a relocation.
+        #[test]
+        fn prop_empty_operands_rejected(_dummy in 0u32..=0u32) {
+            let empty: Vec<Operand> = vec![];
+            prop_assert!(encode_branch(&empty).is_err());
+            // A single non-symbol operand was already covered by Property E;
+            // here the operand vector itself is empty.
+        }
+
+        // Property H — determinism / purity. Encoding the same operand
+        // repeatedly yields bit-identical word AND relocation (symbol and
+        // addend). encode_branch is a pure function of its operands.
+        #[test]
+        fn prop_encoding_is_deterministic(
+            (op, exp_sym, exp_off) in arb_accepted_symbol(),
+        ) {
+            let ops = vec![op];
+            prop_assert_eq!(
+                word_of(encode_branch(&ops)),
+                word_of(encode_branch(&ops))
+            );
+            let rel1 = reloc_of(encode_branch(&ops));
+            let rel2 = reloc_of(encode_branch(&ops));
+            prop_assert_eq!(&rel1.symbol, &rel2.symbol);
+            prop_assert_eq!(&rel1.symbol, &exp_sym);
+            prop_assert_eq!(rel1.addend, rel2.addend);
+            prop_assert_eq!(rel1.addend, exp_off);
+        }
     }
 }
 
