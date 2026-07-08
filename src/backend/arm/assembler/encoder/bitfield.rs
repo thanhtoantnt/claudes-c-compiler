@@ -3227,3 +3227,354 @@ mod prop_encode_rbit_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_clz_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Field layout of the CLZ word (ARM ARM "Data-processing (1 source)") ──
+    //   sf [31] | 1 [30] | 0 [29] | 1101011 [28:22] (N fixed=1)
+    //   | 000000 [21:16] (opcode2) | 000100 [15:10] (opcode = CLZ) | Rn [9:5] | Rd [4:0]
+    //
+    // Canonical encodings: CLZ X0,X0 = 0xDAC01000 ; CLZ W0,W0 = 0x5AC01000.
+    // NOTE: unlike the UBFM/SBFM/BFM bitfield family, here bit[22] ("N") is
+    // FIXED to 1 by the architecture — it does NOT track sf. So the
+    // "N == sf" invariant that holds for encode_ubfx/sbfm/bfm is *violated*
+    // on purpose for CLZ (sf=0,N=1) and must not be asserted here.
+    const MASK_SF: u32 = 0x8000_0000;
+    const MASK_30: u32 = 1 << 30; // 0x4000_0000
+    const MASK_29: u32 = 1 << 29; // 0x2000_0000 — must be 0
+    const FIXED_28_22: u32 = 0b1101011 << 22; // 0x1AC0_0000 (incl. N=1)
+    const MASK_28_22: u32 = 0b1111111 << 22; // 0x1FC0_0000
+    const MASK_21_16: u32 = 0x003F_0000; // opcode2 — must be 000000
+    const FIXED_15_10: u32 = 0b000100 << 10; // 0x0000_1000 — CLZ opcode
+    const MASK_15_10: u32 = 0x0000_FC00;
+    const MASK_RN: u32 = 0x0000_03E0; // bits [9:5]
+    const MASK_RD: u32 = 0x0000_001F; // bits [4:0]
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word(encode_clz(ops))
+    }
+
+    fn reg_name(num: u32, is_64: bool) -> String {
+        if is_64 {
+            format!("x{}", num)
+        } else {
+            format!("w{}", num)
+        }
+    }
+
+    /// (rd_name, rd_num, rn_name, rn_num, is_64) over GPRs x0..x30 / w0..w30.
+    fn arb_case() -> impl Strategy<Value = (String, u32, String, u32, bool)> {
+        (any::<bool>(), 0u32..=30u32, 0u32..=30u32).prop_map(|(is_64, rd, rn)| {
+            (reg_name(rd, is_64), rd, reg_name(rn, is_64), rn, is_64)
+        })
+    }
+
+    proptest! {
+        // Property A — structural / field-placement oracle.
+        // Every fixed opcode bit lands where the CLZ encoding mandates; bit[22]
+        // ("N") is FIXED to 1 (not equal to sf, unlike the bitfield family);
+        // Rn/Rd reconstruct to inputs; sf tracks the destination width.
+        #[test]
+        fn prop_clz_field_placement(c in arb_case()) {
+            let (rd_name, rd, rn_name, rn, is_64) = c;
+            let ops = vec![Operand::Reg(rd_name), Operand::Reg(rn_name)];
+            let w = enc(&ops);
+
+            prop_assert_eq!(w & MASK_SF, if is_64 { MASK_SF } else { 0 });
+            prop_assert_eq!(w & MASK_30, MASK_30);
+            prop_assert_eq!(w & MASK_29, 0);
+            prop_assert_eq!(w & MASK_28_22, FIXED_28_22);
+            prop_assert_eq!(w & MASK_21_16, 0);
+            prop_assert_eq!(w & MASK_15_10, FIXED_15_10);
+            prop_assert_eq!((w & MASK_RN) >> 5, rn);
+            prop_assert_eq!(w & MASK_RD, rd);
+            // N bit[22] is FIXED to 1 even for the 32-bit form (sf=0).
+            prop_assert_eq!((w >> 22) & 1, 1);
+        }
+
+        // Property B — differential oracle vs the sibling CLS encoder.
+        // CLZ and CLS share an identical template and differ ONLY in the
+        // opcode field [15:10]: CLZ=000100, CLS=000101 → differ in bit[10].
+        #[test]
+        fn prop_clz_xor_cls_is_only_bit_10(c in arb_case()) {
+            let (rd_name, _rd, rn_name, _rn, _is_64) = c;
+            let ops = vec![Operand::Reg(rd_name), Operand::Reg(rn_name)];
+            prop_assert_eq!(enc(&ops) ^ word(encode_cls(&ops)), 1u32 << 10);
+        }
+
+        // Property C — differential oracle vs scalar RBIT.
+        // Scalar RBIT uses opcode 000000; CLZ uses 000100 → differ in bit[12].
+        #[test]
+        fn prop_clz_xor_rbit_is_only_bit_12(c in arb_case()) {
+            let (rd_name, _rd, rn_name, _rn, _is_64) = c;
+            let ops = vec![Operand::Reg(rd_name), Operand::Reg(rn_name)];
+            prop_assert_eq!(enc(&ops) ^ word(encode_rbit(&ops)), 1u32 << 12);
+        }
+
+        // Property D — register-width differential. Encoding x{N} vs w{N}
+        // (same reg number, same partner) differs ONLY in the sf bit[31].
+        #[test]
+        fn prop_width_changes_only_sf(num in 0u32..=30u32) {
+            let ops64 = vec![Operand::Reg(format!("x{}", num)), Operand::Reg("x0".into())];
+            let ops32 = vec![Operand::Reg(format!("w{}", num)), Operand::Reg("w0".into())];
+            prop_assert_eq!(enc(&ops64) ^ enc(&ops32), MASK_SF);
+        }
+
+        // Property E — malformed-operands negative contract (should pass).
+        // Missing operands / wrong types in the two register slots must Err.
+        #[test]
+        fn prop_rejects_malformed_operands(
+            bad in prop_oneof![Just(0u8), Just(1u8), Just(2u8), Just(3u8)],
+            n in 0u32..=30u32,
+            v in -16i64..=16i64,
+        ) {
+            let r = match bad {
+                0 => encode_clz(&[]),
+                1 => encode_clz(&[Operand::Reg(reg_name(n, true))]),
+                2 => encode_clz(&[
+                    Operand::Imm(v),
+                    Operand::Reg("x1".into()),
+                ]),
+                _ => encode_clz(&[
+                    Operand::Reg("x0".into()),
+                    Operand::Imm(v),
+                ]),
+            };
+            prop_assert!(r.is_err(), "expected Err, got {:?}", r);
+        }
+
+        // Property F — NEGATIVE CONTRACT (the finding).
+        // ARM ARM CLZ is defined only as "CLZ <Wd>,<Wn>" or "CLZ <Xd>,<Xn>":
+        // the source and destination must be the SAME register size. An
+        // assembler MUST reject mismatched-width operands such as
+        // "CLZ Xd, Wn". The current encoder does `let (rn, _) = get_reg(...)`
+        // — it reads Rn but DISCARDS Rn's width, deriving sf solely from Rd,
+        // so mismatched sizes are silently accepted and encoded as the Rd
+        // width. This property is EXPECTED TO FAIL and documents the bug.
+        #[test]
+        fn prop_rejects_mismatched_register_widths(
+            d in 0u32..=30u32,
+            n in 0u32..=30u32,
+        ) {
+            let xd_wn = vec![Operand::Reg(format!("x{}", d)), Operand::Reg(format!("w{}", n))];
+            let wd_xn = vec![Operand::Reg(format!("w{}", d)), Operand::Reg(format!("x{}", n))];
+            prop_assert!(encode_clz(&xd_wn).is_err(),
+                "CLZ x{}, w{} (mismatched widths) should be Err, got {:?}",
+                d, n, encode_clz(&xd_wn));
+            prop_assert!(encode_clz(&wd_xn).is_err(),
+                "CLZ w{}, x{} (mismatched widths) should be Err, got {:?}",
+                d, n, encode_clz(&wd_xn));
+        }
+    }
+}
+
+#[cfg(test)]
+mod prop_encode_crc32_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Field layout of the CRC32 word (ARM ARM, CRC32 / CRC32C) ────────
+    //   sf [31] | 0 0 [30:29] | 11010110 [28:21] | Rm [20:16]
+    //   | 010 [15:13] | C [12] | sz [11:10] | Rn [9:5] | Rd [4:0]
+    //
+    // The CRC32 family admits exactly eight mnemonics: crc32{b,h,w,x}
+    // (C=0) and crc32c{b,h,w,x} (C=1). sf=1 only for the 'x' (doubleword)
+    // variants; sz encodes the size class (00=b, 01=h, 10=w, 11=x).
+    const MASK_SF: u32 = 0x8000_0000;
+    const FIXED_30_21: u32 = 0b0011010110 << 21; // 0x1AC0_0000
+    const MASK_30_21: u32 = 0x7FE0_0000;
+    const MASK_RM: u32 = 0x001F_0000;
+    const FIXED_15_13: u32 = 0b010 << 13; // 0x4000
+    const MASK_15_13: u32 = 0x0000_E000;
+    const MASK_C: u32 = 0x0000_1000;
+    const MASK_SZ: u32 = 0x0000_0C00;
+    const MASK_RN: u32 = 0x0000_03E0;
+    const MASK_RD: u32 = 0x0000_001F;
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(mnemonic: &str, ops: &[Operand]) -> u32 {
+        word(encode_crc32(mnemonic, ops))
+    }
+
+    // Expected (sf, sz, c) for each architecturally valid mnemonic.
+    fn expected(mnemonic: &str) -> (u32, u32, u32) {
+        match mnemonic {
+            "crc32b" => (0, 0b00, 0),
+            "crc32h" => (0, 0b01, 0),
+            "crc32w" => (0, 0b10, 0),
+            "crc32x" => (1, 0b11, 0),
+            "crc32cb" => (0, 0b00, 1),
+            "crc32ch" => (0, 0b01, 1),
+            "crc32cw" => (0, 0b10, 1),
+            "crc32cx" => (1, 0b11, 1),
+            _ => unreachable!("invalid mnemonic in expected()"),
+        }
+    }
+
+    fn valid_mnemonic() -> impl Strategy<Value = &'static str> {
+        prop_oneof![
+            Just("crc32b"), Just("crc32h"), Just("crc32w"), Just("crc32x"),
+            Just("crc32cb"), Just("crc32ch"), Just("crc32cw"), Just("crc32cx"),
+        ]
+    }
+
+    proptest! {
+        // Property A — structural / field-placement oracle.
+        // For every valid mnemonic and any valid register triple, every
+        // fixed opcode bit and every variable field lands exactly where the
+        // CRC32 encoding mandates; sf/sz/C reconstruct to the per-mnemonic
+        // values; Rm/Rn/Rd reconstruct to inputs.
+        #[test]
+        fn prop_crc32_field_placement(
+            mn in valid_mnemonic(),
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+            rm in 0u32..=30u32,
+        ) {
+            let ops = vec![
+                Operand::Reg(format!("w{}", rd)),
+                Operand::Reg(format!("w{}", rn)),
+                Operand::Reg(format!("w{}", rm)),
+            ];
+            let w = enc(mn, &ops);
+            let (sf, sz, c) = expected(mn);
+
+            prop_assert_eq!(w & MASK_30_21, FIXED_30_21, "fixed bits [30:21]");
+            prop_assert_eq!(w & MASK_15_13, FIXED_15_13, "fixed bits [15:13]=010");
+            prop_assert_eq!(w & MASK_SF, sf << 31);
+            prop_assert_eq!(w & MASK_C, c << 12);
+            prop_assert_eq!((w & MASK_SZ) >> 10, sz);
+            prop_assert_eq!((w & MASK_RM) >> 16, rm);
+            prop_assert_eq!((w & MASK_RN) >> 5, rn);
+            prop_assert_eq!(w & MASK_RD, rd);
+        }
+
+        // Property B — sf/sz/C are determined purely by the mnemonic.
+        // The size class comes entirely from the mnemonic suffix; the
+        // register width is discarded by the encoder (the `_` in
+        // `(rd, _)`). So for any register numbers, sf/sz/C must equal the
+        // per-mnemonic expectation.
+        #[test]
+        fn prop_mnemonic_drives_size_bits(
+            mn in valid_mnemonic(),
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+            rm in 0u32..=30u32,
+        ) {
+            let ops = vec![
+                Operand::Reg(format!("w{}", rd)),
+                Operand::Reg(format!("w{}", rn)),
+                Operand::Reg(format!("w{}", rm)),
+            ];
+            let w = enc(mn, &ops);
+            let (sf, sz, c) = expected(mn);
+            prop_assert_eq!((w >> 31) & 1, sf);
+            prop_assert_eq!((w >> 10) & 0b11, sz);
+            prop_assert_eq!((w >> 12) & 1, c);
+        }
+
+        // Property C — register-width is ignored: w{n} vs x{n} (same number)
+        // produces a bit-identical word for every register slot, because the
+        // encoder never inspects the register width. This documents that
+        // e.g. `crc32x w0, w1, w2` encodes identically to
+        // `crc32x x0, x1, x2` (sf=1): width/mnemonic consistency is NOT
+        // validated.
+        #[test]
+        fn prop_register_width_is_ignored(
+            mn in valid_mnemonic(),
+            n in 0u32..=30u32,
+        ) {
+            let w_ops = vec![
+                Operand::Reg(format!("w{}", n)),
+                Operand::Reg(format!("w{}", n)),
+                Operand::Reg(format!("w{}", n)),
+            ];
+            let x_ops = vec![
+                Operand::Reg(format!("x{}", n)),
+                Operand::Reg(format!("x{}", n)),
+                Operand::Reg(format!("x{}", n)),
+            ];
+            prop_assert_eq!(enc(mn, &w_ops), enc(mn, &x_ops));
+        }
+
+        // Property D — malformed-operands negative contract (should pass).
+        // Fewer than 3 operands, or a non-register in a fixed slot, must be
+        // rejected with Err.
+        #[test]
+        fn prop_rejects_malformed_operands(
+            bad in prop_oneof![Just(0u8), Just(1u8), Just(2u8), Just(3u8)],
+            n in 0u32..=30u32,
+            v in -16i64..=16i64,
+        ) {
+            let r = match bad {
+                0 => encode_crc32("crc32w", &[]),
+                1 => encode_crc32("crc32w", &[
+                    Operand::Reg(format!("w{}", n)),
+                    Operand::Reg("w1".into()),
+                ]),
+                2 => encode_crc32("crc32w", &[
+                    Operand::Imm(v),
+                    Operand::Reg("w1".into()),
+                    Operand::Reg("w2".into()),
+                ]),
+                _ => encode_crc32("crc32w", &[
+                    Operand::Reg("w0".into()),
+                    Operand::Reg("w1".into()),
+                    Operand::Imm(v),
+                ]),
+            };
+            prop_assert!(r.is_err(), "expected Err, got {:?}", r);
+        }
+
+    }
+
+    // Property E — NEGATIVE CONTRACT (the finding).
+    // The AArch64 CRC32 family admits exactly eight mnemonics
+    // (crc32{b,h,w,x} and crc32c{b,h,w,x}). An assembler MUST reject any
+    // other mnemonic rather than silently producing a word. The current
+    // `match` arm `_ => (0, 0b00)` (combined with
+    // `mnemonic.contains("crc32c")`) accepts arbitrary strings:
+    // "crc32" (no size), "crc32d"/"crc32y" (unallocated size), "crc32c"
+    // (no size but C set), "crc32cz", and unrelated tokens like "nop"/"foo"/
+    // "" all encode as a Word instead of returning Err. This property is
+    // EXPECTED TO FAIL and documents the bug.
+    #[test]
+    fn prop_rejects_unknown_mnemonics() {
+        let cases = [
+            "crc32",   // missing size suffix
+            "crc32d",  // unallocated size
+            "crc32y",  // unallocated size
+            "crc32c",  // missing size suffix (C bit set)
+            "crc32cd", // unallocated size (C bit set)
+            "crc32cz", // unallocated size (C bit set)
+            "nop",     // unrelated mnemonic
+            "foo",     // garbage token
+            "",        // empty
+        ];
+        for c in cases {
+            let r = encode_crc32(c, &[
+                Operand::Reg("w0".into()),
+                Operand::Reg("w1".into()),
+                Operand::Reg("w2".into()),
+            ]);
+            assert!(r.is_err(),
+                "mnemonic {:?} should be rejected, got {:?}", c, r);
+        }
+    }
+}
