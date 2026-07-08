@@ -3252,6 +3252,89 @@ mod tests {
         }
     }
 
+    // ── encode_orn: additional gaps (shift range, XZR, width consistency, NEON arr) ─
+    // These target contracts NOT exercised by properties 1-5 above.
+    proptest! {
+        // 6. NEGATIVE CONTRACT (GAP): for 64-bit (X) shifted-register ORN, imm6
+        //    (bits 15:10) is a 6-bit field holding the shift amount 0..=63
+        //    (ARMv8 ARM §C4.1.115). `lsl #64` and above are UNDEFINED and MUST be
+        //    rejected (GAS/llvm-mc: "immediate value out of range"), not silently
+        //    masked into imm6 via `& 0x3F` — which would alias `lsl #64` to
+        //    `lsl #0` and silently corrupt the instruction. (Complements the
+        //    W-register 32..63 contract in property 5.)
+        #[test]
+        fn orn_xreg_shift_above_63_must_be_rejected(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            amount in 64u32..=255u32,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm),
+                           Operand::Shift { kind: "lsl".into(), amount }];
+            prop_assert!(encode_orn(&ops).is_err());
+        }
+
+        // 7. POSITIVE GAP: there is no SP special-casing for ORN (unlike
+        //    ADD/SUB), so register 31 reads as XZR for the scalar logical
+        //    shifted-register form. All three register fields across the full
+        //    0..=31 range (including XZR=31) must land verbatim in Rm/Rn/Rd.
+        //    Existing property 1 restricted to 0..=30; this closes the gap.
+        #[test]
+        fn orn_scalar_accepts_register_31_xzr(
+            rd in 0u32..=31, rn in 0u32..=31, rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_orn(&ops));
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(opc_of(w), 0b01);
+            prop_assert_eq!(n21_of(w), 1);
+        }
+
+        // 8. NEGATIVE CONTRACT (GAP): ORN requires all three operands to share
+        //    the same register width. `orn x0, w1, w2` mixes X/W widths and is
+        //    rejected by GAS/llvm-mc ("operand size mismatch"); the encoder must
+        //    return Err rather than silently deriving sf from operand 0 alone
+        //    and encoding W register numbers into a 64-bit instruction.
+        #[test]
+        fn orn_rejects_mixed_register_widths(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            mix in 0u32..=2u32,
+        ) {
+            let x = |n: u32| xreg(n);
+            let w = |n: u32| Operand::Reg(format!("w{}", n));
+            let (rd_op, rn_op, rm_op) = match mix {
+                0 => (x(rd), w(rn), w(rm)), // X dest, W sources
+                1 => (w(rd), x(rn), x(rm)), // W dest, X sources
+                _ => (x(rd), x(rn), w(rm)), // one W source among X
+            };
+            let ops = vec![rd_op, rn_op, rm_op];
+            prop_assert!(encode_orn(&ops).is_err());
+        }
+
+        // 9. NEGATIVE CONTRACT (GAP): the ORN *vector* instruction is ONLY
+        //    defined for the .8b (Q=0) and .16b (Q=1) arrangements (ARMv8 ARM
+        //    §C7.2.2 — bitwise logical vector ops are byte-element only). Non-byte
+        //    arrangements (.4h/.8h/.2s/.1d) and mismatched arrangements must be
+        //    rejected; the encoder currently derives Q solely from operand 0's
+        //    arrangement and silently accepts anything else.
+        #[test]
+        fn orn_neon_rejects_non_byte_or_mismatched_arrangement(
+            rd in 0u32..=31, rn in 0u32..=31, rm in 0u32..=31,
+            bad in 0u32..=5u32,
+        ) {
+            let (a0, a1, a2) = match bad {
+                0 => ("4h", "4h", "4h"),
+                1 => ("2s", "2s", "2s"),
+                2 => ("1d", "1d", "1d"),
+                3 => ("8h", "8h", "8h"),
+                4 => ("16b", "8b", "16b"), // mismatched
+                _ => ("8b", "16b", "8b"),   // mismatched
+            };
+            let ops = vec![neonreg(rd, a0), neonreg(rn, a1), neonreg(rm, a2)];
+            prop_assert!(encode_orn(&ops).is_err());
+        }
+    }
+
     // ── encode_eon (EON = EOR with N=1, i.e. exclusive-OR NOT) ─────────────
     // Oracle: reference (ARMv8 ARM §C4.1.66) + differential vs encode_orn.
     // Scalar (shifted register): sf opc 01010 shift N Rm imm6 Rn Rd
