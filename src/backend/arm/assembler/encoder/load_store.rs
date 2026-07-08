@@ -1098,6 +1098,226 @@ pub(crate) fn encode_ldop(mnemonic: &str, operands: &[Operand]) -> Result<Encode
     Ok(EncodeResult::Word(word))
 }
 
+#[cfg(test)]
+mod prop_encode_ldop_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: reference-encoding / field-placement (ARMv8.1-A LSE atomic
+    // memory operations LDADD/LDCLR/LDEOR/LDSET and their acquire/release /
+    // byte/halfword variants — ARM ARM §C6.2.100 LDADD et seq.).
+    //
+    // Encoding (built from the ARM ARM bit layout, NOT from this crate's
+    // own formula):
+    //   size[31:30] 111000[29:24] A[23] R[22] 1[21] Rs[20:16] 0[15]
+    //     opc[14:12] 00[11:10] Rn[9:5] Rt[4:0]
+    //
+    //   size: 00 = byte (ldadd*b), 01 = half (ldadd*h),
+    //         10 = 32-bit (W regs), 11 = 64-bit (X regs)
+    //   opc:  LDADD=000, LDCLR=001, LDEOR=010, LDSET=011
+    //   A: acquire  (mnemonic suffix contains 'a')
+    //   R: release  (mnemonic suffix contains 'l')
+    //
+    // Hand-derived golden encodings (X0,X1,[X2] base form):
+    //   ldadd  = 0xF8200041   ldadd  w = 0xB8200041
+    //   ldaddb w = 0x38200041   ldaddh w = 0x78200041
+    //   ldclr  = 0xF8201041   ldeor  = 0xF8202041   ldset = 0xF8203041
+    //   ldadda = 0xF8A00041   ldaddl = 0xF8600041   ldaddal = 0xF8E00041
+
+    /// Representative coverage of every base op and suffix class.
+    const LDOP_MNEMONICS: &[&str] = &[
+        // LDADD family — full suffix matrix
+        "ldadd", "ldadda", "ldaddl", "ldaddal",
+        "ldaddb", "ldaddab", "ldaddlb", "ldaddalb",
+        "ldaddh", "ldaddah", "ldaddlh", "ldaddalh",
+        // LDCLR family
+        "ldclr", "ldclra", "ldclrl", "ldclral", "ldclrb", "ldclrh",
+        // LDEOR family
+        "ldeor", "ldeora", "ldeorl", "ldeoral", "ldeorb", "ldeorh",
+        // LDSET family
+        "ldset", "ldseta", "ldsetl", "ldsetal", "ldsetb", "ldseth",
+    ];
+
+    /// Expected opc[14:12] for each base op.
+    fn expected_opc(mn: &str) -> u32 {
+        if mn.starts_with("ldadd") { 0b000 }
+        else if mn.starts_with("ldclr") { 0b001 }
+        else if mn.starts_with("ldeor") { 0b010 }
+        else if mn.starts_with("ldset") { 0b011 }
+        else { panic!("unexpected mnemonic {}", mn) }
+    }
+
+    fn gp_reg(width: char, num: u32) -> Operand {
+        Operand::Reg(format!("{}{}", width, num))
+    }
+    fn mem_op(base_num: u32) -> Operand {
+        Operand::Mem { base: format!("x{}", base_num), offset: 0 }
+    }
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    prop_compose! {
+        fn arb_reg()(num in 0u32..=31u32, wide in any::<bool>()) -> (char, u32) {
+            (if wide { 'x' } else { 'w' }, num)
+        }
+    }
+    prop_compose! {
+        fn arb_mn()(idx in 0usize..LDOP_MNEMONICS.len()) -> &'static str {
+            LDOP_MNEMONICS[idx]
+        }
+    }
+
+    proptest! {
+        // Property 1 — register-field placement (ARM ARM layout).
+        // Rs occupies [20:16], Rt occupies [4:0], Rn occupies [9:5] for any
+        // register numbers and any mnemonic variant.
+        #[test]
+        fn prop_rs_rt_rn_field_placement(
+            (rw, rs_num) in arb_reg(),
+            (tw, rt_num) in arb_reg(),
+            rn_num in 0u32..=31u32,
+            mn in arb_mn(),
+        ) {
+            let ops = vec![gp_reg(rw, rs_num), gp_reg(tw, rt_num), mem_op(rn_num)];
+            let w = word(encode_ldop(mn, &ops));
+            prop_assert_eq!((w >> 16) & 0x1F, rs_num, "Rs field [20:16]");
+            prop_assert_eq!(w & 0x1F, rt_num, "Rt field [4:0]");
+            prop_assert_eq!((w >> 5) & 0x1F, rn_num, "Rn field [9:5]");
+        }
+
+        // Property 2 — fixed opcode bits are constant & well-formed.
+        // [29:24]=111000, bit[21]=1, bit[15]=0, [11:10]=0 for every variant.
+        #[test]
+        fn prop_fixed_opcode_bits(
+            (rw, rs_num) in arb_reg(),
+            (tw, rt_num) in arb_reg(),
+            rn_num in 0u32..=31u32,
+            mn in arb_mn(),
+        ) {
+            let ops = vec![gp_reg(rw, rs_num), gp_reg(tw, rt_num), mem_op(rn_num)];
+            let w = word(encode_ldop(mn, &ops));
+            prop_assert_eq!((w >> 24) & 0x3F, 0b111000u32, "opcode [29:24]");
+            prop_assert_eq!((w >> 21) & 1, 1u32, "fixed bit 21");
+            prop_assert_eq!((w >> 15) & 1, 0u32, "fixed zero bit 15");
+            prop_assert_eq!((w >> 10) & 0x3, 0u32, "fixed zero [11:10]");
+        }
+
+        // Property 3 — opc base mapping lands in [14:12] for every mnemonic.
+        // LDADD→000, LDCLR→001, LDEOR→010, LDSET→011, regardless of suffix.
+        #[test]
+        fn prop_opc_base_mapping(
+            rs_num in 0u32..=31u32,
+            rt_num in 0u32..=31u32,
+            rn_num in 0u32..=31u32,
+            mn in arb_mn(),
+        ) {
+            let ops = vec![gp_reg('x', rs_num), gp_reg('x', rt_num), mem_op(rn_num)];
+            let w = word(encode_ldop(mn, &ops));
+            prop_assert_eq!((w >> 12) & 0x7, expected_opc(mn),
+                "opc[14:12] for {}", mn);
+        }
+
+        // Property 4 — width differential.
+        // For size-suffix-free forms only bit 30 (size MSB: 11 X vs 10 W)
+        // flips; byte/half forms are width-invariant (size driven by mnemonic).
+        #[test]
+        fn prop_width_differential(
+            rs_num in 0u32..=31u32,
+            rt_num in 0u32..=31u32,
+            rn_num in 0u32..=31u32,
+            mn in arb_mn(),
+        ) {
+            let x = word(encode_ldop(mn, &[gp_reg('x', rs_num), gp_reg('x', rt_num), mem_op(rn_num)]));
+            let w = word(encode_ldop(mn, &[gp_reg('w', rs_num), gp_reg('w', rt_num), mem_op(rn_num)]));
+            if mn.contains('b') || mn.contains('h') {
+                prop_assert_eq!(x, w, "size-suffix mnemonic must be width-invariant");
+            } else {
+                prop_assert_eq!(x ^ w, 1u32 << 30, "X vs W must flip only bit 30");
+            }
+        }
+
+        // Property 5 — acquire/release differential.
+        // Each pair differs in exactly the documented A[23]/R[22] qualifier
+        // per the ARM ARM mnemonic table. Expected XOR is hardcoded from the
+        // spec (no string parsing in the oracle): note the base mnemonics
+        // themselves contain 'a'/'l' ("ldadd", "ldclr"), so the qualifier must
+        // be read from the suffix only — which is exactly what the encoder does.
+        #[test]
+        fn prop_acrel_differential(
+            rs_num in 0u32..=31u32,
+            rt_num in 0u32..=31u32,
+            rn_num in 0u32..=31u32,
+            pair_idx in 0u8..4,
+        ) {
+            let ops = vec![gp_reg('x', rs_num), gp_reg('x', rt_num), mem_op(rn_num)];
+            let (m0, m1, expected_xor) = match pair_idx {
+                0 => ("ldadd",  "ldadda",  1u32 << 23), // A: 0 -> 1
+                1 => ("ldadd",  "ldaddl",  1u32 << 22), // R: 0 -> 1
+                2 => ("ldadda", "ldaddal", 1u32 << 22), // R: 0 -> 1 (A already 1)
+                _ => ("ldaddl", "ldaddal", 1u32 << 23), // A: 0 -> 1 (R already 1)
+            };
+            let w0 = word(encode_ldop(m0, &ops));
+            let w1 = word(encode_ldop(m1, &ops));
+            prop_assert_eq!(w0 ^ w1, expected_xor,
+                "acquire/release differential for {} vs {}", m0, m1);
+        }
+
+        // Property 6 — NEGATIVE CONTRACT.
+        // Fewer than 3 operands, a non-memory 3rd operand, or an unknown
+        // mnemonic must be rejected with Err rather than encoding garbage.
+        #[test]
+        fn prop_rejects_bad_operands(n in 0u32..3u32, bad_kind in 0u8..3u8, unknown in 0u8..4u8) {
+            // too few operands
+            let short: Vec<Operand> = (0..n).map(|i| gp_reg('x', i)).collect();
+            prop_assert!(encode_ldop("ldadd", &short).is_err(),
+                "expected Err for {} operands", n);
+            // non-memory third operand
+            let bad_third = match bad_kind {
+                0 => gp_reg('x', 5),
+                1 => Operand::Imm(7),
+                _ => Operand::Symbol("foo".to_string()),
+            };
+            let ops = vec![gp_reg('x', 0), gp_reg('x', 1), bad_third];
+            prop_assert!(encode_ldop("ldadd", &ops).is_err(),
+                "expected Err for non-Mem 3rd operand");
+            // unknown mnemonic
+            let bogus = match unknown {
+                0 => "ldfoo", 1 => "ldmax", 2 => "", _ => "x",
+            };
+            let ops = vec![gp_reg('x', 0), gp_reg('x', 1), mem_op(2)];
+            prop_assert!(encode_ldop(bogus, &ops).is_err(),
+                "expected Err for unknown mnemonic {:?}", bogus);
+        }
+    }
+
+    // Deterministic reference-oracle anchor: hand-derived golden words.
+    #[test]
+    fn golden_encodings_match_reference() {
+        let cases: &[(&str, char, u32)] = &[
+            ("ldadd",  'x', 0xF8200041),
+            ("ldadd",  'w', 0xB8200041),
+            ("ldaddb", 'w', 0x38200041),
+            ("ldaddh", 'w', 0x78200041),
+            ("ldclr",  'x', 0xF8201041),
+            ("ldeor",  'x', 0xF8202041),
+            ("ldset",  'x', 0xF8203041),
+            ("ldadda", 'x', 0xF8A00041),
+            ("ldaddl", 'x', 0xF8600041),
+            ("ldaddal",'x', 0xF8E00041),
+        ];
+        for &(mn, width, golden) in cases {
+            let ops = vec![gp_reg(width, 0), gp_reg(width, 1), mem_op(2)];
+            let w = word(encode_ldop(mn, &ops));
+            assert_eq!(w, golden, "golden mismatch for {} {}0,{}1,[x2]", mn, width, width);
+        }
+    }
+}
+
 /// Encode STADD/STCLR/STEOR/STSET and their release/byte/halfword variants.
 /// These are aliases for LDADD/LDCLR/LDEOR/LDSET with Rt=XZR (register 31).
 /// STADD Ws, [Xn] encodes as LDADD Ws, WZR, [Xn]

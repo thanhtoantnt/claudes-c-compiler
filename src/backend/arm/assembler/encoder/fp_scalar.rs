@@ -525,4 +525,99 @@ mod tests {
             );
         }
     }
+
+    // ── encode_fp_1src (FP data-processing, 1 source: FRINTN/P/M/Z/A/X/I) ===
+    // ARMv8-A layout: 0 00 11110 ftype 1 opcode 10000 Rn Rd
+    //   bits[31:24]=0x1E, bits[23:22]=ftype, bit[21]=1,
+    //   bits[20:15]=opcode (6-bit), bits[14:10]=10000, bits[9:5]=Rn, bits[4:0]=Rd.
+    fn fp1_opc_of(w: u32) -> u32   { (w >> 15) & 0x3F }
+    fn fp1_fixed_of(w: u32) -> u32 { (w >> 10) & 0x1F }
+
+    proptest! {
+        // Oracle: reference / field layout. Homogeneous-precision FP operands
+        // + a 6-bit opcode => every field at its canonical bit position.
+        #[test]
+        fn prop_fp_1src_places_fields(
+            rd in 0u32..32, rn in 0u32..32, opcode in 0u32..64, dbl in any::<bool>(),
+        ) {
+            let p = if dbl { "d" } else { "s" };
+            let ops = vec![
+                Operand::Reg(format!("{}{}", p, rd)),
+                Operand::Reg(format!("{}{}", p, rn)),
+            ];
+            let w = expect_word(encode_fp_1src(&ops, opcode));
+
+            prop_assert_eq!(w >> 24, 0x1Eu32);            // [31:24] = 0x1E
+            prop_assert_eq!((w >> 21) & 1, 1u32);         // bit 21 = 1
+            prop_assert_eq!(fp1_fixed_of(w), 0b10000u32); // [14:10] = 10000
+            prop_assert_eq!(rd_of(w), rd);                // [4:0]   = Rd
+            prop_assert_eq!(rn_of(w), rn);                // [9:5]   = Rn
+            prop_assert_eq!(fp1_opc_of(w), opcode);       // [20:15] = opcode
+        }
+
+        // Oracle: reference / precision. ftype derived solely from dest prefix:
+        // 'd' => 01 (double), else => 00 (single); sf (bit 31) always 0.
+        #[test]
+        fn prop_fp_1src_ftype_from_dest(
+            rd in 0u32..32, rn in 0u32..32, dbl in any::<bool>(),
+        ) {
+            let p = if dbl { "d" } else { "s" };
+            let ops = vec![
+                Operand::Reg(format!("{}{}", p, rd)),
+                Operand::Reg(format!("{}{}", p, rn)),
+            ];
+            let w = expect_word(encode_fp_1src(&ops, 0b001000));
+            prop_assert_eq!(ftype_of(w), if dbl { 0b01 } else { 0b00 });
+            prop_assert_eq!(sf_of(w), 0);
+        }
+
+        // Negative contract (validated, PASSES): out-of-range FP register
+        // numbers (>= 32) MUST be rejected by get_reg, not masked into 5 bits.
+        #[test]
+        fn prop_fp_1src_rejects_out_of_range_reg(n in 32u32..256u32, pos in 0u32..2u32) {
+            let mut names = vec!["d0".to_string(), "d0".to_string()];
+            names[pos as usize] = format!("d{}", n);
+            let ops: Vec<Operand> = names.into_iter().map(Operand::Reg).collect();
+            prop_assert!(
+                encode_fp_1src(&ops, 0b001000).is_err(),
+                "register d{} must be rejected (5-bit field), not silently masked", n
+            );
+        }
+
+        // Negative contract (FINDING — FAILS): opcode is a 6-bit field at
+        // [20:15]. Values >= 64 leak past bit 20 (bit 21, then ftype[23:22])
+        // and silently corrupt the word, yet encode_fp_1src ORs any u32 opcode
+        // into the field with NO range check.
+        #[test]
+        fn prop_fp_1src_rejects_out_of_range_opcode(bad in 64u32..4096u32) {
+            let ops = vec![Operand::Reg("d0".into()), Operand::Reg("d0".into())];
+            prop_assert!(
+                encode_fp_1src(&ops, bad).is_err(),
+                "opcode {} must be rejected (6-bit field [20:15]); it is OR'd in and corrupts bit21/ftype", bad
+            );
+        }
+
+        // Negative contract (FINDING — FAILS): FRINT* require homogeneous
+        // FP-register operands. Mixed precision (Dd, Sn) and GP-bank operands
+        // (Xd, Xn) must be rejected, but the function only inspects the dest.
+        #[test]
+        fn prop_fp_1src_rejects_mismatched_precision_and_bank(n in 0u32..32) {
+            let mix = vec![
+                Operand::Reg(format!("d{}", n)),
+                Operand::Reg(format!("s{}", n)),
+            ];
+            prop_assert!(
+                encode_fp_1src(&mix, 0b001000).is_err(),
+                "mixed precision (Dd, Sn) must be rejected"
+            );
+            let gp = vec![
+                Operand::Reg(format!("x{}", n)),
+                Operand::Reg(format!("x{}", n)),
+            ];
+            prop_assert!(
+                encode_fp_1src(&gp, 0b001000).is_err(),
+                "GP registers (x{}) are not valid FP 1-source operands", n
+            );
+        }
+    }
 }
