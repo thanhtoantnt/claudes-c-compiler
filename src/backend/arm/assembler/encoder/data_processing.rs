@@ -4622,6 +4622,151 @@ mod tests {
         }
     }
 
+    // ── UMULH: additive properties (operand-TYPE contract, width-indifference
+    //    regression guard, lenient-arity observation). Reuse module helpers
+    //    xreg/wreg/expect_word/rd_of/rn_of/rm_of/umulh_ref. ────────────────────
+    proptest! {
+        // 5. NEGATIVE CONTRACT (operand TYPE): UMULH takes only registers.
+        //    An immediate (or any non-Reg operand) in any of the three operand
+        //    positions must be rejected with Err — never silently coerced or
+        //    masked. The existing suite above only checks operand COUNT; this
+        //    closes the TYPE dimension.
+        #[test]
+        fn umulh_rejects_non_register_operand_in_any_position(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            bad_pos in 0u32..3,
+        ) {
+            let mut ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            ops[bad_pos as usize] = Operand::Imm(5);
+            prop_assert!(encode_umulh(&ops).is_err());
+        }
+
+        // 6. Width-indifference regression guard (documents KNOWN BUG — see
+        //    pbt-out/bug_reports/umulh_accepts_32bit_w_registers.md). UMULH is
+        //    architecturally 64-bit-only ("UMULH Xd, Xn, Xm"); the encoder does
+        //    NOT validate width — it hardcodes sf=1 and discards get_reg's
+        //    is_64 flag — so a W-form emits the IDENTICAL word to the X-form.
+        //    This property PINS the current (incorrect) behavior as observable
+        //    evidence. Delete it once width validation lands, at which point
+        //    umulh_rejects_32bit_w_registers (above) should begin passing.
+        #[test]
+        fn umulh_w_form_emits_identical_word_to_x_form(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let xw = expect_word(encode_umulh(&vec![xreg(rd), xreg(rn), xreg(rm)]));
+            let ww = expect_word(encode_umulh(&vec![wreg(rd), wreg(rn), wreg(rm)]));
+            prop_assert_eq!(ww, xw);
+            prop_assert_eq!((ww >> 31) & 1, 1); // still (incorrectly) 64-bit
+        }
+
+        // 7. Lenient-arity observation: UMULH reads exactly operands[0..3] and
+        //    never bounds-checks the UPPER bound, so surplus trailing operands
+        //    are silently accepted and dropped. (Mild finding: no max-arity
+        //    validation; consistent with the rest of this encoder module.)
+        #[test]
+        fn umulh_silently_accepts_trailing_extra_operand(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            extra in 0u32..=30,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm), xreg(extra)];
+            let w = expect_word(encode_umulh(&ops));
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(w, umulh_ref(rd, rn, rm));
+        }
+    }
+
+    // ── UMULH: register-name validation & structural invariants. ────────────
+    // These close the last open dimension of the encoder contract: the encoder
+    // delegates register parsing to parse_reg_num, which accepts EVERY prefix
+    // (x/w/d/s/q/v/h/b) and the SP/XZR aliases, capping only the numeric value
+    // at 31. So the encoder performs NO register-TYPE validation at all.
+    proptest! {
+        // 8. NEGATIVE CONTRACT (register TYPE — FP/SIMD): UMULH operates ONLY
+        //    on 64-bit general-purpose (X) registers. A floating-point / SIMD
+        //    register name (D/S/Q/V/H/B) in any operand position is
+        //    architecturally invalid and MUST be rejected with Err. The encoder
+        //    does NOT check this: parse_reg_num accepts every prefix, so a name
+        //    such as "d0" is silently coerced to register 0 and emits the
+        //    IDENTICAL word to "x0". This is a distinct, stronger finding than
+        //    the already-documented W-width bug (a W register is at least an
+        //    integer GPR of the wrong width; a V/D/S register is the wrong
+        //    register FILE entirely).
+        #[test]
+        fn umulh_rejects_fp_simd_register_in_any_position(
+            pos in 0u32..3,
+            prefix_idx in 0u32..6u32,
+            num in 0u32..=31,
+        ) {
+            let prefixes = ["d", "s", "q", "v", "h", "b"];
+            let bad = Operand::Reg(format!("{}{}", prefixes[prefix_idx as usize], num));
+            let mut ops = vec![xreg(num), xreg(num), xreg(num)];
+            ops[pos as usize] = bad;
+            prop_assert!(encode_umulh(&ops).is_err());
+        }
+
+        // 9. NEGATIVE CONTRACT (register NUMBER range): UMULH operands are
+        //    general-purpose registers R0..R31. A name such as "x32" is out of
+        //    range and MUST be rejected (parse_reg_num caps at 31). This is the
+        //    one register-validity check the encoder DOES perform.
+        #[test]
+        fn umulh_rejects_out_of_range_register_numbers(
+            pos in 0u32..3,
+            num in 32u32..=64,
+        ) {
+            let bad = Operand::Reg(format!("x{}", num));
+            let mut ops = vec![xreg(0), xreg(0), xreg(0)];
+            ops[pos as usize] = bad;
+            prop_assert!(encode_umulh(&ops).is_err());
+        }
+
+        // 10. Structural invariant: the three register fields are fully
+        //     orthogonal — varying a single operand's register number changes
+        //     ONLY its own 5-bit field (Rd=4:0, Rn=9:5, Rm=20:16), leaving every
+        //     fixed opcode bit and the other two fields bit-for-bit identical.
+        #[test]
+        fn umulh_register_fields_are_orthogonal(
+            a in 0u32..=31,
+            b in 0u32..=31,
+        ) {
+            // Rd in bits 4:0.
+            let r0 = expect_word(encode_umulh(&vec![xreg(a), xreg(b), xreg(b)]));
+            let r1 = expect_word(encode_umulh(&vec![xreg(b), xreg(b), xreg(b)]));
+            prop_assert_eq!((r0 ^ r1) & !0x1Fu32, 0);
+            // Rn in bits 9:5.
+            let n0 = expect_word(encode_umulh(&vec![xreg(a), xreg(a), xreg(b)]));
+            let n1 = expect_word(encode_umulh(&vec![xreg(a), xreg(b), xreg(b)]));
+            prop_assert_eq!((n0 ^ n1) & !0x3E0u32, 0);
+            // Rm in bits 20:16.
+            let m0 = expect_word(encode_umulh(&vec![xreg(a), xreg(a), xreg(a)]));
+            let m1 = expect_word(encode_umulh(&vec![xreg(a), xreg(a), xreg(b)]));
+            prop_assert_eq!((m0 ^ m1) & !0x1F0000u32, 0);
+        }
+
+        // 11. FINDING (reg-31 semantics): in the data-processing (3-source)
+        //     group, register 31 denotes XZR, never SP. The encoder nonetheless
+        //     accepts the "sp"/"wsp" mnemonics (parse_reg_num maps both to 31)
+        //     and encodes them identically to "xzr"/"x31". UMULH with an SP
+        //     operand is architecturally invalid (SP is not a valid source for
+        //     a multiply); this property PINS the silent coercion as evidence.
+        #[test]
+        fn umulh_sp_operand_silently_becomes_xzr(
+            n in 0u32..=31,
+        ) {
+            let sp_w = expect_word(encode_umulh(&vec![Operand::Reg("sp".into()), xreg(n), xreg(n)]));
+            let zr_w = expect_word(encode_umulh(&vec![xreg(31), xreg(n), xreg(n)]));
+            prop_assert_eq!(sp_w, zr_w);
+            prop_assert_eq!(rd_of(sp_w), 31); // encoded as XZR (31), not flagged
+        }
+    }
+
     // ── encode_smaddl: SMADDL Xd, Wn, Wm, Xa (signed multiply-add long) ───────
     // ARMv8 SMADDL reference:
     //   bit 31 = 1 (sf)            bits 30:29 = 00

@@ -104,5 +104,18 @@ umulh_fixed_fields .............................. ok
 umulh_register_fields_match_reference ........... ok
 umulh_missing_operand_errors .................... ok
 smulh_vs_umulh_only_sign_bit_differs ............ ok
+umulh_rejects_non_register_operand_in_any_position ... ok
+umulh_w_form_emits_identical_word_to_x_form ..... ok   (pins this bug)
+umulh_silently_accepts_trailing_extra_operand ... ok
 umulh_rejects_32bit_w_registers ................. FAILED   <-- this bug
 ```
+
+## Related observation (low severity)
+
+A second, additive property — `umulh_silently_accepts_trailing_extra_operand`
+— shows `encode_umulh` performs **no upper-bound arity check**: it reads only
+`operands[0..3]` via `get_reg` and ignores any surplus trailing operands, so an
+input like `umulh x0, x1, x2, x3` is accepted and encoded as `umulh x0, x1, x2`
+(instead of erroring on the unexpected 4th operand). This is consistent with the
+rest of the encoder module (which uniformly lacks max-arity validation) and is
+recorded here as a characterization, not a regression target.
