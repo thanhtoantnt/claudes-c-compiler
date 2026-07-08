@@ -86,3 +86,54 @@ This is the `BL` sibling of the `encode_branch` target-validation bug: register 
 
 - **Report:** `pbt-out/bug_reports/encode_bl_silently_accepts_reg_cond_barrier_operands.md`
 - **Suggested fix:** use a stricter branch-target helper for `B`/`BL` that accepts labels/symbols/symbol offsets/modifiers and rejects `Reg`, `Cond`, and `Barrier` token kinds.
+
+---
+
+# PBT Coverage — `encode_cmn`
+
+**Target:** `src/backend/arm/assembler/encoder/compare_branch.rs` → `encode_cmn`
+**Suite:** `prop_encode_cmn_tests` (7 properties; 6 pass, 1 failing bug reproducer)
+
+## Function under test
+
+```rust
+pub(crate) fn encode_cmn(operands: &[Operand]) -> Result<EncodeResult, String> {
+    // CMN Rn, op -> ADDS XZR, Rn, op
+    let mut new_ops = vec![Operand::Reg("xzr".to_string())];
+    new_ops.extend(operands.iter().cloned());
+    let is_32 = if let Some(Operand::Reg(r)) = operands.first() {
+        is_32bit_reg(r)
+    } else { false };
+    if is_32 { new_ops[0] = Operand::Reg("wzr".to_string()); }
+    encode_add_sub(&new_ops, false, true)
+}
+```
+
+## Properties
+
+| # | Property | Oracle | Result |
+|---|----------|--------|--------|
+| A | `prop_imm_form_structure` | structural — immediate form `ADDS ZR, Rn, #imm`: sf, op=0, S=1, opcode `10001` (+`[23]=0`), sh=0, imm12 round-trips, Rn, Rd=31 | ✅ pass |
+| B | `prop_rd_always_zr` | invariant — destination register is always `XZR`/`WZR` (`Rd == 31`) for both forms and both widths | ✅ pass |
+| C | `prop_cmn_vs_cmp_differs_only_op_bit` | differential — `CMN` ⊕ `CMP` == `1<<30` (add vs sub), both immediate and register forms | ✅ pass |
+| D | `prop_sf_bit_is_bit31` | differential — `CMN Xn,#imm` ⊕ `CMN Wn,#imm` == `1<<31`; width driven solely by `is_32bit_reg(operands[0])` | ✅ pass |
+| E | `prop_reg_form_structure` | structural — register form `ADDS ZR, Rn, Rm`: opcode `01011`, `[21]=0`, shift=0, Rm, imm6=0, Rn, Rd=31 | ✅ pass |
+| F | `prop_rejects_unrepresentable_immediate` | negative contract — unshifted `imm` in `0x1001..=0x1FFF` (non-0x1000-multiple) returns `Err`, not truncated | ✅ pass |
+| G | `prop_rejects_oversized_lsl12_immediate` | negative contract — `#imm, lsl #12` with imm > 0xFFF must be rejected | ❌ fail |
+
+## Findings
+
+### BUG-1: `encode_cmn` silently truncates an oversized `lsl #12` immediate
+
+`CMN Rn, #imm, lsl #12` (forwarded verbatim by `encode_cmn` to `encode_add_sub`)
+is masked into the 12-bit `imm12` field with `& 0xFFF` instead of being
+range-validated. e.g. `cmn w0, #4097, lsl #12` assembles as
+`cmn w0, #1, lsl #12` (since `4097 & 0xFFF == 1`) instead of returning `Err`.
+GAS/LLVM-MC reject this input. This is the exact sibling of the `encode_cmp`
+lsl-#12 bug — both reach the same explicit-shift branch in `encode_add_sub`.
+The plain unshifted path is correct (Property F).
+
+- **Report:** `pbt-out/bug_reports/encode_cmn_lsl12_immediate_silent_truncation.md`
+- **Sibling:** `encode_cmp_lsl12_immediate_silent_truncation.md` (same root cause).
+- **Root cause:** `encode_add_sub` explicit-shift immediate branch (`data_processing.rs`).
+- **Suggested fix:** validate `imm_val > 0xFFF` before masking in the `explicit_shift` branch — a single fix closes the bug for `encode_cmn`, `encode_cmp`, and every other caller that forwards a trailing `lsl #12` into `encode_add_sub`.
