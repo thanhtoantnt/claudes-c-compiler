@@ -7504,3 +7504,152 @@ mod uxtb_props {
         }
     }
 }
+
+#[cfg(test)]
+mod uxtw_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+
+    fn expect_word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    // ORR (shifted register) field extractors. ORR Wd, WZR, Wn (== MOV Wd, Wn):
+    //   sf opc(2) 01010 shift(2) 0 Rm imm6(6) Rn Rd
+    fn sf_of(w: u32) -> u32      { (w >> 31) & 1 }      // bit 31
+    fn opc_of(w: u32) -> u32     { (w >> 29) & 0x3 }    // bits 30:29
+    fn fixed5_of(w: u32) -> u32  { (w >> 24) & 0x1F }   // bits 28:24
+    fn shift_of(w: u32) -> u32   { (w >> 22) & 0x3 }    // bits 23:22
+    fn n_of(w: u32) -> u32       { (w >> 21) & 1 }      // bit 21 (0=ORR, 1=ORN)
+    fn rm_of(w: u32) -> u32      { (w >> 16) & 0x1F }   // bits 20:16
+    fn imm6_of(w: u32) -> u32    { (w >> 10) & 0x3F }   // bits 15:10
+    fn rn_of(w: u32) -> u32      { (w >> 5) & 0x1F }    // bits 9:5
+    fn rd_of(w: u32) -> u32      { w & 0x1F }           // bits 4:0
+
+    proptest! {
+        // ── encode_uxtw: implementation contract vs canonical AArch64 ──────────
+        //
+        // The implementation deliberately ignores `is_64` (both `get_reg` width
+        // returns are bound to `_`) and emits a single 32-bit word:
+        //   (0b001010100 << 23) | (rn << 16) | (0b11111 << 5) | rd
+        //   == 0x2A0003E0 | (rn << 16) | rd
+        //
+        // This is precisely ORR Wd, WZR, Wn, i.e. the MOV Wd, Wn alias
+        // (differential check vs `llvm-mc-18 --triple=aarch64 --show-encoding`:
+        //   mov w0, w1 -> [0xe0,0x03,0x01,0x2a] == 0x2A0103E0 == 0x2A0003E0|(1<<16)|0).
+        //
+        // NOTE: this is NOT the canonical UXTW encoding. The ARMv8 ARM does not
+        // define a standalone `UXTB`-style alias for `uxtw`; the only form the
+        // reference assembler accepts is `uxtw Xd, Wn`, which it encodes as
+        // UBFM Xd, Xn, #0, #31 (== 0xD3407C00 | (rn << 5) | rd). See P4/P5.
+
+        // P1. Implementation-contract oracle (differential vs `mov`): the emitted
+        //     word equals the ORR/MOV encoding with the source operand in the Rm
+        //     field and Rn pinned to WZR (11111), for both width spellings
+        //     (widths are ignored, only the register NUMBER is read).
+        #[test]
+        fn uxtw_emits_mov_wn_encoding(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rd_is_x in any::<bool>(),
+            rn_is_x in any::<bool>(),
+        ) {
+            let rd_op = if rd_is_x { xreg(rd) } else { wreg(rd) };
+            let rn_op = if rn_is_x { xreg(rn) } else { wreg(rn) };
+            let w = expect_word(encode_uxtw(&[rd_op, rn_op]));
+            prop_assert_eq!(w, 0x2A0003E0u32 | (rn << 16) | rd);
+        }
+
+        // P2. Field placement of the emitted ORR Wd, WZR, Wn word: sf=0 (forced
+        //     32-bit), opc=01 (ORR), fixed 01010, shift=00, N(bit21)=0, source in
+        //     the Rm field, imm6=0, and the Rn field pinned to WZR (31).
+        #[test]
+        fn uxtw_orr_field_placement(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+        ) {
+            let w = expect_word(encode_uxtw(&[wreg(rd), wreg(rn)]));
+            prop_assert_eq!(sf_of(w), 0);                 // always 32-bit (width ignored)
+            prop_assert_eq!(opc_of(w), 0b01);             // ORR
+            prop_assert_eq!(fixed5_of(w), 0b01010);       // shifted-register fixed bits
+            prop_assert_eq!(shift_of(w), 0b00);           // no shift
+            prop_assert_eq!(n_of(w), 0);                  // ORR (not ORN)
+            prop_assert_eq!(rm_of(w), rn);                // source operand lands in Rm
+            prop_assert_eq!(imm6_of(w), 0);
+            prop_assert_eq!(rn_of(w), 0b11111);           // Rn == WZR -> MOV alias
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // P3. Negative contract: UXTW requires exactly two register operands;
+        //     fewer operands, or a non-register (e.g. immediate) in either slot,
+        //     must be rejected with Err.
+        #[test]
+        fn uxtw_rejects_bad_operands(
+            n in 0u32..=31,
+            missing in 1u32..=2,
+            bad_pos in 0u32..=1,
+        ) {
+            // too few operands (1 or 0 of the 2 required)
+            let mut ops = vec![wreg(n), wreg(n)];
+            for _ in 0..missing { ops.pop(); }
+            prop_assert!(encode_uxtw(&ops).is_err());
+            // non-register operand in either position
+            let mut ops = vec![wreg(n), wreg(n)];
+            ops[bad_pos as usize] = Operand::Imm(5);
+            prop_assert!(encode_uxtw(&ops).is_err());
+        }
+
+        // P4. SPEC BUG #1 — FAILS (invalid form silently accepted). The 32-bit
+        //     form `uxtw Wd, Wn` is NOT a valid AArch64 instruction: `uxtw` has
+        //     no standalone UBFM alias for a 32-bit destination, and the
+        //     reference assembler rejects it outright:
+        //       $ echo 'uxtw w0, w1' | llvm-mc-18 --triple=aarch64
+        //       <stdin>:1:6: error: invalid operand for instruction
+        //     A conforming encoder MUST return Err. Instead `encode_uxtw` accepts
+        //     it and emits Word(0x2A0103E0) for `uxtw w0, w1` — silently
+        //     assembling an architecturally invalid mnemonic into `mov w0, w1`.
+        #[test]
+        fn uxtw_rejects_32bit_destination_form(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+        ) {
+            let ops = vec![wreg(rd), wreg(rn)]; // uxtw Wd, Wn -- invalid
+            prop_assert!(
+                encode_uxtw(&ops).is_err(),
+                "`uxtw w{}, w{}` is architecturally invalid (llvm-mc rejects it) but got {:?}",
+                rd, rn, encode_uxtw(&ops)
+            );
+        }
+
+        // P5. SPEC BUG #2 — FAILS (wrong instruction for the valid form). The
+        //     ONLY spec-valid spelling is `uxtw Xd, Wn`, which the ARMv8 ARM /
+        //     reference assembler encode as UBFM Xd, Xn, #0, #31:
+        //       $ echo 'uxtw x0, w1' | llvm-mc-18 --triple=aarch64 --show-encoding
+        //         ubfx x0, x1, #0, #32   // encoding: [0x20,0x7c,0x40,0xd3]
+        //       => 0xD3407C00 | (rn << 5) | rd   (64-bit, zero-extends word->doubleword)
+        //     A conforming encoder MUST emit that word. Instead `encode_uxtw`
+        //     emits 0x2A0003E0 | (rn << 16) | rd — a 32-bit `mov Wd, Wn` that
+        //     neither preserves the 64-bit destination nor matches any valid
+        //     `uxtw` encoding. Verified: `uxtw x0, w1` -> Word(0x2A0103E0),
+        //     expected 0xD3407C20.
+        #[test]
+        fn uxtw_canonical_encoding_for_xd_wn(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), wreg(rn)]; // uxtw Xd, Wn -- the valid form
+            let w = expect_word(encode_uxtw(&ops));
+            prop_assert_eq!(
+                w, 0xD3407C00u32 | (rn << 5) | rd,
+                "`uxtw x{}, w{}` must encode as UBFM Xd, Xn, #0, #31 (0xD3407C00|...) per llvm-mc, got 0x{:08X}",
+                rd, rn, w
+            );
+        }
+    }
+}
