@@ -7255,3 +7255,139 @@ mod sxtb_props {
         }
     }
 }
+
+mod uxth_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+
+    fn expect_word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    // UBFM field extractors. UXTH <Wd>, <Wn> aliases UBFM <Wd>, <Wn>, #0, #15:
+    //   sf opc(2) 100110 N immr(6) imms(6) Rn Rd
+    fn sf_of(w: u32) -> u32    { (w >> 31) & 1 }      // bit 31
+    fn opc_of(w: u32) -> u32   { (w >> 29) & 0x3 }    // bits 30:29
+    fn fixed_of(w: u32) -> u32 { (w >> 23) & 0x3F }   // bits 28:23
+    fn n_of(w: u32) -> u32     { (w >> 22) & 1 }      // bit 22
+    fn immr_of(w: u32) -> u32  { (w >> 16) & 0x3F }   // bits 21:16
+    fn imms_of(w: u32) -> u32  { (w >> 10) & 0x3F }   // bits 15:10
+    fn rn_of(w: u32) -> u32    { (w >> 5) & 0x1F }    // bits 9:5
+    fn rd_of(w: u32) -> u32    { w & 0x1F }           // bits 4:0
+
+    proptest! {
+        // ── encode_uxth: UXTH <Wd>, <Wn> aliases UBFM <Wd>, <Wn>, #0, #15 ───────
+        //
+        // UBFM bit-string: sf opc 100110 N immr imms Rn Rd, with immr=0, imms=15.
+        // Per the ARMv8 ARM, UXTH is a 32-BIT-ONLY alias (the 64-bit UBFM form
+        // has no UXTH alias). Independently derived and cross-checked against
+        // the reference assembler:
+        //   llvm-mc-18 --triple=aarch64 --show-encoding
+        //     uxth w0, w0    -> 0x53003c00     uxth w5, w7 -> 0x53003ce5
+        //   llvm-mc rejects `uxth x0, x0` as "invalid operand for instruction".
+        // => 32-bit base 0x53003C00, with Rn/Rd OR'd into their fields.
+
+        // P1. Reference oracle (the only spec-valid UXTH form): the encoded
+        //     word equals the llvm-mc-derived constant with Rn/Rd placed in
+        //     their fields, across the full W register range.
+        #[test]
+        fn uxth_reference_encoding_32bit(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+        ) {
+            let w = expect_word(encode_uxth(&[wreg(rd), wreg(rn)]));
+            prop_assert_eq!(w, 0x53003C00u32 | (rn << 5) | rd);
+        }
+
+        // P2. Field placement: every fixed opcode bit-group lands exactly where
+        //     the ARMv8 UBFM encoding dictates, N==sf==0, immr pinned to #0 and
+        //     imms pinned to #15 (the UXTH alias values) for the 32-bit form.
+        #[test]
+        fn uxth_field_placement(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+        ) {
+            let w = expect_word(encode_uxth(&[wreg(rd), wreg(rn)]));
+            prop_assert_eq!(sf_of(w), 0);                  // UXTH is 32-bit only
+            prop_assert_eq!(opc_of(w), 0b10);              // opc = 10 (UBFM)
+            prop_assert_eq!(fixed_of(w), 0b100110);        // fixed opcode bits
+            prop_assert_eq!(n_of(w), 0);                   // N == sf == 0
+            prop_assert_eq!(immr_of(w), 0);                // UXTH: immr = #0
+            prop_assert_eq!(imms_of(w), 15);               // UXTH: imms = #15
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // P3. The source register's width is architecturally irrelevant for a
+        //     32-bit destination: only the register NUMBER enters the Rn field
+        //     (the encoder binds the source width to `_`). `uxth w0, w0` and
+        //     `uxth w0, x0` therefore produce the identical valid word.
+        #[test]
+        fn uxth_source_width_irrelevant_for_32bit_destination(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+        ) {
+            let via_w = expect_word(encode_uxth(&[wreg(rd), wreg(rn)]));
+            let via_x = expect_word(encode_uxth(&[wreg(rd), xreg(rn)]));
+            prop_assert_eq!(via_w, via_x);
+        }
+
+        // P4. Negative contract: UXTH requires exactly two register operands;
+        //     fewer than two must be rejected with Err.
+        #[test]
+        fn uxth_rejects_too_few_operands(
+            n in 0u32..=31,
+            missing in 1u32..=2,
+        ) {
+            let mut ops = vec![wreg(n), wreg(n)];
+            for _ in 0..missing { ops.pop(); }
+            prop_assert!(encode_uxth(&ops).is_err());
+        }
+
+        // P5. Negative contract: UXTH takes no immediates. A non-register
+        //     operand in either position must be rejected with Err.
+        #[test]
+        fn uxth_rejects_non_register_operands(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            bad_pos in 0u32..2,
+        ) {
+            let mut ops = vec![wreg(rd), wreg(rn)];
+            ops[bad_pos as usize] = Operand::Imm(5);
+            prop_assert!(encode_uxth(&ops).is_err());
+        }
+
+        // P6. Negative contract (SPEC BUG — FAILS): per the ARMv8 ARM and the
+        //     reference assembler, UXTH is a 32-BIT-ONLY alias of UBFM. The
+        //     64-bit destination form has no valid UXTH encoding and is
+        //     unconditionally rejected:
+        //
+        //       $ echo 'uxth x0, x0' | llvm-mc-18 --triple=aarch64
+        //       <stdin>:1:10: error: invalid operand for instruction
+        //
+        //     A conforming encoder MUST return Err for `uxth xN, xM`. Instead
+        //     `encode_uxth` derives `is_64` from the destination and emits
+        //     0xD3403C00 | (rn<<5) | rd, which disassembles as
+        //     `ubfx xN, xM, #0, #16` (== UBFM xN, xM, #0, #15) — a different
+        //     instruction, silently accepting an architecturally invalid form.
+        //     Sibling encoders sxtb/sxth/uxtb share the width-validation gap.
+        #[test]
+        fn uxth_rejects_64bit_destination_form(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn)]; // uxth xN, xM -- invalid
+            prop_assert!(
+                encode_uxth(&ops).is_err(),
+                "UXTH is 32-bit-only; `uxth x{}, x{}` is architecturally invalid but got {:?}",
+                rd, rn, encode_uxth(&ops)
+            );
+        }
+    }
+}
