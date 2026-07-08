@@ -5646,3 +5646,135 @@ mod bics_props {
         }
     }
 }
+
+// ── encode_smaddl property tests ─────────────────────────────────────────
+// SMADDL <Xd>, <Wn>, <Wm>, <Xa> (signed multiply-add long):
+//   sf[31]=1 0[30] S=0[29] 11011[28:24] o1=001[23:21] Rm[20:16] o0=0[15]
+//   Ra[14:10] Rn[9:5] Rd[4:0]
+// Reference: ARMv8 ARM, §C4.1.65 (Data-processing (3 source)), SMADDL.
+// Base word (all register fields zero): 0x9B200000.
+#[cfg(test)]
+mod smaddl_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn sf_of(w: u32) -> u32    { (w >> 31) & 1 }
+    fn fixed_of(w: u32) -> u32 { (w >> 21) & 0x3FF } // bits [30:21]
+    fn o0_of(w: u32) -> u32    { (w >> 15) & 1 }     // bit 15
+    fn ra_of(w: u32) -> u32    { (w >> 10) & 0x1F }
+    fn rm_of(w: u32) -> u32    { (w >> 16) & 0x1F }
+    fn rn_of(w: u32) -> u32    { (w >> 5) & 0x1F }
+    fn rd_of(w: u32) -> u32    { w & 0x1F }
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        // P1. Reference encoding oracle: the encoded word matches an
+        //     independently-derived constant (base 0x9B200000 with register
+        //     fields OR'd into place). Verifies the bit layout holistically
+        //     without reusing the encoder's own arithmetic.
+        #[test]
+        fn smaddl_reference_encoding(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            ra in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), wreg(rn), wreg(rm), xreg(ra)];
+            let w = word(encode_smaddl(&ops));
+            let expected = 0x9B200000u32 | (rm << 16) | (ra << 10) | (rn << 5) | rd;
+            prop_assert_eq!(w, expected);
+        }
+
+        // P2. Field placement: every fixed opcode bit-group and every register
+        //     field lands exactly where the ARMv8 SMADDL encoding dictates.
+        //     o0 (bit 15) must be 0; the fixed bits [30:21] must equal
+        //     0b0011011001 (sf=1, op=0, S=0, 11011, o1=001).
+        #[test]
+        fn smaddl_field_placement(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            ra in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), wreg(rn), wreg(rm), xreg(ra)];
+            let w = word(encode_smaddl(&ops));
+            prop_assert_eq!(sf_of(w), 1);                       // SMADDL is always 64-bit
+            prop_assert_eq!(fixed_of(w), 0b0011011001);         // fixed op0/S/11011/o1 bits
+            prop_assert_eq!(o0_of(w), 0);                       // o0 = 0 distinguishes ADD from SUB long
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(ra_of(w), ra);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // P3. sf is hardcoded to 1: SMADDL forces a 64-bit destination
+        //     regardless of the textual width of any source register (only the
+        //     register NUMBER is read by the encoder).
+        #[test]
+        fn smaddl_sf_always_set_regardless_of_width(
+            n in 0u32..=30,
+            rd_x in any::<bool>(),
+            rn_x in any::<bool>(),
+            rm_x in any::<bool>(),
+            ra_x in any::<bool>(),
+        ) {
+            let mk = |is_x: bool, n: u32| if is_x { xreg(n) } else { wreg(n) };
+            let ops = vec![mk(rd_x, n), mk(rn_x, n), mk(rm_x, n), mk(ra_x, n)];
+            let w = word(encode_smaddl(&ops));
+            prop_assert_eq!(sf_of(w), 1);
+        }
+
+        // P4. Differential / algebraic oracle: SMULL <Xd>,<Wn>,<Wm> is defined
+        //     by the ARMv8 ARM as the alias of SMADDL with Ra = XZR (register
+        //     31). Therefore SMADDL with Ra=31 must produce a byte-identical
+        //     word to SMULL for the same Xd/Wn/Wm — proving the two encoders
+        //     agree on the shared bit-layout and that SMADDL's Ra field is the
+        //     only thing distinguishing it from SMULL.
+        #[test]
+        fn smaddl_with_ra_xzr_equals_smull(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let smull_ops = vec![xreg(rd), wreg(rn), wreg(rm)];
+            let smaddl_ops = vec![xreg(rd), wreg(rn), wreg(rm), xreg(31)]; // Ra = XZR
+            let ws = word(encode_smull(&smull_ops));
+            let wa = word(encode_smaddl(&smaddl_ops));
+            prop_assert_eq!(wa, ws);
+        }
+
+        // P5. Negative contract: SMADDL takes exactly four register operands
+        //     (<Xd>,<Wn>,<Wm>,<Xa>). Fewer than four, or a non-register
+        //     (immediate) operand in any of the four positions, must be Err.
+        #[test]
+        fn smaddl_rejects_missing_or_non_register_operands(
+            n in 0u32..=30,
+            missing in 1u32..=4,
+            bad_pos in 0u32..4,
+        ) {
+            // 5a. too few operands
+            {
+                let mut ops = vec![xreg(n), wreg(n), wreg(n), xreg(n)];
+                for _ in 0..missing {
+                    ops.pop();
+                }
+                prop_assert!(encode_smaddl(&ops).is_err());
+            }
+            // 5b. a non-register operand in any position
+            {
+                let mut ops = vec![xreg(n), wreg(n), wreg(n), xreg(n)];
+                ops[bad_pos as usize] = Operand::Imm(7);
+                prop_assert!(encode_smaddl(&ops).is_err());
+            }
+        }
+    }
+}
