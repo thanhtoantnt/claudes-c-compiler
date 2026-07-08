@@ -483,6 +483,46 @@ mod prop_ccmp_ccmn_tests {
             let reg_word = enc(&reg_ops, is_ccmp);
             prop_assert_eq!(imm_word ^ reg_word, 1u32 << 11);
         }
+
+        // Property F — negative contract (immediate-range validation).
+        // Per ARM ARM (CCMP/CCMN, immediate form): `imm5` is a 5-bit UNSIGNED
+        // immediate (valid 0..=31) and `nzcv` is a 4-bit field (valid 0..=15).
+        // Any operand outside these ranges is architecturally invalid and the
+        // encoder MUST reject it with Err rather than silently truncating with
+        // `& 0x1F` / `& 0xF`. No cited spec permits wrapping for these fields.
+        #[test]
+        fn prop_rejects_out_of_range_immediates(
+            (rn_name, _) in arb_reg(),
+            out_imm5 in 32i64..=4096i64,
+            out_nzcv in 16i64..=255i64,
+            cond_idx in 0usize..COND_TABLE.len(),
+            is_ccmp in any::<bool>(),
+        ) {
+            let (cond_name, _) = COND_TABLE[cond_idx];
+
+            // Out-of-range imm5 (too large) must be rejected, not truncated.
+            let big_imm = vec![Operand::Reg(rn_name.clone()), Operand::Imm(out_imm5),
+                               Operand::Imm(0), Operand::Cond(cond_name.to_string())];
+            prop_assert!(
+                encode_ccmp_ccmn(&big_imm, is_ccmp).is_err(),
+                "imm5={} should be rejected (valid range 0..=31), got {:?}",
+                out_imm5, encode_ccmp_ccmn(&big_imm, is_ccmp)
+            );
+            // Negative imm5 must be rejected (the field is unsigned).
+            let neg_imm = vec![Operand::Reg(rn_name.clone()), Operand::Imm(-1),
+                               Operand::Imm(0), Operand::Cond(cond_name.to_string())];
+            prop_assert!(
+                encode_ccmp_ccmn(&neg_imm, is_ccmp).is_err(),
+                "negative imm5=-1 should be rejected"
+            );
+            // Out-of-range nzcv must be rejected, not truncated.
+            let bad_nzcv = vec![Operand::Reg(rn_name), Operand::Imm(0),
+                                Operand::Imm(out_nzcv), Operand::Cond(cond_name.to_string())];
+            prop_assert!(
+                encode_ccmp_ccmn(&bad_nzcv, is_ccmp).is_err(),
+                "nzcv={} should be rejected (valid range 0..=15)", out_nzcv
+            );
+        }
     }
 }
 

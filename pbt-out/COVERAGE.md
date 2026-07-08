@@ -63,3 +63,31 @@ File: `src/backend/arm/assembler/encoder/neon.rs` · Module `neon_logical_tests`
 ### Pre-existing failure (unrelated)
 
 `neon::tbl_pbt_tests::prop_empty_list_does_not_panic` FAILS on the unmodified tree (verified via `git stash`) — it is a bug in the `tbl` encoder module, not introduced by this change.
+
+---
+
+## `encode_ccmp_ccmn` — CCMP/CCMN (immediate + register)
+
+File: `src/backend/arm/assembler/encoder/compare_branch.rs` · Module `prop_ccmp_ccmn_tests` · framework: proptest · **5/6 PASS, 1 FAIL (finding)** (4096 cases each).
+
+| # | Property | Oracle | What it pins down |
+|---|----------|--------|-------------------|
+| A | `prop_opcode_structure_and_fields` | structural | fixed opcode bits (set `0x3A400000`, zero `0x05A00410`); sf[31], op[30], cond[15:12], Rn[9:5], nzcv[3:0], o3[11], imm5/Rm[20:16] |
+| B | `prop_ccmp_xor_ccmn_is_bit30` | differential | CCMP ⊕ CCMN == `1<<30` only |
+| C | `prop_sf_bit_is_bit31` | differential | x{N} ⊕ w{N} == `1<<31` only |
+| D | `prop_nzcv_masked_to_nibble` | structural | nzcv low nibble == `nzcv & 0xF`; upper bits independent |
+| E | `prop_imm_vs_reg_differ_only_bit11` | differential | imm-form ⊕ reg-form == `1<<11` (o3) when imm5==Rm |
+| F | `prop_rejects_out_of_range_immediates` | negative | **FAILS** — imm5∉0..=31 / nzcv∉0..=15 must return Err |
+
+### Finding (bug)
+
+`prop_rejects_out_of_range_immediates` **FAILS**: the immediate form masks `imm5` with `& 0x1F`
+and `nzcv` with `& 0xF` without range validation, so e.g. `ccmn w0, #32, #16, eq` silently
+encodes as `Ok(Word(0x3A400000))` (== `ccmn w0, #0, #0, eq`) and negative `imm5` such as `#-1`
+becomes `#31`. Per ARM ARM both fields are unsigned with no wrap-around semantics. See
+`pbt-out/bug_reports/encode_ccmp_ccmn_immediate_range_truncation.md`.
+
+### Notes / observations (not bugs)
+
+- **Register form `rm` is safe**: `parse_reg_num` already bounds register numbers to `0..=31`, so the unmasked `(rm << 16)` in the register form cannot corrupt bits above `[20:16]`. No masking gap there.
+- **Property D characterizes the masking**: it documents the `& 0xF` behavior as-is; Property F is the *correctness* assertion that the masking should instead be a rejection.
