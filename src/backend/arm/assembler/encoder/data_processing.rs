@@ -4862,3 +4862,156 @@ mod mvn_props {
         }
     }
 }
+
+// ── encode_eon: complementary property suite ─────────────────────────────
+// ARMv8 EON (logical shifted register, EOR-NOT) encoding:
+//   sf | opc(10) | 01010 | shift | N(1) | Rm | imm6 | Rn | Rd
+//   bit 31     : sf  (register width)
+//   bits 30:29 : opc = 10 (EON)
+//   bits 28:24 : 01010   (logical shifted register class)
+//   bits 23:22 : shift   (00=LSL 01=LSR 10=ASR 11=ROR)
+//   bit  21    : N = 1   (the NOT variant; EOR has N=0)
+//   bits 20:16 : Rm
+//   bits 15:10 : imm6    (shift amount; for sf=0 the legal range is 0..=31)
+//   bits  9:5  : Rn
+//   bits  4:0  : Rd
+//
+// The pre-existing `tests` module already covers: 3-register field placement,
+// X-register shift mapping for all four shift kinds, the EON-vs-ORN opc
+// differential, the too-few-operands contract, and the W-register
+// shift-above-31 finding (known-failing). This module fills the remaining
+// gaps: W-register happy-path shifts, X-register shift > 63, mixed-width
+// operands, unknown shift-kind coercion, and XZR(31) acceptance.
+#[cfg(test)]
+mod eon_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn sf_of(w: u32) -> u32         { (w >> 31) & 1 }
+    fn opc_of(w: u32) -> u32        { (w >> 29) & 0x3 }
+    fn opcode5_of(w: u32) -> u32    { (w >> 24) & 0x1F }
+    fn shift_type_of(w: u32) -> u32 { (w >> 22) & 0x3 }
+    fn n_of(w: u32) -> u32          { (w >> 21) & 1 }
+    fn rm_of(w: u32) -> u32         { (w >> 16) & 0x1F }
+    fn imm6_of(w: u32) -> u32       { (w >> 10) & 0x3F }
+    fn rn_of(w: u32) -> u32         { (w >> 5) & 0x1F }
+    fn rd_of(w: u32) -> u32         { w & 0x1F }
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+    fn shift(kind: &str, amount: u32) -> Operand {
+        Operand::Shift { kind: kind.into(), amount }
+    }
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        // 1. W-REGISTER HAPPY PATH with a valid shift (0..=31): sf must be 0,
+        //    the EON signature (opc=10, N=1, class=01010) is preserved, and the
+        //    shift type/amount land in their exact bitfields. This is the
+        //    sf=0 complement to the existing X-register shift-mapping test.
+        #[test]
+        fn eon_w_register_valid_shift_placement(
+            rd in 0u32..=31, rn in 0u32..=31, rm in 0u32..=31,
+            sk in 0u32..=3u32, amount in 0u32..=31u32,
+        ) {
+            let (kind, want_st) = match sk {
+                0 => ("lsl", 0u32), 1 => ("lsr", 1u32),
+                2 => ("asr", 2u32), _ => ("ror", 3u32),
+            };
+            let ops = vec![wreg(rd), wreg(rn), wreg(rm), shift(kind, amount)];
+            let w = word(encode_eon(&ops));
+            prop_assert_eq!(sf_of(w), 0);
+            prop_assert_eq!(opc_of(w), 0b10);          // EON
+            prop_assert_eq!(opcode5_of(w), 0b01010);   // logical shifted register
+            prop_assert_eq!(n_of(w), 1);               // NOT variant
+            prop_assert_eq!(shift_type_of(w), want_st);
+            prop_assert_eq!(imm6_of(w), amount);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 2. NEGATIVE CONTRACT — X-register shift > 63: imm6 is a 6-bit field,
+        //    so a shift amount of 64..=u32::MAX cannot be encoded. GAS rejects
+        //    `lsl #64` with "immediate value out of range". The encoder masks
+        //    with `& 0x3F` and silently truncates (e.g. #100 -> #36), so this
+        //    property currently FAILS — documenting the silent-truncation gap.
+        //    (The W-register 32..=63 case is covered by the existing test
+        //    `eon_w_register_rejects_shift_above_31`; this covers sf=1.)
+        #[test]
+        fn eon_x_register_shift_above_63_is_rejected(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            amount in 64u32..=1000u32, sk in 0u32..=3u32,
+        ) {
+            let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm), shift(kind, amount)];
+            prop_assert!(encode_eon(&ops).is_err());
+        }
+
+        // 3. NEGATIVE CONTRACT — mixed register widths: AArch64 requires Rd,
+        //    Rn and Rm to share the same width in a logical shifted-register
+        //    op (`eon x0, w1, x2` is illegal; GAS errors "mismatched register
+        //    sizes"). encode_eon derives sf only from operand 0 and ignores the
+        //    width of Rn/Rm, so it silently emits sf=1 for a W source — this
+        //    property currently FAILS. (encode_orn rejects this case; EON does
+        //    not — an inconsistency.)
+        #[test]
+        fn eon_rejects_mixed_register_widths(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            rd_is_x in any::<bool>(), rn_is_x in any::<bool>(), rm_is_x in any::<bool>(),
+        ) {
+            prop_assume!(!(rd_is_x && rn_is_x && rm_is_x));
+            prop_assume!(!(!rd_is_x && !rn_is_x && !rm_is_x));
+            let mk = |is_x: bool, n: u32| if is_x { xreg(n) } else { wreg(n) };
+            let ops = vec![mk(rd_is_x, rd), mk(rn_is_x, rn), mk(rm_is_x, rm)];
+            prop_assert!(encode_eon(&ops).is_err());
+        }
+
+        // 4. NEGATIVE CONTRACT — unknown shift kind: only lsl/lsr/asr/ror are
+        //    defined. A garbage kind like "foo" should be rejected, but the
+        //    match arm `_ => 0b00` silently coerces it to LSL — this property
+        //    currently FAILS.
+        #[test]
+        fn eon_unknown_shift_kind_is_rejected(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            amount in 0u32..=63u32,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm), shift("foo", amount)];
+            prop_assert!(encode_eon(&ops).is_err());
+        }
+
+        // 5. POSITIVE — register 31 (XZR): in the logical shifted-register
+        //    class, register 31 encodes the zero register, not SP. encode_eon
+        //    must accept XZR/WZR in the Rd, Rn or Rm field and place 31 there.
+        #[test]
+        fn eon_accepts_register_31_xzr_in_any_field(
+            r in 0u32..=30, a in 0u32..=30, b in 0u32..=30,
+            field in 0u32..=2u32, // 0=Rd, 1=Rn, 2=Rm
+        ) {
+            let z = |is_64: bool| {
+                Operand::Reg(if is_64 { "xzr".into() } else { "wzr".into() })
+            };
+            let mk = |is_64: bool, n: u32| if is_64 { xreg(n) } else { wreg(n) };
+            // 64-bit operands so all fields share width.
+            let ops = match field {
+                0 => vec![z(true),  mk(true, a), mk(true, b)],
+                1 => vec![mk(true, r), z(true),  mk(true, b)],
+                _ => vec![mk(true, r), mk(true, a), z(true)],
+            };
+            let w = word(encode_eon(&ops));
+            prop_assert_eq!(sf_of(w), 1);
+            prop_assert_eq!(opc_of(w), 0b10);
+            prop_assert_eq!(n_of(w), 1);
+            match field {
+                0 => prop_assert_eq!(rd_of(w), 31),
+                1 => prop_assert_eq!(rn_of(w), 31),
+                _ => prop_assert_eq!(rm_of(w), 31),
+            }
+        }
+    }
+}
