@@ -1,49 +1,26 @@
-# Bug — `encode_neg` silently masks out-of-range shift amounts for W registers
+# Bug Report — `encode_neg` silently truncates W-register shift amounts above 31
 
-**File:** `src/backend/arm/assembler/encoder/data_processing.rs`
-**Function:** `encode_neg` (NEG = alias of `SUB Rd, XZR, Rm [, shift]`)
-**Found by:** property-based test `data_processing::tests::neg_w_reg_rejects_shift_above_31`
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs :: encode_neg`
+**Status:** Confirmed by failing property `neg_w_reg_rejects_shift_above_31`.
 
-## Defect
+## Summary
 
-`encode_neg` emits a machine word for shift amounts `32..=63` on 32-bit (W)
-registers instead of rejecting them.
-
-**Spec:** ARMv8 ARM §C4.1.4 / §C4.1.66 — for the add/sub shifted-register form
-with `sf=0` (32-bit), the imm6 shift amount **must** be in `0..=31`. Amounts
-`32..=63` are UNDEFINED.
-
-## Code
-
-```rust
-let word = (sf << 31) | (1 << 30) | (0b01011 << 24) | (shift_type << 22)
-    | (rm << 16) | ((shift_amount & 0x3F) << 10) | (0b11111 << 5) | rd;
-//                       ^^^^^^^^^^^^^^^^^  no range check; 32..=63 silently accepted for W
-```
+`encode_neg` masks the shift amount with `& 0x3F` instead of validating the architecture limit. For 32-bit operands, shift amounts must be `0..=31`; larger values are undefined and must be rejected.
 
 ## Reproduction
 
-`cargo test --lib data_processing::tests::neg_w_reg_rejects_shift_above_31`
-
-```
-minimal failing input: rd = 0, rm = 0, amount = 32, sk = 0   (neg w0, w0, lsl #32)
-assertion failed: encode_neg(&ops).is_err()
+```text
+neg w0, w1, lsl #32
 ```
 
-`neg w0, w0, lsl #32` returns `Ok` with `imm6 = 32`. Expected: `Err`, as GAS/LLVM do.
+Actual behavior: returns `Ok` and encodes a reserved/undefined form.
+
+Expected behavior: return `Err`.
 
 ## Impact
 
-Silent codegen corruption with no diagnostic: a `neg` with an out-of-range W-reg
-shift produces a word whose runtime semantics are UNDEFINED by the architecture.
+A bad shift amount silently assembles into a different instruction, changing program semantics without a diagnostic.
 
 ## Suggested fix
 
-Range-check the shift against the register width before encoding:
-
-```rust
-let max = if is_64 { 63 } else { 31 };
-if shift_amount > max {
-    return Err(format!("neg shift amount {} out of range 0..={}", shift_amount, max));
-}
-```
+Validate shift range against operand width before encoding (`31` for W, `63` for X).

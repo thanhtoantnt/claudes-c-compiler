@@ -2510,6 +2510,52 @@ mod tests {
         }
     }
 
+    // ── encode_neg: complementary PBT properties (equivalence, differential,
+    //    positive shift range, and two negative contracts) ─────────────────
+    proptest! {
+        // 7. NEGATIVE CONTRACT: NEG requires matching operand widths.
+        // The encoder currently derives sf from Rd only and discards the width
+        // of Rm, so mixed W/X operands are silently accepted.
+        #[test]
+        fn neg_rejects_mixed_width_operands(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let ops = vec![xreg(rd), wreg(rm)];
+            prop_assert!(encode_neg(&ops).is_err());
+        }
+    }
+
+    // ── encode_negs: complementary PBT properties ─────────────────
+    proptest! {
+        fn neg_rejects_immediate_operand(
+            rd in 0u32..=30,
+            is_64 in any::<bool>(),
+            imm in any::<i64>(),
+        ) {
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let ops = vec![rd_op, Operand::Imm(imm)];
+            prop_assert!(encode_neg(&ops).is_err());
+        }
+
+        // 11. NEGATIVE CONTRACT: for the 64-bit (X) shifted-register form imm6
+        //     is a 6-bit field, so the shift amount must be 0..=63. A value of
+        //     64 or above is UNDEFINED and MUST be rejected — not silently
+        //     truncated into imm6 by the `& 0x3F` mask.
+        #[test]
+        fn neg_x_reg_rejects_shift_above_63(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+            amount in 64u32..=4095u32,
+            sk in 0u32..=2u32,
+        ) {
+            let kind = match sk { 0 => "lsl", 1 => "lsr", _ => "asr" };
+            let ops = vec![xreg(rd), xreg(rm),
+                           Operand::Shift { kind: kind.into(), amount }];
+            prop_assert!(encode_neg(&ops).is_err());
+        }
+    }
+
     // ── encode_negs (NEGS = SUBS Rd, XZR, Rm) ───────────────────────────
     // ARMv8 add/sub (shifted register): sf op S 01011 shift Rm imm6 Rn Rd
     // NEGS aliases SUBS with Rn hardwired to XZR (11111), op=1 (sub), S=1
