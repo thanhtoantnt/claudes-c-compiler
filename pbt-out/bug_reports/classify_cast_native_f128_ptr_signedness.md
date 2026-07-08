@@ -63,3 +63,11 @@ if from_ty.is_unsigned() || from_ty == IrType::Ptr {
 ```
 
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/5
+
+## Regression property
+
+Failing property: `native_f128_uses_softfloat_families`
+
+```rust
+prop_assert_eq!(classify_cast_with_f128(other_ty, IrType::F128, true).family(), CastFamily::UnsignedToF128);
+```

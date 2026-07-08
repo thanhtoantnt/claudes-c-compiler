@@ -67,4 +67,12 @@ if shift_amount > max_shift {
 | `bics_rejects_too_few_operands` | PASS |
 | `bics_w_register_rejects_shift_above_31` | **FAIL** (this bug) |
 
+## Regression property
+
+Failing property: `bics_w_register_rejects_shift_above_31`
+
+```rust
+prop_assert!(encode_bics(&[wreg(rd), wreg(rn), wreg(rm)], "lsl", 32).is_err());
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/3

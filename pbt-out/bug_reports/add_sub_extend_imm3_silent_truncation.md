@@ -43,3 +43,13 @@ if imm3 > 7 {
 ```
 
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/1
+
+## Regression property
+
+Failing property: `extend_amount_above_7_must_be_rejected`
+
+```rust
+prop_assert!(encode_add_sub(&ops, false, false).is_err());
+```
+
+Minimal failing input: rd = 0, rn = 0, rm = 0, ek = 0, amount = 8

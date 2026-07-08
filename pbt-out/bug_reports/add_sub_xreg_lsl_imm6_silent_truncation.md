@@ -52,3 +52,13 @@ if shift_amount > cap {
 ```
 
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/2
+
+## Regression property
+
+Failing property: `xreg_lsl_shift_above_63_must_be_rejected`
+
+```rust
+prop_assert!(encode_add_sub(&ops, false, false).is_err());
+```
+
+Minimal failing input: rd = 0, rn = 0, rm = 0, amount = 64
