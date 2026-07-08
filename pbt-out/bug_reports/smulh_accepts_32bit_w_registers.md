@@ -2,7 +2,6 @@
 
 **Target:** `src/backend/arm/assembler/encoder/data_processing.rs` — `encode_smulh`
 **Severity:** Medium (silent mis-assembly / architecturally UNDEF output)
-**Detected by:** property `smulh_rejects_32bit_w_registers` (failing)
 
 ## Summary
 

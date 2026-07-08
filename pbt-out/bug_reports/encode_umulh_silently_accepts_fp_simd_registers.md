@@ -2,7 +2,6 @@
 
 **Target:** `src/backend/arm/assembler/encoder/data_processing.rs` — `encode_umulh`
 **Severity:** Medium (silent mis-assembly: wrong register file, no diagnostic)
-**Detected by:** property `umulh_rejects_fp_simd_register_in_any_position` (failing)
 
 ## Summary
 
