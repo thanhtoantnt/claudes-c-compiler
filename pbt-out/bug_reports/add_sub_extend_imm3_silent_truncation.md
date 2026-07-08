@@ -42,3 +42,5 @@ if imm3 > 7 {
 }
 // (optional, stricter) enforce per-extend-kind maximums per ARMv8 ARM
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/1
