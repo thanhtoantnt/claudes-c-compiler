@@ -135,3 +135,42 @@ Same defect family as `encode_mul`/`encode_div`/`encode_logical`.
 
 ---
 
+
+---
+
+# PBT Coverage — `encode_adc`
+
+**File:** `src/backend/arm/assembler/encoder/data_processing.rs :: encode_adc`
+**Framework:** `proptest` (already a dev-dependency).
+
+## Status: already comprehensively covered — all tests PASS
+
+The target function already has a complete property-based test suite in the
+file's `#[cfg(test)] mod tests` block (around lines 2660–2770). No new tests
+were needed; an attempted addition only produced duplicate definitions and was
+reverted. The existing suite was re-run and passes (7/7 ADC/SBC tests green).
+
+## Existing properties (all passing)
+
+| # | Property | Oracle type |
+|---|----------|-------------|
+| 1 | `adc_field_placement` — sf=1, op(bit30)=0, fixed opcode bits 28:21 = `11010000`, reserved bits 15:10 = 0, and Rm/Rn/Rd placement | Reference (spec field layout) |
+| 2 | `adc_s_bit_tracks_set_flags` — S bit (bit 29) == `set_flags` (ADC vs ADCS) | Algebraic |
+| 3 | `adc_sf_tracks_register_width` — sf (bit 31) tracks W→0 / X→1 | Algebraic |
+| 4 | `adc_vs_sbc_op_bit` — differential: ADC op=0, SBC op=1 for identical operands | Differential |
+| 5 | `adc_rejects_bad_operand_arities` — <3 operands, or non-register (immediate) in an operand slot → `Err` | Negative contract |
+
+Plus a sibling `sbc_known_constant_encoding` independent hand-decoded
+reference oracle for the closely-related `encode_sbc`.
+
+## Finding (functional, reported separately)
+
+A genuine correctness gap was found and is documented in
+`pbt-out/bug_reports/encode_adc_silent_mixed_width.md`: **mismatched operand
+widths are silently encoded** (e.g. `adc x0, w1, x2` → `Ok(0x9A020020)` = `adc
+x0, x1, x2`), because `is_64` is taken only from `Rd` and the source widths are
+discarded. This is architecturally UNDEF and is rejected by GNU `as`/LLVM. It
+is a codebase-wide pattern, not specific to `encode_adc`.
+
+A regression property for this gap is proposed in the bug report but is **not**
+checked into the test file because it would fail today.

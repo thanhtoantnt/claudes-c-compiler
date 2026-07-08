@@ -2735,9 +2735,26 @@ mod tests {
             let imm_third = vec![xreg(rd), xreg(rn), Operand::Imm(bad_imm)];
             prop_assert!(encode_adc(&imm_third, false).is_err());
         }
+        // 6. NEGATIVE CONTRACT: all ADC operands must share the same register width.
+        // The encoder currently derives sf from Rd and discards the width flags
+        // for Rn/Rm, so mixed W/X operands are silently re-encoded as the Rd width.
+        #[test]
+        fn adc_rejects_mixed_width_operands(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30, set_flags in any::<bool>(),
+        ) {
+            let cases = [
+                vec![xreg(rd), Operand::Reg(format!("w{}", rn)), xreg(rm)],
+                vec![xreg(rd), xreg(rn), Operand::Reg(format!("w{}", rm))],
+                vec![Operand::Reg(format!("w{}", rd)), xreg(rn), Operand::Reg(format!("w{}", rm))],
+            ];
+            for ops in cases {
+                prop_assert!(
+                    encode_adc(&ops, set_flags).is_err(),
+                    "encode_adc should reject mixed-width operands: {:?}", ops
+                );
+            }
+        }
     }
-
-    // ── encode_sbc: ARMv8 Subtract-with-Carry ──
     // Spec (ARMv8 ARM): SBC  <Xd>,<Xn>,<Xm> = sf 1 0 11010000 Rm 000000 Rn Rd
     //                   SBCS <Xd>,<Xn>,<Xm> = sf 1 1 11010000 Rm 000000 Rn Rd
     // bit31 sf, bit30 op=1 (subtract), bit29 S, bits28..21 == 0b11010000,
