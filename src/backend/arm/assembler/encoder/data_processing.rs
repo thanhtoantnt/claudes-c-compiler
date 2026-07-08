@@ -4724,6 +4724,109 @@ mod tests {
             prop_assert_eq!((sbc >> 30) & 1, 1);  // SBC op = 1
         }
     }
+
+    // ── encode_msub: MSUB Xd, Xn, Xm, Xa   (Rd = Ra − Rn*Rm) ──────────────
+    //
+    // Encoding (Data-processing, 3 source):
+    //   sf 00 11011 000 Rm o0 Ra Rn Rd       o0 = 1 for MSUB (0 for MADD).
+    // Field map: sf[31]  bits30:21=0011011000  Rm[20:16]  o0[15]  Ra[14:10]  Rn[9:5]  Rd[4:0].
+    proptest! {
+        // 1. Every fixed field and every register field lands exactly per the
+        //    ARMv8 MSUB encoding, across the full valid register range 0..=31
+        //    (31 = XZR, which is legal for MSUB; MNEG is MSUB with Ra=XZR).
+        #[test]
+        fn msub_field_placement(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            ra in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm), xreg(ra)];
+            let w = expect_word(encode_msub(&ops));
+            prop_assert_eq!(sf_of(w), 1);                        // 64-bit
+            prop_assert_eq!((w >> 21) & 0x3FF, 0b0011011000u32); // fixed op bits 30:21
+            prop_assert_eq!(rm_of(w), rm);                       // Rm[20:16]
+            prop_assert_eq!((w >> 15) & 1, 1);                    // o0[15] = 1 (MSUB)
+            prop_assert_eq!((w >> 10) & 0x1F, ra);               // Ra[14:10]
+            prop_assert_eq!(rn_of(w), rn);                       // Rn[9:5]
+            prop_assert_eq!(rd_of(w), rd);                       // Rd[4:0]
+        }
+
+        // 2. The o0 bit (15) is always 1 — the sole MSUB-vs-MADD discriminator.
+        #[test]
+        fn msub_o0_bit_always_set(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            ra in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm), xreg(ra)];
+            let w = expect_word(encode_msub(&ops));
+            prop_assert_eq!((w >> 15) & 1, 1);
+        }
+
+        // 3. sf (bit 31) tracks the destination register's width: W -> 0, X -> 1.
+        #[test]
+        fn msub_sf_tracks_width(
+            n in 0u32..=31,
+            is_w in any::<bool>(),
+        ) {
+            let pfx = if is_w { 'w' } else { 'x' };
+            let ops = vec![Operand::Reg(format!("{}{}", pfx, n)), xreg(0), xreg(1), xreg(2)];
+            let w = expect_word(encode_msub(&ops));
+            prop_assert_eq!(sf_of(w), if is_w { 0 } else { 1 });
+        }
+
+        // 4. Differential vs MADD: for identical operands, MSUB and MADD differ
+        //    ONLY in bit 15 (o0). Every other bit is equal.
+        #[test]
+        fn msub_vs_madd_differs_only_in_o0(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            ra in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm), xreg(ra)];
+            let ws = expect_word(encode_msub(&ops));
+            let wa = expect_word(encode_madd(&ops));
+            prop_assert_eq!(ws ^ wa, 1u32 << 15);
+        }
+
+        // 5. Register-field independence: changing a single operand changes only
+        //    its own field; all other bits remain constant.
+        #[test]
+        fn msub_register_field_independence(
+            rd in 0u32..=31, rn in 0u32..=31, rm in 0u32..=31, ra in 0u32..=31,
+        ) {
+            let base = expect_word(encode_msub(&vec![xreg(rd), xreg(rn), xreg(rm), xreg(ra)]));
+
+            // Rd flip affects only bits 4:0.
+            let w = expect_word(encode_msub(&vec![xreg(rd ^ 1), xreg(rn), xreg(rm), xreg(ra)]));
+            prop_assert_eq!(w & !0x1Fu32, base & !0x1Fu32);
+            // Rn flip affects only bits 9:5.
+            let w = expect_word(encode_msub(&vec![xreg(rd), xreg(rn ^ 1), xreg(rm), xreg(ra)]));
+            prop_assert_eq!(w & !(0x1Fu32 << 5), base & !(0x1Fu32 << 5));
+            // Rm flip affects only bits 20:16.
+            let w = expect_word(encode_msub(&vec![xreg(rd), xreg(rn), xreg(rm ^ 1), xreg(ra)]));
+            prop_assert_eq!(w & !(0x1Fu32 << 16), base & !(0x1Fu32 << 16));
+            // Ra flip affects only bits 14:10.
+            let w = expect_word(encode_msub(&vec![xreg(rd), xreg(rn), xreg(rm), xreg(ra ^ 1)]));
+            prop_assert_eq!(w & !(0x1Fu32 << 10), base & !(0x1Fu32 << 10));
+        }
+
+        // 6. Error contract: MSUB requires exactly 4 register operands. Fewer
+        //    operands, or a non-register 4th operand, must yield Err (never a
+        //    partial/silently-defaulted encoding).
+        #[test]
+        fn msub_rejects_invalid_operands(
+            n in 0u32..=31,
+        ) {
+            prop_assert!(encode_msub(&[]).is_err());
+            prop_assert!(encode_msub(&[xreg(n), xreg(n), xreg(n)]).is_err());
+            let bad = vec![xreg(n), xreg(n), xreg(n), Operand::Imm(0)];
+            prop_assert!(encode_msub(&bad).is_err());
+        }
+    }
 }
 
 // ── encode_mvn property tests ────────────────────────────────────────────
