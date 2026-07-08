@@ -6785,6 +6785,7 @@ mod umulh_props {
 //   32-bit base (all regs 0, no shift): 0110 1011 0000 0000 0000 0011 1110 0000 = 0x6B0003E0
 //   with Rm OR'd into bits[20:16] and Rd OR'd into bits[4:0].
 //   (Cross-checked against llvm-mc: `.word 0xeb0003e0` disassembles to `negs x0, x0`.)
+#[cfg(test)]
 mod negs_props {
     use super::*;
     use proptest::prelude::*;
@@ -7230,6 +7231,7 @@ mod sxth_props {
     }
 }
 
+#[cfg(test)]
 mod sxtb_props {
     use super::*;
     use proptest::prelude::*;
@@ -7369,6 +7371,7 @@ mod sxtb_props {
     }
 }
 
+#[cfg(test)]
 mod uxth_props {
     use super::*;
     use proptest::prelude::*;
