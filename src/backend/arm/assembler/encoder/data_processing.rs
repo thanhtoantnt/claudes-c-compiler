@@ -1850,6 +1850,24 @@ mod tests {
             prop_assert!(encode_logical(&ops, 0).is_err());
         }
 
+        // 4b. NEGATIVE CONTRACT (symmetric with the W case above): for the
+        //     64-bit (X) shifted-register form the imm6 field is only 0..=63,
+        //     so a shift amount of 64 and above is UNDEFINED (ARMv8 ARM) and
+        //     MUST be rejected rather than silently masked via `& 0x3F`.
+        //     (For X registers the full 0..=63 range is legal, so only >=64
+        //     is out of range — the complement of the W-register property #4.)
+        #[test]
+        fn logical_x_reg_rejects_shift_above_63(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30,
+            amount in 64u32..=255u32,
+            sk in 0u32..=3u32,
+        ) {
+            let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm),
+                           Operand::Shift { kind: kind.into(), amount }];
+            prop_assert!(encode_logical(&ops, 0).is_err());
+        }
+
         // 5. Immediate form: for a valid bitmask immediate the fixed opcode
         //    100100 and opc land per spec, and the (N,immr,imms) chosen by the
         //    encoder ROUND-TRIP — decoded by an independent ARM-ARM reference
