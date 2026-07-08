@@ -669,6 +669,45 @@ mod prop_encode_tbz_tests {
             prop_assert_eq!(reloc.symbol, sym);
             prop_assert_eq!(reloc.addend, off);
         }
+
+        // Property F — negative contract (immediate-range validation).
+        // Per ARM ARM (TBZ/TBNZ, C5.6.27/28): the test bit is the 6-bit field
+        // b5:b40, an UNSIGNED value valid only in 0..=63. No spec permits
+        // wrapping/truncation. An immediate above 63 MUST be rejected with Err,
+        // not silently masked into the 6-bit field via `& 0x1F` / `>> 5 & 1`.
+        #[test]
+        fn prop_rejects_bit_above_63(
+            (rt_name, _) in arb_reg(),
+            bit in 64i64..=4096i64,
+            is_nz in any::<bool>(),
+        ) {
+            let ops = vec![Operand::Reg(rt_name), Operand::Imm(bit),
+                           Operand::Symbol("target".into())];
+            prop_assert!(
+                encode_tbz(&ops, is_nz).is_err(),
+                "bit={} (valid range 0..=63) must be rejected, got {:?}",
+                bit, encode_tbz(&ops, is_nz)
+            );
+        }
+
+        // Property G — negative contract: the test-bit field is unsigned, so a
+        // negative immediate MUST be rejected. The implementation does
+        // `bit as u32`, which silently truncates a negative i64 to its low 32
+        // bits before masking to 6 bits — that is not a valid encoding.
+        #[test]
+        fn prop_rejects_negative_bit(
+            (rt_name, _) in arb_reg(),
+            bit in -4096i64..=-1i64,
+            is_nz in any::<bool>(),
+        ) {
+            let ops = vec![Operand::Reg(rt_name), Operand::Imm(bit),
+                           Operand::Symbol("target".into())];
+            prop_assert!(
+                encode_tbz(&ops, is_nz).is_err(),
+                "negative bit={} must be rejected (field is unsigned 0..=63)",
+                bit
+            );
+        }
     }
 }
 
