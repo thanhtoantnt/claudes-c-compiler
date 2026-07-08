@@ -6858,3 +6858,123 @@ mod negs_props {
     }
 }
 
+#[cfg(test)]
+mod sxtw_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+
+    fn expect_word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    // SBFM field extractors. SXTW Xd, Wn aliases SBFM Xd, Xn, #0, #31:
+    //   sf opc(2) 100110 N immr(6) imms(6) Rn Rd
+    fn sf_of(w: u32) -> u32   { (w >> 31) & 1 }      // bit 31
+    fn opc_of(w: u32) -> u32  { (w >> 29) & 0x3 }    // bits 30:29
+    fn fixed_of(w: u32) -> u32 { (w >> 23) & 0x3F }  // bits 28:23
+    fn n_of(w: u32) -> u32    { (w >> 22) & 1 }      // bit 22
+    fn immr_of(w: u32) -> u32 { (w >> 16) & 0x3F }   // bits 21:16
+    fn imms_of(w: u32) -> u32 { (w >> 10) & 0x3F }   // bits 15:10
+    fn rn_of(w: u32) -> u32   { (w >> 5) & 0x1F }    // bits 9:5
+    fn rd_of(w: u32) -> u32   { w & 0x1F }           // bits 4:0
+
+    proptest! {
+        // ── encode_sxtw: SXTW Xd, Wn -> SBFM Xd, Xn, #0, #31 ───────────────────
+        // Reference constant derived independently from the ARMv8 ARM bit-string
+        // for SBFM with sf=1 opc=00 [28:23]=100110 N=1 immr=000000 imms=011111,
+        // Rn=Rd=0:
+        //   1001 0011 0100 0000 0111 1100 0000 0000 = 0x93407C00
+        // Independently confirmed by differential assembly with clang/llvm-mc
+        // (target aarch64-linux-gnu): `sxtw x0, w0` -> little-endian 00 7c 40 93
+        // (= 0x93407C00). Rn/Rd are OR'd into their respective fields.
+
+        // P1. Full-word differential reference oracle: the encoded word equals
+        //     the spec/llvm-derived constant with Rn/Rd placed in their fields.
+        #[test]
+        fn sxtw_reference_encoding(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), wreg(rn)];
+            let w = expect_word(encode_sxtw(&ops));
+            let expected = 0x93407C00u32 | (rn << 5) | rd;
+            prop_assert_eq!(w, expected);
+        }
+
+        // P2. Fixed-field placement: every fixed opcode bit-group and the alias
+        //     constants immr=0 / imms=31 land exactly where the SBFM encoding
+        //     dictates, independent of Rn/Rd.
+        #[test]
+        fn sxtw_fixed_fields(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), wreg(rn)];
+            let w = expect_word(encode_sxtw(&ops));
+            prop_assert_eq!(sf_of(w), 1);                 // SXTW is always 64-bit
+            prop_assert_eq!(opc_of(w), 0b00);             // SBFM (opc=00)
+            prop_assert_eq!(fixed_of(w), 0b100110);       // [28:23] fixed
+            prop_assert_eq!(n_of(w), 1);                  // N=1 (64-bit immr/imms)
+            prop_assert_eq!(immr_of(w), 0);               // immr=0  (#0)
+            prop_assert_eq!(imms_of(w), 31);              // imms=31 (#31)
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // P3. Characterization: the destination register's width is a DEAD
+        //     parameter — `is_64` from get_reg(operands,0) is discarded. Varying
+        //     only the destination's textual width (x vs w) for a fixed register
+        //     number yields byte-identical output, and sf is hardcoded to 1.
+        //     (This passes today; it is the root cause of the finding in P5.)
+        #[test]
+        fn sxtw_destination_width_is_ignored(
+            n in 0u32..=31,
+        ) {
+            let wx = expect_word(encode_sxtw(&[xreg(n), wreg(n)]));
+            let ww = expect_word(encode_sxtw(&[wreg(n), wreg(n)]));
+            prop_assert_eq!(wx, ww);
+            prop_assert_eq!(sf_of(wx), 1);
+        }
+
+        // P4. Negative contract: SXTW requires exactly <Xd>, <Wn>. Fewer than
+        //     two register operands, or a non-register in either position, is Err.
+        #[test]
+        fn sxtw_rejects_invalid_operands(
+            n in 0u32..=31,
+        ) {
+            // Too few operands.
+            prop_assert!(encode_sxtw(&[]).is_err());
+            prop_assert!(encode_sxtw(&[xreg(n)]).is_err());
+            // Non-register in either position.
+            prop_assert!(encode_sxtw(&[Operand::Imm(5), wreg(n)]).is_err());
+            prop_assert!(encode_sxtw(&[xreg(n), Operand::Imm(5)]).is_err());
+        }
+
+        // P5. FINDING (expected to FAIL). Spec negative contract (differential):
+        //     the ARMv8 ARM defines SXTW ONLY as "SXTW <Xd>, <Wn>" — a 64-bit
+        //     destination is mandatory. The reference assembler (clang/llvm-mc,
+        //     target aarch64-linux-gnu) rejects `sxtw w0, w1` with
+        //     "error: invalid operand for instruction". A conforming encoder
+        //     MUST therefore return Err for a W destination. Instead the dead
+        //     `is_64` (see P3) causes it to silently emit sf=1 bytes, accepting
+        //     an architecturally invalid form.
+        #[test]
+        fn sxtw_rejects_w_destination(
+            n in 0u32..=31,
+        ) {
+            let ops = vec![wreg(n), wreg(n)]; // sxtw w_n, w_n -- invalid destination
+            prop_assert!(
+                encode_sxtw(&ops).is_err(),
+                "W destination is architecturally invalid for SXTW; got {:?}",
+                encode_sxtw(&ops)
+            );
+        }
+    }
+}
+
