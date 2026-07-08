@@ -2201,3 +2201,258 @@ mod prop_encode_cset_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_csetm_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ---- CSETM opcode constants (ARM ARM C6.2.44, alias of CSINV) ----
+    // CSETM Rd, cond  ==  CSINV Rd, XZR, XZR, invert(cond)
+    //   sf 1 0 11010100 11111 inv_cond 0 0 11111 Rd
+    //   [31]    sf        — 1 = 64-bit (X), 0 = 32-bit (W); taken from Rd ONLY
+    //   [30]    1         — op=1  (CSETM is the invert-select family; distinguishes
+    //                              it from CSEL/CSINC/CSET which all have op=0)
+    //   [29]    0         — S=0
+    //   [28:21] 11010100  — conditional-select group opcode
+    //   [20:16] 11111     — Rm = XZR (31)   [CSETM-defining: must be all ones]
+    //   [15:12] inv_cond  — condition ^ 1
+    //   [11:10] 00        — o2=0, o1=0 (CSINV marker; o1=1 would be CSNEG)
+    //   [9:5]   11111     — Rn = XZR (31)   [CSETM-defining: must be all ones]
+    //   [4:0]   Rd
+    const OPCODE: u32 = 0b11010100u32 << 21; // bits [28:21], == 0x1A80_0000
+    // Bit [30] (op) must be ONE: this is what places CSETM in the CSINV/CSNEG
+    // (invert/negate) family rather than the CSEL/CSINC (select/increment) family.
+    const OP_BIT: u32 = 1u32 << 30; // == 0x4000_0000
+    // Bits that must be ZERO for CSETM: [29] (S=0), [11] (o2=0), [10] (o1=0).
+    //   [11:10] == 00 is the CSINV marker; o1=1 (bit 10) would select CSNEG.
+    const FIXED_ZERO: u32 = (1u32 << 29) | (1u32 << 11) | (1u32 << 10); // == 0x2000_0C00
+    // CSETM-defining: Rm [20:16] and Rn [9:5] are BOTH the all-ones XZR field.
+    // This is the structural signature that distinguishes CSETM from generic CSINV.
+    const RM_FIELD: u32 = 0b11111u32 << 16; // == 0x001F_0000
+    const RN_FIELD: u32 = 0b11111u32 << 5;  // == 0x0000_03E0
+    // The bits that differ between CSETM (CSINV alias: op=1,o1=0) and CSET
+    // (CSINC alias: op=0,o1=1): bit 30 (op) and bit 10 (o1) both flip.
+    const DIFF_VS_CSET: u32 = (1u32 << 30) | (1u32 << 10); // == 0x4000_0400
+
+    /// Canonical ARM condition-code table mirroring `encode_cond`.
+    const COND_TABLE: &[(&str, u32)] = &[
+        ("eq", 0), ("ne", 1), ("cs", 2), ("hs", 2), ("cc", 3), ("lo", 3),
+        ("mi", 4), ("pl", 5), ("vs", 6), ("vc", 7), ("hi", 8), ("ls", 9),
+        ("ge", 10), ("lt", 11), ("gt", 12), ("le", 13), ("al", 14), ("nv", 15),
+    ];
+
+    /// Condition-inversion table mirroring `inv_cond = cond ^ 1` (flip LSB).
+    /// Each entry is (cond, name-of-condition-whose-encode_cond == cond ^ 1).
+    /// Inversion pairs each condition with its logical opposite and swaps AL<->NV.
+    const COND_INVERSION: &[(&str, &str)] = &[
+        ("eq", "ne"), ("ne", "eq"),
+        ("cs", "cc"), ("hs", "lo"),
+        ("cc", "cs"), ("lo", "hs"),
+        ("mi", "pl"), ("pl", "mi"),
+        ("vs", "vc"), ("vc", "vs"),
+        ("hi", "ls"), ("ls", "hi"),
+        ("ge", "lt"), ("lt", "ge"),
+        ("gt", "le"), ("le", "gt"),
+        ("al", "nv"), ("nv", "al"),
+    ];
+
+    fn word_of(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word_of(encode_csetm(ops))
+    }
+
+    prop_compose! {
+        fn arb_gp_reg()(n in 0u32..=30u32, is_64 in any::<bool>()) -> (String, u32) {
+            let name = if is_64 { format!("x{}", n) } else { format!("w{}", n) };
+            (name, n)
+        }
+    }
+
+    proptest! {
+        // Property A — full structural / field-placement oracle.
+        // The encoded word is fully determined: opcode 11010100 in [28:21],
+        // bit [30]=1 (op), bits [29,11,10] zero, BOTH Rm [20:16] and Rn [9:5]
+        // are the all-ones XZR field (this is what makes it CSETM rather than a
+        // generic CSINV), cond holds the INVERTED condition, and sf tracks Rd's
+        // width. Reconstructing from the fields reproduces the whole word —
+        // nothing else is set.
+        #[test]
+        fn prop_opcode_structure_and_fields(
+            (rd_name, rd_num) in arb_gp_reg(),
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let (cond_name, cond_val) = COND_TABLE[cond_idx];
+            let ops = vec![
+                Operand::Reg(rd_name.clone()),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            let word = enc(&ops);
+
+            // Fixed opcode bits [28:21].
+            prop_assert_eq!(word & OPCODE, OPCODE);
+            // Bits that must be zero for CSETM.
+            prop_assert_eq!(word & FIXED_ZERO, 0u32);
+            // op bit [30] must be one — the CSINV/CSETM family marker.
+            prop_assert_eq!(word & OP_BIT, OP_BIT);
+            // Rm [20:16] and Rn [9:5] must BOTH be all-ones (XZR = 31). This is
+            // the defining structural difference between CSETM and CSINV.
+            prop_assert_eq!(word & RM_FIELD, RM_FIELD);
+            prop_assert_eq!(word & RN_FIELD, RN_FIELD);
+            // sf bit [31] tracks Rd's width.
+            let expected_sf = if rd_name.starts_with('x') { 1u32 } else { 0u32 };
+            prop_assert_eq!((word >> 31) & 1, expected_sf);
+            // cond [15:12] holds the INVERTED condition (cond ^ 1).
+            prop_assert_eq!((word >> 12) & 0xF, cond_val ^ 1);
+            // Rd [4:0].
+            prop_assert_eq!(word & 0x1F, rd_num);
+            // Full reconstruction — the word is exactly the OR of its fields.
+            prop_assert_eq!(
+                word,
+                (expected_sf << 31) | OP_BIT | OPCODE | RM_FIELD
+                    | ((cond_val ^ 1) << 12) | RN_FIELD | rd_num
+            );
+        }
+
+        // Property B — differential: CSETM is a pure alias of CSINV with
+        // Rn = Rm = XZR and the inverted condition. CSETM(Rd, cond) MUST equal
+        // CSINV(Rd, XZR, XZR, invert(cond)) bit-for-bit for every register and
+        // condition (ARM ARM C6.2.44). This is the defining alias relationship.
+        #[test]
+        fn prop_csetm_equals_csinv_xzr_alias(
+            (rd_name, _rd_num) in arb_gp_reg(),
+            inv_idx in 0usize..COND_INVERSION.len(),
+        ) {
+            let (cond_name, inv_name) = COND_INVERSION[inv_idx];
+            let csetm_word = enc(&[
+                Operand::Reg(rd_name.clone()),
+                Operand::Cond(cond_name.to_string()),
+            ]);
+            // XZR parses to register number 31 in both Rn and Rm slots; its
+            // width flag is discarded by encode_csinv for those operands.
+            let csinv_word = word_of(encode_csinv(&[
+                Operand::Reg(rd_name),
+                Operand::Reg("xzr".into()),
+                Operand::Reg("xzr".into()),
+                Operand::Cond(inv_name.to_string()),
+            ]));
+            prop_assert_eq!(csetm_word, csinv_word);
+        }
+
+        // Property C — condition inversion round-trips for every name in the
+        // canonical table (cond field == encode_cond(name) ^ 1), and the cs/hs
+        // & cc/lo aliases — which encode_cond maps to the same value — produce
+        // bit-identical CSETM words.
+        #[test]
+        fn prop_cond_inverted_and_aliases(cond_idx in 0usize..COND_TABLE.len()) {
+            let (name, val) = COND_TABLE[cond_idx];
+            let word = enc(&[
+                Operand::Reg("x0".into()),
+                Operand::Cond(name.to_string()),
+            ]);
+            prop_assert_eq!((word >> 12) & 0xF, val ^ 1);
+
+            let base = |c: &str| enc(&[
+                Operand::Reg("x0".into()),
+                Operand::Cond(c.to_string()),
+            ]);
+            prop_assert_eq!(base("cs"), base("hs"));
+            prop_assert_eq!(base("cc"), base("lo"));
+        }
+
+        // Property D — differential: CSETM (CSINV alias: op=1, o1=0) and CSET
+        // (CSINC alias: op=0, o1=1) share the identical XZR-pinned Rm/Rn fields
+        // and inverted-condition layout; they differ ONLY in bit 30 (op) and
+        // bit 10 (o1), which both flip. For identical (Rd, sf, cond) the two
+        // instructions' XOR is exactly these two bits — no more, no less.
+        #[test]
+        fn prop_csetm_xor_cset_is_bits30_and_10(
+            (rd_name, _rd_num) in arb_gp_reg(),
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let (cond_name, _) = COND_TABLE[cond_idx];
+            let ops = vec![
+                Operand::Reg(rd_name),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            let csetm_word = enc(&ops);
+            let cset_word = word_of(encode_cset(&ops));
+            prop_assert_eq!(csetm_word ^ cset_word, DIFF_VS_CSET);
+        }
+
+        // Property E — structural negative contract. CSETM takes exactly two
+        // operands: a register followed by a condition. Lists that are too
+        // short, that lack a trailing condition, or that place a non-register /
+        // non-Cond in the wrong slot must make encode_csetm return Err — no
+        // silent encoding and no panic.
+        #[test]
+        fn prop_rejects_invalid_operands(case in 0usize..9usize) {
+            let r = Operand::Reg("x0".into());
+            let c = Operand::Cond("eq".into());
+            let result = match case {
+                0 => encode_csetm(&[]),                                            // no operands
+                1 => encode_csetm(&[r.clone()]),                                   // only Rd, no cond
+                2 => encode_csetm(&[Operand::Imm(0), c.clone()]),                  // Rd not a reg
+                3 => encode_csetm(&[Operand::Symbol("s".into()), c.clone()]),     // Rd is Symbol
+                4 => encode_csetm(&[r.clone(), r.clone()]),                        // 2nd not a Cond
+                5 => encode_csetm(&[r.clone(), Operand::Imm(4)]),                  // cond is Imm
+                6 => encode_csetm(&[r.clone(), Operand::Symbol("notcond".into())]),// cond is Symbol
+                7 => encode_csetm(&[r.clone(), Operand::Reg("x1".into())]),        // cond is Reg
+                _ => encode_csetm(&[r.clone(), Operand::Extend { kind: "sxtw".into(), amount: 0 }]),
+            };
+            prop_assert!(
+                result.is_err(),
+                "encode_csetm should reject case {} (got {:?})", case, result
+            );
+        }
+
+        // Property F — register-class negative contract (EXPECTED TO FAIL — see
+        // BUG report). CSETM is defined ONLY on general-purpose (X/W) registers
+        // (ARM ARM C6.2.44: GP register destination). FP/SIMD register names
+        // (d/s/q/v/h/b) must therefore be rejected rather than silently
+        // re-encoded with their numeric index and sf=0, which would emit a
+        // malformed instruction. `parse_reg_num` (encoder/mod.rs:131) accepts
+        // every FP/SIMD prefix, and `get_reg` derives sf only from
+        // is_64bit_reg, so this property currently fails — surfacing the latent
+        // validation gap shared with CSEL/CSINC/CSINV/CSNEG/CSET.
+        #[test]
+        fn prop_rejects_fp_simd_registers(
+            prefix in "[dsvhbq]",
+            n in 0u32..=31u32,
+        ) {
+            let bad = format!("{}{}", prefix, n);
+            let ops = vec![Operand::Reg(bad), Operand::Cond("eq".into())];
+            let result = encode_csetm(&ops);
+            prop_assert!(
+                result.is_err(),
+                "encode_csetm should reject FP/SIMD destination (got {:?})", result
+            );
+        }
+
+        // Property G — condition-code negative contract (EXPECTED TO FAIL — see
+        // BUG report, CSETM-SPECIFIC). Per the ARM ARM, CSETM is an alias of
+        // CSINV and the aliased CSINV condition must NOT be AL or NV (those are
+        // reserved / UNDEFINED encodings that reference assemblers — GAS and
+        // LLVM llvm-mc — reject). Since invert(cond) swaps AL<->NV, a
+        // user-facing `csetm Rd, al` / `csetm Rd, nv` produces a CSINV whose
+        // condition is NV / AL: a reserved word. encode_csetm performs no such
+        // check and currently emits the reserved encoding.
+        #[test]
+        fn prop_rejects_al_nv_conditions(case in 0usize..2usize) {
+            let cond_name = ["al", "nv"][case];
+            let ops = vec![Operand::Reg("x0".into()), Operand::Cond(cond_name.to_string())];
+            let result = encode_csetm(&ops);
+            prop_assert!(
+                result.is_err(),
+                "encode_csetm should reject reserved condition '{}' (got {:?})",
+                cond_name, result
+            );
+        }
+    }
+}
