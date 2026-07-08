@@ -4244,6 +4244,74 @@ mod tests {
         }
     }
 
+    // ── encode_umull: register-WIDTH validation (the gap the field tests miss) ─
+    // UMULL <Xd>, <Wn>, <Wm> is the alias of UMADDL with sf FIXED to 1.
+    // The destination MUST be a 64-bit (X) register: a 32-bit W destination has
+    // no valid encoding (it would silently widen the result write). Likewise the
+    // source registers are Wn/Wm. encode_umull calls get_reg(...) but binds the
+    // is_64 flag to `_` for all three operands, so it cannot detect a width
+    // mismatch. The properties below pin this behaviour down.
+    proptest! {
+        // P-W1. Spec / negative contract (ARMv8 ARM, UMULL aliasing of UMADDL):
+        //       `umull wd, wn, wm` must be REJECTED — a 32-bit destination has
+        //       no encoding (sf is fixed to 1, so the 64-bit product would be
+        //       written into the full Xd, silently contradicting the source).
+        //       EXPECTED TO FAIL until width validation is added.
+        #[test]
+        fn umull_destination_must_be_64bit(
+            n in 0u32..=30,
+        ) {
+            let ops = vec![wreg(n), wreg(n), wreg(n)]; // umull wN, wN, wN
+            prop_assert!(
+                encode_umull(&ops).is_err(),
+                "umull w{}, w{}, w{} must be rejected: 32-bit destination is UNPREDICTABLE",
+                n, n, n,
+            );
+        }
+
+        // P-W2. Documents the mechanism behind P-W1: the destination register's
+        //       WIDTH is discarded, so a W destination encodes byte-identically
+        //       to the corresponding X destination (only the number is read).
+        //       This PASSES today and proves the dead is_64 path.
+        #[test]
+        fn umull_dest_width_silently_ignored(
+            n in 0u32..=30,
+        ) {
+            let wdest = expect_word(encode_umull(&[wreg(n), wreg(0), wreg(0)]));
+            let xdest = expect_word(encode_umull(&[xreg(n), wreg(0), wreg(0)]));
+            prop_assert_eq!(wdest, xdest);
+        }
+
+        // P-W3. The same gap exists for the source operands: UMULL takes Wn, Wm
+        //       (32-bit), but X sources are accepted and encode identically to
+        //       their W counterparts.
+        #[test]
+        fn umull_source_width_silently_ignored(
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            rn_x in any::<bool>(),
+            rm_x in any::<bool>(),
+        ) {
+            let rn_op = if rn_x { xreg(rn) } else { wreg(rn) };
+            let rm_op = if rm_x { xreg(rm) } else { wreg(rm) };
+            let got = expect_word(encode_umull(&[xreg(0), rn_op, rm_op]));
+            let want = expect_word(encode_umull(&[xreg(0), wreg(rn), wreg(rm)]));
+            prop_assert_eq!(got, want);
+        }
+
+        // P-W4. Consequence of the hardcoded sf: bit 31 is 1 even when every
+        //       operand is a 32-bit (W) register. A correct width-validating
+        //       encoder would have errored before emitting any word here.
+        #[test]
+        fn umull_sf_set_even_for_all_w_operands(
+            n in 0u32..=30,
+        ) {
+            let ops = vec![wreg(n), wreg(n), wreg(n)];
+            let w = expect_word(encode_umull(&ops));
+            prop_assert_eq!(sf_of(w), 1);
+        }
+    }
+
     // ── encode_mneg ───────────────────────────────────────────────────────
     // MNEG Xd, Xn, Xm is the architectural alias of MSUB Xd, Xn, Xm, XZR:
     //   sf 0 0 11011 000 Rm 1 11111 Rn Rd
