@@ -91,3 +91,47 @@ becomes `#31`. Per ARM ARM both fields are unsigned with no wrap-around semantic
 
 - **Register form `rm` is safe**: `parse_reg_num` already bounds register numbers to `0..=31`, so the unmasked `(rm << 16)` in the register form cannot corrupt bits above `[20:16]`. No masking gap there.
 - **Property D characterizes the masking**: it documents the `& 0xF` behavior as-is; Property F is the *correctness* assertion that the masking should instead be a rejection.
+
+---
+
+# PBT Coverage — `encode_cbz`
+
+**Target:** `src/backend/arm/assembler/encoder/compare_branch.rs` → `encode_cbz(operands, is_nz)`
+**Result:** 6/6 properties pass. **1 functional bug found** (SP/WSP silently aliased to XZR/WZR) — see Bugs Found.
+
+## What the function does
+Encodes ARMv8-A `CBZ`/`CBNZ <Rt>, <label>` as `sf 011010 op imm19 Rt` and
+emits a `CondBr19` relocation for the linker to fill the imm19 offset:
+```
+word = (sf << 31) | (0b011010 << 25) | (op << 24) | rt   // op=0 CBZ, op=1 CBNZ
+```
+
+## Properties verified
+1. `prop_opcode_structure_and_fields` — spec-exact placement of every fixed + register field (reference oracle); reconstructs the whole word.
+2. `prop_cbz_xor_cbnz_is_bit24` — `CBZ ⊕ CBNZ == 1<<24` for all inputs (differential).
+3. `prop_sf_bit_is_bit31` — X↔W swap of identical numbers changes only bit 31 (differential invariant).
+4. `prop_reloc_is_condbr19_with_symbol` — result carries a CondBr19 relocation whose symbol/addend mirror the operand (reference, across every `get_symbol`-accepted kind).
+5. `prop_rejects_invalid_operands` — bad operand types / too-few operands → `Err` (negative contract).
+6. `prop_sp_silently_aliased_to_xzr` — characterization pinning BUG-1 (see below).
+
+## Bugs Found
+
+### BUG-1 (High): `encode_cbz`/`encode_cbnz` silently accept SP/WSP, aliased to XZR/WZR
+`cbz sp, <target>` encodes bit-identically to `cbz xzr, <target>` (Rt=31=XZR,
+sf=1); `cbz wsp` ≡ `cbz wzr` (sf=0); same for CBNZ. Per the ARM ARM there is
+**no SP-using form** of CBZ/CBNZ, so these must be rejected. Instead a branch
+intended to test the stack pointer is silently mis-assembled into a branch on
+the *zero* register (CBZ on XZR is unconditionally taken). Root cause: the
+shared `get_reg`→`parse_reg_num` maps `sp`/`wsp`→31 (correct for SP-aware ops,
+wrong for every XZR-only instruction) and `encode_cbz` does no width/SP check.
+Same defect family as `encode_mul`/`encode_div`/`encode_logical`.
+
+- **Report:** `pbt-out/bug_reports/encode_cbz_sp_operand_silently_accepted_as_xzr.md`
+- **Repro (property):** `cargo test --lib prop_encode_cbz_tests::prop_sp_silently_aliased_to_xzr -- --nocapture`
+- **Evidence:** `cbz sp,target -> Ok(.. 0xB400001F ..)` (== `cbz xzr,target`); Rt field = 31.
+- **Suggested fix:** add a `get_reg_no_sp` helper and route `encode_cbz` (and
+  the rest of the XZR-only encoders) through it; then flip the property's
+  `is_ok()` assertions to `is_err()`.
+
+---
+
