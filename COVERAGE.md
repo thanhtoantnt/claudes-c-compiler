@@ -137,3 +137,45 @@ The plain unshifted path is correct (Property F).
 - **Sibling:** `encode_cmp_lsl12_immediate_silent_truncation.md` (same root cause).
 - **Root cause:** `encode_add_sub` explicit-shift immediate branch (`data_processing.rs`).
 - **Suggested fix:** validate `imm_val > 0xFFF` before masking in the `explicit_shift` branch — a single fix closes the bug for `encode_cmn`, `encode_cmp`, and every other caller that forwards a trailing `lsl #12` into `encode_add_sub`.
+
+---
+
+# PBT Coverage — `encode_sbc`
+
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_sbc`
+**Suite:** inline `proptest!` block in `mod tests` (5 pass, 1 failing bug reproducer)
+
+## Function under test
+
+```rust
+pub(crate) fn encode_sbc(operands: &[Operand], set_flags: bool) -> Result<EncodeResult, String> {
+    let (rd, is_64) = get_reg(operands, 0)?;
+    let (rn, _) = get_reg(operands, 1)?;
+    let (rm, _) = get_reg(operands, 2)?;
+    let sf = sf_bit(is_64);
+    let s = if set_flags { 1u32 } else { 0 };
+    let word = ((sf << 31) | (1 << 30) | (s << 29) | (0b11010000 << 21) | (rm << 16)) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+```
+
+## Properties
+
+| # | Property | Oracle | Result |
+|---|----------|--------|--------|
+| A | `sbc_matches_armv8_reference` | reference (literal-spec) — word == independent rebuild of `sf 1 S 11010000 Rm 000000 Rn Rd` across all (rd,rn,rm,width,set_flags) | ✅ pass |
+| B | `sbc_fixed_fields` | structural — op bit [30]=1, add/sub-with-carry opcode [28:21]=`0b11010000`, imm6 [15:10]=0 fixed | ✅ pass |
+| C | `sbc_register_fields_and_width` | field placement — Rd[4:0]/Rn[9:5]/Rm[20:16] round-trip; sf[31] tracks W→0/X→1 | ✅ pass |
+| D | `sbc_s_bit_tracks_set_flags` | differential — `SBC`(S=0) ⊕ `SBCS`(S=1) == `1<<29`; only bit 29 differs | ✅ pass |
+| E | `sbc_vs_adc_only_op_bit_differs` | differential — `SBC` ⊕ `ADC` == `1<<30` for identical operands + set_flags (ADC op=0, SBC op=1) | ✅ pass |
+
+| F | `sbc_rejects_mixed_width_operands` | negative contract — all operands must share the same W/X width | ❌ fail |
+
+## Findings
+
+### BUG-1: `encode_sbc` silently accepts mixed-width operands
+
+`encode_sbc` derives `sf` from `Rd` and discards the width flags for `Rn`/`Rm`, so inputs like `sbc x0, w1, x2` return `Ok` and are encoded as if the source were `x1`. ARM requires one shared operand width for `SBC`/`SBCS`; assemblers should reject operand-size mismatch.
+
+- **Report:** `pbt-out/bug_reports/encode_sbc_silent_mixed_width.md`
+- **Suggested fix:** compare the `is_64` flags returned by `get_reg` for all three operands and return `Err` when they differ.

@@ -2853,9 +2853,26 @@ mod tests {
             let imm_third = vec![xreg(rd), xreg(rn), Operand::Imm(bad_imm)];
             prop_assert!(encode_sbc(&imm_third, false).is_err());
         }
+        // 6. NEGATIVE CONTRACT: all SBC operands must share the same register width.
+        // The encoder currently derives sf from Rd and discards the width flags
+        // for Rn/Rm, so mixed W/X operands are silently re-encoded as the Rd width.
+        #[test]
+        fn sbc_rejects_mixed_width_operands(
+            rd in 0u32..=30, rn in 0u32..=30, rm in 0u32..=30, set_flags in any::<bool>(),
+        ) {
+            let cases = [
+                vec![xreg(rd), Operand::Reg(format!("w{}", rn)), xreg(rm)],
+                vec![xreg(rd), xreg(rn), Operand::Reg(format!("w{}", rm))],
+                vec![Operand::Reg(format!("w{}", rd)), xreg(rn), Operand::Reg(format!("w{}", rm))],
+            ];
+            for ops in cases {
+                prop_assert!(
+                    encode_sbc(&ops, set_flags).is_err(),
+                    "encode_sbc should reject mixed-width operands: {:?}", ops
+                );
+            }
+        }
     }
-
-    // ── encode_bic (BIC = AND with N=1, i.e. AND NOT) ──────────────────────
     // ARMv8 logical (shifted register): sf opc shift 01010 N Rm imm6 Rn Rd
     //   BIC = opc=00, N=1 (bit 21). Distinct from AND (opc=00,N=0), ORR (01,0),
     //   EOR (10,0), ORN (01,1), EON (10,1), BICS (11,1).
@@ -4509,6 +4526,119 @@ mod tests {
         ) {
             let ops = vec![xreg(rd), xreg(rn), xreg(rm), xreg(ra)];
             prop_assert!(encode_umaddl(&ops).is_err());
+        }
+    }
+
+    // ── encode_sbc: SBC/SBCS Rd, Rn, Rm (subtract with carry) ──────────────
+    // Oracle: reference (literal-spec) encoding from the ARMv8 ARM.
+    // "Add/subtract (with carry)" group:  sf 1 S 11010000 Rm 000000 Rn Rd
+    //   bit 31 = sf           bit 30 = 1 (op: subtract)        bit 29 = S
+    //   bits 28:21 = 11010000  bits 20:16 = Rm   bits 15:10 = 000000 (imm6, fixed 0)
+    //   bits 9:5 = Rn          bits 4:0 = Rd
+    //   SBC = set_flags=false -> S=0 ;  SBCS = set_flags=true -> S=1.
+    //   Differs from ADC (op=0) ONLY in bit 30.
+    fn sbc_ref(rd: u32, rn: u32, rm: u32, is_64: bool, set_flags: bool) -> u32 {
+        let sf = if is_64 { 1u32 } else { 0 };
+        let s = if set_flags { 1u32 } else { 0 };
+        (sf << 31) | (1u32 << 30) | (s << 29) | (0b11010000u32 << 21)
+            | (rm << 16) | (rn << 5) | rd
+    }
+
+    proptest! {
+        // 1. Reference / differential match: every valid (rd, rn, rm, width,
+        //    set_flags) encodes to exactly the ARMv8 SBC/SBCS word rebuilt from
+        //    the bit-level spec. Strongest spec check (no input is an immediate,
+        //    shift, lane, or relocation field, so no truncation concern).
+        #[test]
+        fn sbc_matches_armv8_reference(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            is_64 in any::<bool>(),
+            set_flags in any::<bool>(),
+        ) {
+            let mk = |n: u32| if is_64 { xreg(n) } else { wreg(n) };
+            let ops = vec![mk(rd), mk(rn), mk(rm)];
+            let w = expect_word(encode_sbc(&ops, set_flags));
+            prop_assert_eq!(w, sbc_ref(rd, rn, rm, is_64, set_flags));
+        }
+
+        // 2. Fixed fields: regardless of operands, the op bit (bit 30) is 1,
+        //    the add/sub-with-carry opcode (bits 28:21) is 11010000, and the
+        //    imm6 field (bits 15:10) is hardwired to 0 per the ARMv8 spec.
+        #[test]
+        fn sbc_fixed_fields(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            is_64 in any::<bool>(),
+            set_flags in any::<bool>(),
+        ) {
+            let mk = |n: u32| if is_64 { xreg(n) } else { wreg(n) };
+            let ops = vec![mk(rd), mk(rn), mk(rm)];
+            let w = expect_word(encode_sbc(&ops, set_flags));
+            prop_assert_eq!((w >> 30) & 1, 1);                   // op = subtract
+            prop_assert_eq!((w >> 21) & 0xFF, 0b11010000u32);    // add/sub-with-carry opcode
+            prop_assert_eq!((w >> 10) & 0x3F, 0);                // imm6 fixed to 0
+        }
+
+        // 3. Register field placement + sf width: Rd/Rn/Rm land in bits
+        //    4:0 / 9:5 / 20:16 exactly as supplied, and sf (bit 31) tracks the
+        //    register width (W -> 0, X -> 1) for every operand combination.
+        #[test]
+        fn sbc_register_fields_and_width(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            is_64 in any::<bool>(),
+        ) {
+            let mk = |n: u32| if is_64 { xreg(n) } else { wreg(n) };
+            let ops = vec![mk(rd), mk(rn), mk(rm)];
+            let w = expect_word(encode_sbc(&ops, false));
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+        }
+
+        // 4. S bit tracks set_flags (the SBC vs SBCS distinction): bit 29 is 0
+        //    for SBC and 1 for SBCS, and ONLY bit 29 changes between them.
+        #[test]
+        fn sbc_s_bit_tracks_set_flags(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            is_64 in any::<bool>(),
+        ) {
+            let mk = |n: u32| if is_64 { xreg(n) } else { wreg(n) };
+            let ops = vec![mk(rd), mk(rn), mk(rm)];
+            let sbc  = expect_word(encode_sbc(&ops, false));
+            let sbcs = expect_word(encode_sbc(&ops, true));
+            prop_assert_eq!(s_of(sbc), 0);
+            prop_assert_eq!(s_of(sbcs), 1);
+            // Only bit 29 differs between the two encodings.
+            prop_assert_eq!(sbc ^ sbcs, 1u32 << 29);
+        }
+
+        // 5. Differential vs ADC: with identical operands and identical
+        //    set_flags, SBC and ADC differ ONLY in the op bit (bit 30). This
+        //    is the defining structural distinction between the two
+        //    "add/subtract (with carry)" siblings.
+        #[test]
+        fn sbc_vs_adc_only_op_bit_differs(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            is_64 in any::<bool>(),
+            set_flags in any::<bool>(),
+        ) {
+            let mk = |n: u32| if is_64 { xreg(n) } else { wreg(n) };
+            let ops = vec![mk(rd), mk(rn), mk(rm)];
+            let sbc = expect_word(encode_sbc(&ops, set_flags));
+            let adc = expect_word(encode_adc(&ops, set_flags));
+            prop_assert_eq!(sbc ^ adc, 1u32 << 30);
+            prop_assert_eq!((adc >> 30) & 1, 0);  // ADC op = 0
+            prop_assert_eq!((sbc >> 30) & 1, 1);  // SBC op = 1
         }
     }
 }
