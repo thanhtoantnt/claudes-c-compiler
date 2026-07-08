@@ -7391,3 +7391,116 @@ mod uxth_props {
         }
     }
 }
+
+#[cfg(test)]
+mod uxtb_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+
+    fn expect_word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    // UBFM field extractors (ARMv8): sf 10 100110 N immr imms Rn Rd
+    fn sf_of(w: u32) -> u32   { (w >> 31) & 1 }
+    fn opc_of(w: u32) -> u32  { (w >> 29) & 0x3 }
+    fn op6_of(w: u32) -> u32  { (w >> 23) & 0x3F } // bits 23..28
+    fn n_of(w: u32) -> u32    { (w >> 22) & 1 }
+    fn immr_of(w: u32) -> u32 { (w >> 16) & 0x3F }
+    fn imms_of(w: u32) -> u32 { (w >> 10) & 0x3F }
+    fn rn_of(w: u32) -> u32   { (w >> 5) & 0x1F }
+    fn rd_of(w: u32) -> u32   { w & 0x1F }
+
+    proptest! {
+        // ── encode_uxtb: UXTB <Wd>, <Wn> == UBFM <Wd>, <Wn>, #0, #7 ────────────
+        // All-zero reference constant (sf=0 opc=10 100110 N=0 immr=0 imms=7):
+        //   0x53001C00  — verified vs `llvm-mc-18 --triple=aarch64 --show-encoding`:
+        //     uxtb w5,w7   -> [0xe5,0x1c,0x00,0x53] == 0x53001CE5
+        //     uxtb wzr,wzr -> [0xff,0x1f,0x00,0x53] == 0x53001FFF
+        // with Rn/Rd OR'd into their fields.
+
+        // P1. Reference oracle (differential vs llvm-mc): the encoded word equals
+        //     the spec-derived constant with Rn/Rd placed in their fields.
+        #[test]
+        fn uxtb_reference_encoding(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+        ) {
+            let ops = vec![wreg(rd), wreg(rn)];
+            let w = expect_word(encode_uxtb(&ops));
+            prop_assert_eq!(w, 0x53001C00u32 | (rn << 5) | rd);
+        }
+
+        // P2. Field placement: every fixed opcode bit-group and every register
+        //     field lands exactly where the ARMv8 UBFM encoding dictates.
+        #[test]
+        fn uxtb_field_placement(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+        ) {
+            let ops = vec![wreg(rd), wreg(rn)];
+            let w = expect_word(encode_uxtb(&ops));
+            prop_assert_eq!(sf_of(w), 0);             // 32-bit only
+            prop_assert_eq!(opc_of(w), 0b10);         // UBFM opc
+            prop_assert_eq!(op6_of(w), 0b100110);     // fixed
+            prop_assert_eq!(n_of(w), 0);              // N == sf (UBFM constraint)
+            prop_assert_eq!(immr_of(w), 0);           // UXTB immr == 0
+            prop_assert_eq!(imms_of(w), 7);           // UXTB imms == 7
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // P3. Negative contract: UXTB takes exactly <Wd>, <Wn>; fewer operands
+        //     must be rejected with Err.
+        #[test]
+        fn uxtb_rejects_too_few_operands(
+            n in 0u32..=31,
+        ) {
+            prop_assert!(encode_uxtb(&[]).is_err());
+            prop_assert!(encode_uxtb(&[wreg(n)]).is_err());
+        }
+
+        // P4. Negative contract: a non-register operand in either slot is
+        //     rejected (UXTB takes no immediates / shifts / arrangements).
+        #[test]
+        fn uxtb_rejects_non_register_operands(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            bad_pos in 0u32..=1,
+        ) {
+            let mut ops = vec![wreg(rd), wreg(rn)];
+            ops[bad_pos as usize] = Operand::Imm(5);
+            prop_assert!(encode_uxtb(&ops).is_err());
+        }
+
+        // P5. SPEC BUG — FAILS (width-validation gap). UXTB is a 32-BIT-ONLY
+        //     alias of UBFM; there is no `UXTB Xd, Xn` in the ARMv8 ARM and the
+        //     reference assembler rejects it:
+        //       $ echo 'uxtb x0,x1' | llvm-mc-18 --triple=aarch64
+        //       <stdin>:1:10: error: invalid operand for instruction
+        //     A conforming encoder MUST return Err. Instead `encode_uxtb` derives
+        //     is_64 from the destination and emits 0xD3401C00 | (rn<<5) | rd
+        //     (verified: minimal input rd=rn=0 -> Word(3544194048) == 0xD3401C00),
+        //     which disassembles as `ubfx xN, xM, #0, #8` (== UBFM xN,xM,#0,#7)
+        //     — a different instruction, silently accepting an invalid form.
+        //     (Sibling encoders sxtb/sxth/uxth share this gap; see uxth_props.)
+        #[test]
+        fn uxtb_rejects_64bit_destination_form(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn)]; // uxtb xN, xM -- invalid
+            prop_assert!(
+                encode_uxtb(&ops).is_err(),
+                "UXTB is 32-bit-only; `uxtb x{}, x{}` is architecturally invalid but got {:?}",
+                rd, rn, encode_uxtb(&ops)
+            );
+        }
+    }
+}
