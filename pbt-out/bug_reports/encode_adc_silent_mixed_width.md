@@ -55,3 +55,5 @@ prop_assert!(encode_adc(&[xreg(rd), wreg(rn), xreg(rm)], false).is_err());
 ```
 
 This currently fails because the encoder returns `Ok`.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/6
