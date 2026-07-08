@@ -68,3 +68,5 @@ All other `encode_add_sub` branches are correct for the tested inputs:
 - Relocation modifiers: `:lo12:` → `AddAbsLo12`, `:tprel_lo12_nc:` →
   `TlsLeAddTprelLo12`, `:tprel_hi12:` → `TlsLeAddTprelHi12` with `sh = 1`;
   `imm12` left zero for the linker in all three.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/7
