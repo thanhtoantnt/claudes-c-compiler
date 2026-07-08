@@ -1,6 +1,6 @@
 # Bug Report: `encode_smull` silently accepts SP/WSP operands as zero registers
 
-**Location:** `src/backend/arm/assembler/encoder/data_processing.rs`, function `encode_smull`
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs`, function `encode_smull`
 
 ## Summary
 
@@ -22,10 +22,4 @@ Invalid source is accepted and assembled as a different instruction than written
 
 ## Suggested fix
 
-For multiply/long-multiply instruction classes, reject `sp`/`wsp` before converting to a register number:
-
-```rust
-if reg.eq_ignore_ascii_case("sp") || reg.eq_ignore_ascii_case("wsp") {
-    return Err("smull operands cannot use SP/WSP".to_string());
-}
-```
+For multiply/long-multiply instruction classes, reject `sp`/`wsp` before converting to a register number.

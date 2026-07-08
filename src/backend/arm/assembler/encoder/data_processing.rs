@@ -1100,6 +1100,102 @@ mod tests {
     }
 
     proptest! {
+        // ── encode_smull: SMULL Xd, Wn, Wm -> SMADDL Xd, Wn, Wm, XZR ──────────
+        // Reference constant derived independently from the ARMv8 ARM bit-string
+        // for SMADDL with Ra=XZR (sf=1 op=0 S=0 [28:24]=11011 o1=0 [22:21]=01
+        // o0=0 Ra=11111), Rm=Rn=Rd=0:
+        //   1001 1011 0010 0000 0111 1100 0000 0000 = 0x9B207C00
+        // with Rm/Rn/Rd OR'd into their respective fields.
+
+        // P1. Full-word reference oracle: the encoded word matches the
+        //     spec-derived constant with register numbers placed in their fields.
+        #[test]
+        fn smull_reference_encoding(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let ops = vec![xreg(rd), wreg(rn), wreg(rm)];
+            let w = expect_word(encode_smull(&ops));
+            let expected = 0x9B207C00u32 | (rm << 16) | (rn << 5) | rd;
+            prop_assert_eq!(w, expected);
+        }
+
+        // P2. Field placement: every fixed opcode bit-group and every register
+        //     field lands exactly where the ARMv8 SMADDL encoding dictates.
+        #[test]
+        fn smull_field_placement(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let ops = vec![xreg(rd), wreg(rn), wreg(rm)];
+            let w = expect_word(encode_smull(&ops));
+            prop_assert_eq!(sf_of(w), 1);                       // SMULL is always 64-bit
+            prop_assert_eq!((w >> 21) & 0x3FF, 0b0011011001);   // op0/S/11011/o1/01 fixed bits
+            prop_assert_eq!((w >> 15) & 1, 0);                  // o0 = 0
+            prop_assert_eq!((w >> 10) & 0x1F, 0b11111);         // Ra = 31 (XZR) -> SMULL alias
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // P3. sf is hardcoded to 1: SMULL forces 64-bit output regardless of the
+        //     textual width of the source registers (only the number is read).
+        #[test]
+        fn smull_sf_always_set_regardless_of_source_width(
+            n in 0u32..=30,
+            rn_is_x in any::<bool>(),
+            rm_is_x in any::<bool>(),
+        ) {
+            let rn = if rn_is_x { xreg(n) } else { wreg(n) };
+            let rm = if rm_is_x { xreg(n) } else { wreg(n) };
+            let ops = vec![xreg(n), rn, rm];
+            let w = expect_word(encode_smull(&ops));
+            prop_assert_eq!(sf_of(w), 1);
+        }
+
+        // P4. Negative contract: fewer than three register operands -> Err
+        //     (SMULL requires exactly Xd, Wn, Wm).
+        #[test]
+        fn smull_rejects_too_few_operands(
+            n in 0u32..=30,
+            missing in 1u32..=3,
+        ) {
+            let mut ops = vec![xreg(n), wreg(n), wreg(n)];
+            for _ in 0..missing {
+                ops.pop();
+            }
+            prop_assert!(encode_smull(&ops).is_err());
+        }
+
+        // P5. Negative contract: a non-register operand in any of the three
+        //     positions is rejected (SMULL takes no immediates / shifts).
+        #[test]
+        fn smull_rejects_non_register_operands(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            bad_pos in 0u32..3,
+        ) {
+            let mut ops = vec![xreg(rd), wreg(rn), wreg(rm)];
+            ops[bad_pos as usize] = Operand::Imm(5);
+            prop_assert!(encode_smull(&ops).is_err());
+        }
+
+        // P6. Negative contract (spec): SMULL <Xd>, <Wn>, <Wm> requires a 64-bit
+        //     destination (ARMv8 ARM, SMADDL alias). A W destination has no valid
+        //     encoding and MUST be rejected with Err.
+        #[test]
+        fn smull_rejects_wrong_width_destination(
+            n in 0u32..=30,
+        ) {
+            let ops = vec![wreg(n), wreg(n), wreg(n)]; // smull w0, w1, w2
+            prop_assert!(encode_smull(&ops).is_err());
+        }
+    }
+
+    proptest! {
         // 1. ADD Xd, Xn, #imm (0..=0xFFF, unshifted): every fixed field and every
         //    register/immediate field lands exactly where the ARMv8 spec dictates.
         #[test]
