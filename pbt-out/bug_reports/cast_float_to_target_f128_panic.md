@@ -56,3 +56,5 @@ proptest! {
 ## Found by
 
 pi-pbt autonomous run (function-scoped prompt, 7 min, 56 turns).
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/4
