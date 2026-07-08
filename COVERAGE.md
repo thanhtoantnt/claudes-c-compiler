@@ -92,3 +92,34 @@ disassembles as `ubfx xN, xM, #0, #16` — a different instruction. See
 
 Note: this is a **distinct** defect from the `sxth` mixed-width bug — UXTH has
 no 64-bit form at all, whereas SXTH's 64-bit form is legal.
+
+## `encode_rev16` — bitfield.rs (NO FINDING; clean pass)
+
+**Target:** `pub(crate) fn encode_rev16(&[Operand]) -> Result<EncodeResult, String>`
+in `src/backend/arm/assembler/encoder/bitfield.rs`.
+
+**Module:** `prop_encode_rev16_tests` (appended to `bitfield.rs`). 5 properties,
+all passing at `PROPTEST_CASES=2000`:
+
+| Property | Oracle | Result |
+|---|---|---|
+| `prop_field_placement` | Structural — pins sf[31], bit30=1/bit29=0, bits[28:21]=0xD6, bits[20:16]=0, opc[15:10]=000001, Rn[9:5], Rd[4:0] | pass |
+| `prop_matches_arm_reference` | Reference word — `0xDAC0_0400` (X) / `0x5AC0_0400` (W) `\| (rn<<5) \| rd` | pass |
+| `prop_width_changes_only_sf` | Register-width differential — X vs W XOR == `MASK_SF` only | pass |
+| `prop_xor_rev_confined_to_opc` | Differential vs `encode_rev` — XOR confined to opc[15:10], equals `(rev_opc ^ 0b000001)<<10` | pass |
+| `prop_rejects_malformed_operands` | Negative contract — missing/non-register operands → Err | pass |
+
+**Verdict — no defect.** `encode_rev16` is correct. Per the ARM ARM
+(Data-processing (1 source)), REV16 uses the **same** `opc = 000001` for both
+the 32-bit (W) and 64-bit (X) forms, so the register width changes **only**
+bit `sf[31]`. The encoder does exactly that. This is the key contrast with
+`encode_rev32` (which has a real bug: it hardcodes sf=1 / opc=000010 and
+discards the width). The `prop_width_changes_only_sf` property is precisely
+what distinguishes the correct REV16 from the broken REV32 — for REV32 the
+analogous invariant fails because opc must swap with width.
+
+**Note on negative contract:** a *trailing extra* operand (3 operands fed to a
+2-operand encoder) is silently ignored because the function only indexes
+`operands[0..2]`. This is benign and common in this assembler, so it is not
+asserted as an error; only genuinely missing/mistyped operands are required to
+return `Err`.

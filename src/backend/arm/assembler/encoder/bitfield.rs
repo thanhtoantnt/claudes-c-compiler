@@ -2814,3 +2814,155 @@ mod prop_encode_rev32_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_rev16_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── REV16 encoding (ARM ARM, Data-processing (1 source)) ──────────────
+    //
+    // REV16 <Rd>, <Rn>   (Rd/Rn are W or X — available in BOTH widths)
+    //   sf 1 0 11010110 00000 opc[15:10] Rn Rd
+    //
+    // Unlike REV / REV32 (whose opc SWAPS with sf: REV uses 000010/000011
+    // and REV32 mirrors it), REV16 uses the SAME opc = 000001 for both the
+    // 32-bit and 64-bit forms. The width therefore changes ONLY bit sf[31].
+    //
+    // Reference base words (Rn=0, Rd=0), built from the field layout above:
+    //   64-bit (X), sf=1: 0xDAC0_0400
+    //   32-bit (W), sf=0: 0x5AC0_0400
+    const BASE_64: u32 = 0xDAC0_0400;
+    const BASE_32: u32 = 0x5AC0_0400;
+
+    const MASK_SF: u32 = 0x8000_0000;
+    const MASK_30_29: u32 = 0b11 << 29; // 0x6000_0000
+    const MASK_28_21: u32 = 0xFF << 21; // 0x1FE0_0000
+    const MASK_20_16: u32 = 0x1F << 16; // 0x001F_0000
+    const MASK_OPC: u32 = 0x3F << 10; // bits [15:10]
+    const MASK_RN: u32 = 0x1F << 5; // bits [9:5]
+    const MASK_RD: u32 = 0x1F; // bits [4:0]
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word(encode_rev16(ops))
+    }
+
+    fn reg_name(num: u32, is_64: bool) -> String {
+        if is_64 { format!("x{}", num) } else { format!("w{}", num) }
+    }
+
+    /// ARM ARM reference word for REV16, both widths. Only bit sf differs.
+    fn ref_rev16(is_64: bool, rn: u32, rd: u32) -> u32 {
+        let base = if is_64 { BASE_64 } else { BASE_32 };
+        base | (rn << 5) | rd
+    }
+
+    proptest! {
+        // Property A — structural / field-placement oracle.
+        // Every fixed bit lands where the ARM ARM mandates: bit30=1,
+        // bit29=0, bits[28:21]=11010110 (0xD6), bits[20:16]=0; the opc field
+        // [15:10] is 000001 for BOTH widths (the defining correctness point
+        // for REV16); sf tracks the destination register width; and Rn/Rd
+        // reconstruct exactly to the inputs.
+        #[test]
+        fn prop_field_placement(
+            is_64 in any::<bool>(),
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+        ) {
+            let ops = vec![Operand::Reg(reg_name(rd, is_64)), Operand::Reg(reg_name(rn, is_64))];
+            let w = enc(&ops);
+            prop_assert_eq!(w & MASK_SF, if is_64 { MASK_SF } else { 0 }, "sf must track width");
+            prop_assert_eq!(w & MASK_30_29, 0b10 << 29, "bit30=1, bit29=0");
+            prop_assert_eq!(w & MASK_28_21, 0xD6 << 21, "bits[28:21] must be 11010110");
+            prop_assert_eq!(w & MASK_20_16, 0, "bits[20:16] must be 0");
+            prop_assert_eq!((w & MASK_OPC) >> 10, 0b000001, "opc must be 000001 (both widths)");
+            prop_assert_eq!((w & MASK_RN) >> 5, rn, "Rn reconstruct");
+            prop_assert_eq!(w & MASK_RD, rd, "Rd reconstruct");
+        }
+
+        // Property B — reference oracle against the full ARM ARM word.
+        // The emitted word must equal the hand-derived base for the given
+        // width OR'd with (Rn<<5)|Rd. This pins every bit and confirms the
+        // encoder varies only sf with width (the correct REV16 behavior —
+        // contrast REV32, which incorrectly hardcodes a single width).
+        #[test]
+        fn prop_matches_arm_reference(
+            is_64 in any::<bool>(),
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+        ) {
+            let ops = vec![Operand::Reg(reg_name(rd, is_64)), Operand::Reg(reg_name(rn, is_64))];
+            let got = enc(&ops);
+            let want = ref_rev16(is_64, rn, rd);
+            let w = if is_64 { 'x' } else { 'w' };
+            prop_assert_eq!(got, want,
+                "REV16 {}{}, {}{} (is_64={}): expected {:#010X}, got {:#010X}",
+                w, rd, w, rn, is_64, want, got);
+        }
+
+        // Property C — register-width differential.
+        // REV16 must change ONLY bit sf[31] when switching between X and W
+        // registers of the same number, because opc is identical for both
+        // widths. (This invariant would FAIL for REV/REV32, whose opc swaps
+        // with width — it passing here is precisely what makes REV16 correct.)
+        #[test]
+        fn prop_width_changes_only_sf(
+            num in 0u32..=30u32,
+            rn in 0u32..=30u32,
+        ) {
+            let ops64 = vec![Operand::Reg(format!("x{}", num)), Operand::Reg(format!("x{}", rn))];
+            let ops32 = vec![Operand::Reg(format!("w{}", num)), Operand::Reg(format!("w{}", rn))];
+            let diff = enc(&ops64) ^ enc(&ops32);
+            prop_assert_eq!(diff, MASK_SF, "X vs W must differ only in bit sf[31]");
+        }
+
+        // Property D — differential oracle vs the sibling REV encoder.
+        // REV16 and REV share the Data-processing(1 source) encoding template
+        // and differ ONLY in the opc[15:10] field: REV uses 000011 (64-bit) /
+        // 000010 (32-bit), REV16 uses 000001 (both). Feeding identical operands
+        // must therefore produce words whose XOR is confined to bits[15:10]
+        // and equal to (rev_opc ^ 0b000001) << 10. sf, Rn, Rd are all unchanged.
+        #[test]
+        fn prop_xor_rev_confined_to_opc(
+            is_64 in any::<bool>(),
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+        ) {
+            let ops = vec![Operand::Reg(reg_name(rd, is_64)), Operand::Reg(reg_name(rn, is_64))];
+            let diff = enc(&ops) ^ word(encode_rev(&ops));
+            let rev_opc: u32 = if is_64 { 0b000011 } else { 0b000010 };
+            let expected = ((rev_opc ^ 0b000001) & 0x3F) << 10;
+            prop_assert_eq!(diff & !MASK_OPC, 0, "REV16 ^ REV must touch only bits[15:10]");
+            prop_assert_eq!(diff, expected, "opc XOR must equal (rev_opc ^ 000001) << 10");
+        }
+
+        // Property E — malformed-operands negative contract (should pass).
+        // REV16 requires two register operands (Rd, Rn) and reads exactly
+        // operands[0..2]; a missing operand or a non-register in either fixed
+        // slot must yield Err rather than a silently-wrong word. (A trailing
+        // *extra* operand is deliberately not asserted here: the encoder only
+        // indexes the first two slots, so surplus operands are ignored.)
+        #[test]
+        fn prop_rejects_malformed_operands(
+            kind in prop_oneof![Just(0u8), Just(1u8), Just(2u8), Just(3u8)],
+            n in 0u32..=30u32,
+            v in -16i64..=16i64,
+        ) {
+            let r = match kind {
+                0 => encode_rev16(&[]),
+                1 => encode_rev16(&[Operand::Reg(reg_name(n, true))]),
+                2 => encode_rev16(&[Operand::Imm(v), Operand::Reg("x1".into())]),
+                _ => encode_rev16(&[Operand::Reg(reg_name(n, true)), Operand::Imm(v)]),
+            };
+            prop_assert!(r.is_err(), "expected Err, got {:?}", r);
+        }
+    }
+}
