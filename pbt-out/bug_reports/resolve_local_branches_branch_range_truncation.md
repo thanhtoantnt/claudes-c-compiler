@@ -2,7 +2,6 @@
 
 **File:** `src/backend/arm/assembler/elf_writer.rs`
 **Function:** `ElfWriter::resolve_local_branches`
-**Found by:** property-based test `prop_branch_out_of_range_must_not_silently_truncate`
 **Severity:** High (silent miscompilation — wrong branch target, no diagnostic)
 
 ## Summary

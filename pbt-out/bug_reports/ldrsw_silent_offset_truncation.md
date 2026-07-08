@@ -3,7 +3,6 @@
 **File:** `src/backend/arm/assembler/encoder/load_store.rs`
 **Function:** `encode_ldrsw` — `Operand::Mem { base, offset }` arm
 **Severity:** High (silent mis-compilation: wrong machine code emitted with no diagnostic)
-**Found by:** property `prop_encode_ldrsw_tests::prop_out_of_range_mem_offset_rejected` (fails)
 
 ## Summary
 

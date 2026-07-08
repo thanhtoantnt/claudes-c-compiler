@@ -2,8 +2,6 @@
 
 **Function:** `src/backend/arm/assembler/encoder/compare_branch.rs` → `encode_branch`
 **Severity:** Medium (silent acceptance of invalid branch forms → spurious / mis-targeted relocation)
-**Found by:** `prop_encode_branch_tests::prop_symbol_forwarding_all_accepted_kinds` (passing
-characterization) + evidence probe.
 
 ## Summary
 

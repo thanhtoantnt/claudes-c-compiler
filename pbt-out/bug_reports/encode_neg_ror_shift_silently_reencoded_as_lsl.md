@@ -2,7 +2,6 @@
 
 **File:** `src/backend/arm/assembler/encoder/data_processing.rs`
 **Function:** `encode_neg` (NEG = alias of `SUB Rd, XZR, Rm [, shift]`)
-**Found by:** property-based test `data_processing::tests::neg_rejects_ror_shift`
 
 ## Defect
 

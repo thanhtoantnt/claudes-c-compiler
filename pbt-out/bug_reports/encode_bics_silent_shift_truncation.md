@@ -2,7 +2,6 @@
 
 **Function:** `encode_bics` in `src/backend/arm/assembler/encoder/data_processing.rs`
 **Severity:** Low–Medium (produces an unintended, semantically-different instruction with no diagnostic)
-**Discovered by:** property-based test `bics_props::bics_rejects_oversized_shift` (FAILING)
 
 ## Summary
 

@@ -1,7 +1,6 @@
 # Bug — `encode_add_sub` silently truncates 64-bit shifted-register LSL (`imm6`)
 
 **Target:** `src/backend/arm/assembler/encoder/data_processing.rs`, `encode_add_sub` (shifted-register branch)
-**Found by:** property `tests::xreg_lsl_shift_above_63_must_be_rejected` (proptest, same file).
 **Severity:** high — produces a *valid-but-wrong* encoding with no diagnostic.
 
 ## Where

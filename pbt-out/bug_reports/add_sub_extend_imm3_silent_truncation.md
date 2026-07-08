@@ -1,7 +1,6 @@
 # Bug — `encode_add_sub` silently truncates extended-register shift (`imm3`)
 
 **Target:** `src/backend/arm/assembler/encoder/data_processing.rs`, `encode_add_sub` (extended-register branch)
-**Found by:** property `tests::extend_amount_above_7_must_be_rejected` (proptest, same file).
 **Severity:** high — produces a *valid-but-wrong* encoding with no diagnostic.
 
 ## Where

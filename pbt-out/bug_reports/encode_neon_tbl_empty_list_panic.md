@@ -3,7 +3,6 @@
 - **File:** `src/backend/arm/assembler/encoder/neon.rs`
 - **Function:** `encode_neon_tbl`
 - **Severity:** Medium (abort/crash instead of graceful error; reachable via `pub(crate)`)
-- **Found by:** property `tbl_pbt_tests::prop_empty_list_does_not_panic`
 
 ## Summary
 

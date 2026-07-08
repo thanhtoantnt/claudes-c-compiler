@@ -3,7 +3,6 @@
 **File:** `src/backend/arm/assembler/encoder/load_store.rs`
 **Function:** `encode_adr`
 **Severity:** High (silent mis-compilation — wrong PC-relative address, no diagnostic)
-**Found by:** property-based test `prop_encode_adr_tests::prop_out_of_range_immediate_rejected`
 
 ## Summary
 

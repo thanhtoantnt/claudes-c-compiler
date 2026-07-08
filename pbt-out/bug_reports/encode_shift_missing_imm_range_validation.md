@@ -1,7 +1,6 @@
 # Bug — `encode_shift` immediate form lacks shift-amount range validation
 
 **Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_shift`
-**Found by:** property `shift_immediate_out_of_range_never_returns_ok` (proptest).
 
 ## One-sentence summary
 The immediate-shift branch of `encode_shift` never validates the `#imm` amount, so an

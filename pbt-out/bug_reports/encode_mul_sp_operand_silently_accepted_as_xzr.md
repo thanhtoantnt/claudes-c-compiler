@@ -2,7 +2,6 @@
 
 **Severity:** High (silent miscompilation — wrong instruction emitted with no error)
 **Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_mul`
-**Found by:** Property-based testing of `encode_mul` (characterization test + spec analysis)
 **Category:** Silent acceptance of architecturally-undefined operand / no range validation
 
 ## Summary

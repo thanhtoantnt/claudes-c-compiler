@@ -3,7 +3,6 @@
 **File:** `src/backend/arm/assembler/encoder/load_store.rs`
 **Function:** `encode_ldtr_sized(operands, is_load, size)`
 **Severity:** High — wrong machine code emitted with no diagnostic
-**Found by:** property `prop_out_of_range_imm9_is_rejected` (expected-fail negative contract)
 
 ## Summary
 

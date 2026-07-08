@@ -6,9 +6,6 @@
 **Severity:** High (silent miscompilation — emits a valid-looking but *wrong*
 instruction word instead of an assembler error).
 
-**Found by:** property `prop_encode_ldr_str_tests::prop_out_of_range_offset_is_rejected`
-(minimal failing input: `excess = 1, negative = false` → offset `32761`).
-
 ---
 
 ## Summary

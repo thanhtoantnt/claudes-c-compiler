@@ -2,7 +2,6 @@
 
 **Target:** `src/backend/arm/assembler/encoder/load_store.rs` → `encode_ldur_stur(operands, is_load, op2_bits)`
 **Severity:** Medium (silent mis-assembly; wrong code emitted with no diagnostic)
-**Found by:** property `prop_encode_ldur_stur_tests::prop_out_of_range_imm9_is_rejected` (failing)
 
 ## Summary
 

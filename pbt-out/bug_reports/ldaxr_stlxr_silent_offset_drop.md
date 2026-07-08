@@ -3,7 +3,6 @@
 **File:** `src/backend/arm/assembler/encoder/load_store.rs`
 **Function:** `encode_ldaxr_stlxr(operands, is_load, forced_size)`
 **Severity:** High — wrong machine code emitted with no diagnostic
-**Found by:** property `prop_nonzero_offset_rejected` (expected-fail negative contract)
 
 ## Summary
 
