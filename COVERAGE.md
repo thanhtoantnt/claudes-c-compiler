@@ -182,3 +182,46 @@ operand validation gap exists here (unlike MUL/SMULL) because all three operands
 flow through `get_reg`, which rejects non-register/out-of-range operands; the
 only effect of passing `sp`/`xzr` is the architecturally-valid encoding of
 register 31 = XZR.
+
+---
+
+# PBT Coverage — `encode_cond_branch`
+
+**Target:** `src/backend/arm/assembler/encoder/compare_branch.rs` → `encode_cond_branch`
+**Result:** 7/7 properties pass. **No bug found.** Encoding is spec-correct.
+
+## What the function does
+Encodes the AArch64 conditional branch `B.<cond> <target>` (ARM ARM C5.6.6):
+```
+word  = (0b01010100 << 24) | encode_cond(cond)   // imm19 [23:5] left 0 for the linker
+result = WordWithReloc { word, reloc: CondBr19(symbol, addend) }
+```
+i.e. `0101 0100 | imm19 | 0[4] | cond[3:0]`. `encode_cond` lowercases its input, so
+condition codes are matched case-insensitively; `get_symbol` resolves the branch target
+into a `(symbol, addend)` pair forwarded into a `CondBr19` relocation. The `imm19` offset
+is intentionally left zero — the linker patches it.
+
+## Properties verified (module `prop_encode_cond_branch_tests`)
+1. `prop_opcode_structure_and_fields` — opcode byte `0x54` in [31:24], imm19 field [23:5]
+   zero, o0 bit [4] zero, cond in [3:0]; word == `OPCODE | cond` exactly (reference oracle).
+2. `prop_cond_field_matches_table` — every name in the canonical cond table (incl. `al`/`nv`
+   edges) round-trips to its 4-bit value.
+3. `prop_aliases_encode_identically` — carry aliases `cs`/`hs` and `cc`/`lo` are bit-identical
+   (differential).
+4. `prop_reloc_is_condbr19_with_symbol` — `CondBr19` relocation with exact symbol/addend
+   forwarding across every operand kind `get_symbol` accepts.
+5. `prop_unknown_condition_rejected` — classifier/negative contract: arbitrary lowercase tokens
+   are accepted iff present in the cond table; unknown → `Err`.
+6. `prop_rejects_non_symbol_operands` — negative contract: every operand kind `get_symbol`
+   rejects (Imm/Mem*/Shift/Extend/Expr/RegArrangement/RegLane/RegList…) → `Err`; no silent
+   encoding of an invalid branch target.
+7. **`prop_condition_is_case_insensitive`** (new) — locks the case-folding contract: `EQ`/`eq`/`Eq`
+   all encode to a bit-identical word. Closes the one gap the lowercase-only generators above
+   could not reach (`encode_cond`'s `to_lowercase()` + the mnemonic dispatcher's pre-lowering).
+
+## Bugs Found
+None. The core encoding, condition mapping (incl. aliases and `al`/`nv`), imm19-zero linker
+contract, and `CondBr19` symbol/addend forwarding are all correct. The one non-trivial behavior
+beyond the structural oracle — case-insensitive condition matching — is intended
+(`to_lowercase()` is explicit, and consistent with the `b.<cond>` dispatcher which lowers the
+whole mnemonic first) and is now pinned by Property 7 rather than left implicit.

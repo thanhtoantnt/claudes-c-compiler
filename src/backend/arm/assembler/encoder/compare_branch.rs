@@ -864,6 +864,16 @@ mod prop_encode_cond_branch_tests {
         word_of(encode_cond_branch(cond, &[op.clone()]))
     }
 
+    /// Re-spell a (lowercase) condition code in a chosen ASCII case.
+    ///   mode 0 → all upper ("EQ"), mode 1 → identity ("eq"), mode ≥2 → title ("Eq").
+    fn cased(s: &str, mode: usize) -> String {
+        s.chars().enumerate().map(|(i, c)| match mode {
+            0 => c.to_ascii_uppercase(),
+            1 => c,
+            _ => if i == 0 { c.to_ascii_uppercase() } else { c },
+        }).collect()
+    }
+
     /// Mirrors `get_symbol`'s forwarding table: every operand kind it accepts
     /// and the (symbol, addend) the encoder must forward into the relocation.
     fn accepted_operand_and_expected(
@@ -1011,6 +1021,28 @@ mod prop_encode_cond_branch_tests {
             prop_assert!(
                 encode_cond_branch("eq", &[op]).is_err(),
                 "encode_cond_branch should reject this operand as a branch target"
+            );
+        }
+
+        // Property G — case-insensitivity contract. `encode_cond` lowercases its
+        // input, and `encode_instruction` lowercases the whole mnemonic before
+        // dispatching `b.<cond>`, so a condition code is matched regardless of
+        // ASCII case and must yield a bit-identical word for every spelling.
+        // This locks behavior the lowercase-only generators above cannot reach.
+        #[test]
+        fn prop_condition_is_case_insensitive(
+            cond_idx in 0usize..COND_TABLE.len(),
+            sym in "[a-z][a-z0-9_]{0,7}",
+            case_mode in 0usize..3usize,
+        ) {
+            let (cond_name, _) = COND_TABLE[cond_idx];
+            let op = Operand::Symbol(sym);
+            let lower_word = enc(cond_name, &op);
+            let cased_word = enc(&cased(cond_name, case_mode), &op);
+            prop_assert_eq!(
+                cased_word, lower_word,
+                "cond '{}' must encode identically to '{}'",
+                cased(cond_name, case_mode), cond_name
             );
         }
     }
