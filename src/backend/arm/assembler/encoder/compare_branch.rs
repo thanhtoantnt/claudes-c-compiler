@@ -2456,3 +2456,237 @@ mod prop_encode_csetm_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_cinc_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ---- CINC opcode constants (ARM ARM C4.1.66 CSINC; alias C6.2.45 CINC) ----
+    // CINC is an alias: `CINC Rd, Rn, cond` -> `CSINC Rd, Rn, Rn, invert(cond)`.
+    // CSINC = sf 0 0 11010100 Rm cond 0 1 Rn Rd, with Rm fixed equal to Rn.
+    //   [31]    sf        - 1 = 64-bit (X), 0 = 32-bit (W); taken from Rd ONLY
+    //   [30:29] 00        - op=0, S=0
+    //   [28:21] 11010100  - fixed opcode for the conditional-select group
+    //   [20:16] Rm        - == Rn (the alias sets Rm = Rn)
+    //   [15:12] cond      - the INVERTED condition
+    //   [11:10] 01        - o2=0, o1=1 (selects CSINC within the group)
+    //   [9:5]   Rn
+    //   [4:0]   Rd
+    const OPCODE: u32 = 0b11010100u32 << 21; // == 0x1A80_0000, bits [28:21]
+    // Bits that must be ZERO for CINC: [30, 29, 11] (bit 10 is the CSINC marker = 1).
+    const FIXED_ZERO: u32 = (1u32 << 30) | (1u32 << 29) | (1u32 << 11); // == 0x6000_0800
+    // o1 bit [10] must be ONE: this is what distinguishes CSINC from CSEL.
+    const O1_BIT: u32 = 1u32 << 10; // == 0x400
+
+    /// Canonical ARM condition-code table mirroring `encode_cond`.
+    const COND_TABLE: &[(&str, u32)] = &[
+        ("eq", 0), ("ne", 1), ("cs", 2), ("hs", 2), ("cc", 3), ("lo", 3),
+        ("mi", 4), ("pl", 5), ("vs", 6), ("vc", 7), ("hi", 8), ("ls", 9),
+        ("ge", 10), ("lt", 11), ("gt", 12), ("le", 13), ("al", 14), ("nv", 15),
+    ];
+    /// Reverse map: cond value -> canonical name (first spelling). Used to name
+    /// the inverted condition when building the CSINC differential oracle.
+    const COND_NAMES_BY_VAL: [&str; 16] = [
+        "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
+        "hi", "ls", "ge", "lt", "gt", "le", "al", "nv",
+    ];
+
+    fn word_of(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word_of(encode_cinc(ops))
+    }
+
+    prop_compose! {
+        fn arb_gp_reg()(n in 0u32..=30u32, is_64 in any::<bool>()) -> (String, u32) {
+            let name = if is_64 { format!("x{}", n) } else { format!("w{}", n) };
+            (name, n)
+        }
+    }
+
+    proptest! {
+        // Property A - full structural / field-placement oracle.
+        // The encoded word is fully determined: opcode 11010100 in [28:21],
+        // bits [30,29,11] are zero, bit [10] is one (the CSINC marker), sf
+        // tracks Rd's width, Rm==Rn occupy [20:16] and [9:5], the INVERTED
+        // condition occupies [15:12], and Rd occupies [4:0]. Reconstructing
+        // from the fields reproduces the whole word - nothing else is set.
+        #[test]
+        fn prop_opcode_structure_and_fields(
+            (rd_name, rd_num) in arb_gp_reg(),
+            (rn_name, rn_num) in arb_gp_reg(),
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let (cond_name, cond_val) = COND_TABLE[cond_idx];
+            let ops = vec![
+                Operand::Reg(rd_name.clone()),
+                Operand::Reg(rn_name),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            let word = enc(&ops);
+            let inv_cond = cond_val ^ 1;
+
+            // Fixed opcode bits [28:21].
+            prop_assert_eq!(word & OPCODE, OPCODE);
+            // Bits that must be zero for CINC/CSINC.
+            prop_assert_eq!(word & FIXED_ZERO, 0u32);
+            // o1 bit [10] must be one - the CSINC distinguishing bit.
+            prop_assert_eq!(word & O1_BIT, O1_BIT);
+            // sf bit [31] tracks Rd's width.
+            let expected_sf = if rd_name.starts_with('x') { 1u32 } else { 0u32 };
+            prop_assert_eq!((word >> 31) & 1, expected_sf);
+            // Rm [20:16] == Rn [9:5] == Rn register number (alias sets Rm = Rn).
+            prop_assert_eq!((word >> 16) & 0x1F, rn_num);
+            prop_assert_eq!((word >> 5) & 0x1F, rn_num);
+            // Inverted condition [15:12].
+            prop_assert_eq!((word >> 12) & 0xF, inv_cond);
+            // Rd [4:0].
+            prop_assert_eq!(word & 0x1F, rd_num);
+            // Full reconstruction - the word is exactly the OR of its fields.
+            prop_assert_eq!(
+                word,
+                (expected_sf << 31) | OPCODE | O1_BIT | (rn_num << 16)
+                    | (inv_cond << 12) | (rn_num << 5) | rd_num
+            );
+        }
+
+        // Property B - differential: CINC is an alias of CSINC.
+        // `cinc Rd, Rn, cond` MUST encode identically to
+        // `csinc Rd, Rn, Rn, invert(cond)`. This is the defining alias
+        // relationship (ARM ARM C6.2.45) and the strongest available oracle.
+        #[test]
+        fn prop_cinc_equals_csinc_alias(
+            (rd_name, _) in arb_gp_reg(),
+            (rn_name, rn_num) in arb_gp_reg(),
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let (cond_name, cond_val) = COND_TABLE[cond_idx];
+            let inv_name = COND_NAMES_BY_VAL[(cond_val ^ 1) as usize];
+
+            let cinc_ops = vec![
+                Operand::Reg(rd_name.clone()),
+                Operand::Reg(rn_name.clone()),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            let csinc_ops = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name.clone()),
+                Operand::Reg(rn_name), // Rm == Rn
+                Operand::Cond(inv_name.to_string()),
+            ];
+            // Sanity: the csinc oracle itself is internally consistent
+            // (its Rm field really does hold rn_num).
+            let csinc_word = word_of(encode_csinc(&csinc_ops));
+            prop_assert_eq!((csinc_word >> 16) & 0x1F, rn_num);
+            // The alias relationship.
+            prop_assert_eq!(enc(&cinc_ops), csinc_word);
+        }
+
+        // Property C - Rm==Rn invariant (CINC-specific).
+        // Unlike general CSINC (which takes a distinct Rm), CINC always sets
+        // Rm = Rn. Therefore the [20:16] and [9:5] fields must be equal for
+        // EVERY input, and both must equal the Rn register number.
+        #[test]
+        fn prop_rm_equals_rn(
+            (rd_name, _) in arb_gp_reg(),
+            (rn_name, rn_num) in arb_gp_reg(),
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let cond_name = COND_TABLE[cond_idx].0;
+            let ops = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            let word = enc(&ops);
+            let rm = (word >> 16) & 0x1F;
+            let rn = (word >> 5) & 0x1F;
+            prop_assert_eq!(rm, rn);
+            prop_assert_eq!(rm, rn_num);
+        }
+
+        // Property D - condition inversion + complementary pairs.
+        // (1) The cond field always equals encode_cond(c) ^ 1 (LSB-flipped).
+        // (2) Complementary condition pairs (eq/ne, cs/cc, ... al/nv) differ
+        //     ONLY in bit 12: inverting a complement flips just the cond LSB,
+        //     leaving every other field identical.
+        #[test]
+        fn prop_condition_is_inverted(
+            (rd_name, _) in arb_gp_reg(),
+            (rn_name, _) in arb_gp_reg(),
+            k in 0usize..8usize, // pairs (2k, 2k+1)
+        ) {
+            let lo = COND_NAMES_BY_VAL[2 * k];      // value 2k
+            let hi = COND_NAMES_BY_VAL[2 * k + 1];   // value 2k+1
+            let mk = |c: &str| vec![
+                Operand::Reg(rd_name.clone()),
+                Operand::Reg(rn_name.clone()),
+                Operand::Cond(c.to_string()),
+            ];
+            let w_lo = enc(&mk(lo));
+            let w_hi = enc(&mk(hi));
+            // cond field == value ^ 1.
+            prop_assert_eq!((w_lo >> 12) & 0xF, (2 * k as u32) ^ 1);
+            prop_assert_eq!((w_hi >> 12) & 0xF, ((2 * k + 1) as u32) ^ 1);
+            // Complementary inputs differ only in bit 12.
+            prop_assert_eq!(w_lo ^ w_hi, 1u32 << 12);
+        }
+
+        // Property E - negative contract (deterministic enumeration).
+        // CINC is defined ONLY on general-purpose (X/W) registers (ARM ARM
+        // C6.2.45), and the aliased CSINC must NOT carry condition AL or NV
+        // (ARM ARM C4.1.66: cond 1110/1111 is constrained-UNPREDICTABLE; GAS
+        // and llvm-mc reject `cinc Rd, Rn, al|nv`). The encoder must therefore
+        // reject: FP/SIMD register names, reserved al/nv conditions, out-of-
+        // range register numbers, and malformed operand lists. We enumerate
+        // EVERY violation and assert each is rejected so all defects surface.
+        #[test]
+        fn prop_rejects_invalid_operands(case in 0usize..22usize) {
+            let r = Operand::Reg("x0".into());
+            let c = Operand::Cond("eq".into());
+            let result = match case {
+                // --- malformed operand structure (must be rejected) ---
+                0  => encode_cinc(&[]),                                  // no operands
+                1  => encode_cinc(&[r.clone()]),                         // only Rd
+                2  => encode_cinc(&[r.clone(), r.clone()]),              // Rd, Rn, no cond
+                3  => encode_cinc(&[r.clone(), r.clone(), r.clone()]),   // 3rd not a Cond
+                4  => encode_cinc(&[Operand::Imm(0), r.clone(), c.clone()]),        // Rd not a reg
+                5  => encode_cinc(&[r.clone(), Operand::Imm(1), c.clone()]),        // Rn not a reg
+                6  => encode_cinc(&[r.clone(), r.clone(), Operand::Imm(4)]),        // cond is Imm
+                7  => encode_cinc(&[r.clone(), r.clone(), Operand::Symbol("s".into())]), // cond is Symbol
+                // --- out-of-range register numbers (must be rejected) ---
+                8  => encode_cinc(&[Operand::Reg("x32".into()), r.clone(), c.clone()]),
+                9  => encode_cinc(&[r.clone(), Operand::Reg("w99".into()), c.clone()]),
+                // --- FP/SIMD register names in a GP-only instruction ---
+                // (CINC is GP-only; d/s/q/v/h/b must NOT be silently
+                // re-encoded with their numeric index as a GP register.)
+                10 => encode_cinc(&[Operand::Reg("d0".into()), r.clone(), c.clone()]), // Rd is FP
+                11 => encode_cinc(&[Operand::Reg("s1".into()), r.clone(), c.clone()]),
+                12 => encode_cinc(&[r.clone(), Operand::Reg("v2".into()), c.clone()]), // Rn is SIMD
+                13 => encode_cinc(&[r.clone(), Operand::Reg("q3".into()), c.clone()]),
+                14 => encode_cinc(&[Operand::Reg("h4".into()), r.clone(), c.clone()]),
+                15 => encode_cinc(&[r.clone(), Operand::Reg("b5".into()), c.clone()]),
+                // --- reserved conditions al/nv (UNPREDICTABLE aliased CSINC) ---
+                16 => encode_cinc(&[r.clone(), r.clone(), Operand::Cond("al".into())]),
+                17 => encode_cinc(&[r.clone(), r.clone(), Operand::Cond("nv".into())]),
+                // --- reserved condition via case-folded spelling ---
+                18 => encode_cinc(&[r.clone(), r.clone(), Operand::Cond("AL".into())]),
+                19 => encode_cinc(&[r.clone(), r.clone(), Operand::Cond("Nv".into())]),
+                // --- FP reg combined with reserved cond ---
+                20 => encode_cinc(&[Operand::Reg("d0".into()), r.clone(), Operand::Cond("al".into())]),
+                _  => encode_cinc(&[Operand::Reg("v7".into()), Operand::Reg("s9".into()), Operand::Cond("nv".into())]),
+            };
+            prop_assert!(
+                result.is_err(),
+                "encode_cinc should reject case {} (got {:?})",
+                case, result
+            );
+        }
+    }
+}
