@@ -1,3 +1,51 @@
+# PBT Coverage — `encode_cmp`
+
+**Target:** `src/backend/arm/assembler/encoder/compare_branch.rs` → `encode_cmp`
+**Suite:** `prop_encode_cmp_tests` (6 properties; 5 pass, 1 failing bug reproducer)
+
+## Function under test
+
+```rust
+pub(crate) fn encode_cmp(operands: &[Operand]) -> Result<EncodeResult, String> {
+    // CMP Rn, op -> SUBS XZR, Rn, op
+    let mut new_ops = vec![Operand::Reg("xzr".to_string())];
+    new_ops.extend(operands.iter().cloned());
+    let is_32 = if let Some(Operand::Reg(r)) = operands.first() {
+        is_32bit_reg(r)
+    } else { false };
+    if is_32 { new_ops[0] = Operand::Reg("wzr".to_string()); }
+    encode_add_sub(&new_ops, true, true)
+}
+```
+
+## Properties
+
+| # | Property | Oracle | Result |
+|---|----------|--------|--------|
+| A | `prop_cmp_imm_structure` | structural — immediate form `SUBS ZR, Rn, #imm`: sf, op=1, S=1, opcode `10001`, sh=0, imm12 round-trips, Rn, Rd=31 | ✅ pass |
+| B | `prop_cmp_reg_structure` | structural — register form `SUBS ZR, Rn, Rm`: opcode `01011`, shift=0, Rm, imm6=0, Rn, Rd=31 | ✅ pass |
+| C | `prop_width_differs_only_bit31` | differential — `CMP Xn,op` ⊕ `CMP Wn,op` == `1<<31`; width driven solely by `is_32bit_reg(operands[0])` | ✅ pass |
+| D | `prop_cmp_xor_cmn_is_bit30` | differential — `CMP` ⊕ `CMN` (sibling) == `1<<30`; subtract vs add | ✅ pass |
+| E | `prop_rejects_unencodable_immediate` | negative contract — unshifted `imm` > 0xFFF (and not 0x1000-multiple) returns `Err`, not truncated | ✅ pass |
+| F | `prop_rejects_large_imm_with_explicit_shift` | negative contract — `#imm, lsl #12` with imm > 0xFFF must be rejected | ❌ fail |
+
+## Findings
+
+### BUG-1: `encode_cmp` silently truncates an oversized `lsl #12` immediate
+
+`CMP Rn, #imm, lsl #12` (forwarded verbatim by `encode_cmp` to `encode_add_sub`)
+is masked into the 12-bit `imm12` field with `& 0xFFF` instead of being
+range-validated. The comment in `encode_add_sub` even says the immediate "must
+fit in 12 bits", but the code masks. e.g. `cmp w0, #4097, lsl #12` assembles as
+`cmp w0, #1, lsl #12` (since `4097 & 0xFFF == 1`) instead of returning `Err`.
+GAS/LLVM-MC reject this input. The plain unshifted path is correct (Property E).
+
+- **Report:** `pbt-out/bug_reports/encode_cmp_lsl12_immediate_silent_truncation.md`
+- **Root cause:** `encode_add_sub` explicit-shift immediate branch (`data_processing.rs`).
+- **Suggested fix:** validate `imm_val > 0xFFF` before masking in the `explicit_shift` branch (then `encode_cmp` propagates the `Err`).
+
+---
+
 # PBT Coverage — `encode_bl`
 
 **Target:** `src/backend/arm/assembler/encoder/compare_branch.rs` → `encode_bl`

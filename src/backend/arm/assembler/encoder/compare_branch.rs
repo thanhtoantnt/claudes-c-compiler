@@ -4168,3 +4168,191 @@ mod prop_encode_ret_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_cmp_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ---- CMP Rn, op  ==  SUBS ZR, Rn, op  (ARM ARM C4.1.63, flags-setting subtract) ----
+    // The function prepends the zero register (XZR or WZR) as Rd and delegates to
+    // encode_add_sub with is_sub=true, set_flags=true. The defining invariants:
+    //   op = 1 (subtract), S = 1 (set flags), Rd = 31 (the zero register).
+    //
+    // Immediate form:  sf 1 1 10001 sh imm12  Rn  11111
+    //   [31] sf  [30] op=1  [29] S=1  [28:24]=10001  [23:22]=sh
+    //   [21:10]=imm12  [9:5]=Rn  [4:0]=Rd
+    // Register form:   sf 1 1 01011 00 Rm 000000 Rn 11111
+    //   [28:24]=01011  [23:22]=shift  [21:16]=Rm  [15:10]=imm6  [9:5]=Rn  [4:0]=Rd
+
+    const IMM_OPCODE: u32 = 0b10001u32 << 24; // add/sub immediate [28:24]
+    const REG_OPCODE: u32 = 0b01011u32 << 24; // add/sub shifted register [28:24]
+    const SF_BIT: u32 = 1u32 << 31;
+    const OP_BIT: u32 = 1u32 << 30; // subtract
+    const XZR_NUM: u32 = 31;
+
+    fn word_of(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word_of(encode_cmp(ops))
+    }
+
+    prop_compose! {
+        fn arb_gp_reg()(n in 0u32..=30u32, is_64 in any::<bool>()) -> (String, u32, u32) {
+            // (name, reg_number, sf_bit)
+            if is_64 {
+                (format!("x{}", n), n, 1)
+            } else {
+                (format!("w{}", n), n, 0)
+            }
+        }
+    }
+
+    proptest! {
+        // Property A — structural oracle for the immediate form.
+        // CMP Rn, #imm  ==  SUBS ZR, Rn, #imm with an unshifted 12-bit immediate.
+        // Every field is pinned, including Rd = 31 (the zero register).
+        #[test]
+        fn prop_cmp_imm_structure(
+            (rn_name, rn_num, sf) in arb_gp_reg(),
+            imm in 0i64..=0xFFF, // valid unshifted add/sub immediate
+        ) {
+            let ops = vec![Operand::Reg(rn_name), Operand::Imm(imm)];
+            let word = enc(&ops);
+
+            let expected = (sf << 31) | OP_BIT | (1u32 << 29)
+                | IMM_OPCODE | ((imm as u32) << 10) | (rn_num << 5) | XZR_NUM;
+            prop_assert_eq!(word, expected);
+            prop_assert_eq!((word >> 31) & 1, sf);             // sf tracks Rn width
+            prop_assert_eq!((word >> 30) & 1, 1);              // op = subtract
+            prop_assert_eq!((word >> 29) & 1, 1);              // S = set flags
+            prop_assert_eq!((word >> 24) & 0x1F, 0b10001);     // immediate opcode
+            prop_assert_eq!((word >> 22) & 0x3, 0);            // sh = 0 (unshifted)
+            prop_assert_eq!((word >> 10) & 0xFFF, imm as u32); // imm12 round-trips
+            prop_assert_eq!((word >> 5) & 0x1F, rn_num);       // Rn
+            prop_assert_eq!(word & 0x1F, XZR_NUM);             // Rd = 31 (ZR)
+        }
+
+        // Property B — structural oracle for the register form.
+        // CMP Rn, Rm  ==  SUBS ZR, Rn, Rm with no shift.
+        #[test]
+        fn prop_cmp_reg_structure(
+            (rn_name, rn_num, sf) in arb_gp_reg(),
+            (rm_name, rm_num, _) in arb_gp_reg(),
+        ) {
+            let ops = vec![Operand::Reg(rn_name), Operand::Reg(rm_name)];
+            let word = enc(&ops);
+
+            let expected = (sf << 31) | OP_BIT | (1u32 << 29)
+                | REG_OPCODE | (rm_num << 16) | (rn_num << 5) | XZR_NUM;
+            prop_assert_eq!(word, expected);
+            prop_assert_eq!((word >> 31) & 1, sf);
+            prop_assert_eq!((word >> 30) & 1, 1);              // op = subtract
+            prop_assert_eq!((word >> 29) & 1, 1);              // S = set flags
+            prop_assert_eq!((word >> 24) & 0x1F, 0b01011);     // shifted-register opcode
+            prop_assert_eq!((word >> 22) & 0x3, 0);            // shift type = LSL
+            prop_assert_eq!((word >> 16) & 0x1F, rm_num);      // Rm
+            prop_assert_eq!((word >> 10) & 0x3F, 0);           // imm6 = 0
+            prop_assert_eq!((word >> 5) & 0x1F, rn_num);       // Rn
+            prop_assert_eq!(word & 0x1F, XZR_NUM);             // Rd = 31 (ZR)
+        }
+
+        // Property C — width differential. CMP Xn, op vs CMP Wn, op must differ
+        // ONLY in bit 31 (sf), proving is_32bit_reg(operands[0]) drives the
+        // destination width (XZR vs WZR) and touches nothing else.
+        #[test]
+        fn prop_width_differs_only_bit31(
+            n in 0u32..=30u32,
+            rm_num in 0u32..=30u32,
+            imm in 0i64..=0xFFF,
+            use_imm in any::<bool>(),
+        ) {
+            let ops64: Vec<Operand> = if use_imm {
+                vec![Operand::Reg(format!("x{}", n)), Operand::Imm(imm)]
+            } else {
+                vec![Operand::Reg(format!("x{}", n)), Operand::Reg(format!("x{}", rm_num))]
+            };
+            let ops32: Vec<Operand> = if use_imm {
+                vec![Operand::Reg(format!("w{}", n)), Operand::Imm(imm)]
+            } else {
+                vec![Operand::Reg(format!("w{}", n)), Operand::Reg(format!("x{}", rm_num))]
+            };
+            prop_assert_eq!(enc(&ops64) ^ enc(&ops32), SF_BIT);
+        }
+
+        // Property D — differential vs the sibling CMN path. encode_cmn is
+        // "ADDS ZR, Rn, op" (op=0); encode_cmp is "SUBS ZR, Rn, op" (op=1).
+        // Identical operands must produce words differing ONLY in bit 30.
+        #[test]
+        fn prop_cmp_xor_cmn_is_bit30(
+            (rn_name, _, _) in arb_gp_reg(),
+            (rm_name, _, _) in arb_gp_reg(),
+            imm in 0i64..=0xFFF,
+            use_imm in any::<bool>(),
+        ) {
+            let ops: Vec<Operand> = if use_imm {
+                vec![Operand::Reg(rn_name), Operand::Imm(imm)]
+            } else {
+                vec![Operand::Reg(rn_name), Operand::Reg(rm_name)]
+            };
+            prop_assert_eq!(
+                word_of(encode_cmp(&ops)) ^ word_of(encode_cmn(&ops)),
+                OP_BIT
+            );
+        }
+
+        // Property E — negative contract (plain immediate range validation).
+        // Per ARM ARM (add/sub immediate): imm12 encodes ONLY 0..=4095 unshifted
+        // or a multiple of 0x1000 (up to 0xFFF000) shifted. A value that is BOTH
+        // > 0xFFF and not a multiple of 0x1000 cannot be encoded and MUST be
+        // rejected with Err — not silently truncated via `& 0xFFF`. No spec
+        // permits wrapping for this field.
+        #[test]
+        fn prop_rejects_unencodable_immediate(
+            (rn_name, _, _) in arb_gp_reg(),
+            // 0x1001..=0x1FFF: always > 0xFFF, low 12 bits always non-zero.
+            bad_imm in 0x1001i64..=0x1FFFi64,
+        ) {
+            let ops = vec![Operand::Reg(rn_name), Operand::Imm(bad_imm)];
+            let res = encode_cmp(&ops);
+            prop_assert!(
+                res.is_err(),
+                "immediate {} (valid: 0..=4095 unshifted, or 0x1000-multiple shifted) \
+                 must be rejected, got {:?}",
+                bad_imm, res
+            );
+        }
+
+        // Property F — negative contract (explicit `lsl #12` shift form).
+        // `CMP Rn, #imm, lsl #12` selects the shifted-12-bit immediate variant;
+        // imm12 is still constrained to 0..=4095. An immediate above 0xFFF in
+        // this form is architecturally invalid and MUST be rejected. The
+        // implementation instead does `imm & 0xFFF`, silently truncating the
+        // value — e.g. #0x12345 encodes as if it were #0x345. This property is
+        // expected to FAIL and documents that silent-truncation bug.
+        #[test]
+        fn prop_rejects_large_imm_with_explicit_shift(
+            (rn_name, _, _) in arb_gp_reg(),
+            // > 0xFFF with distinct high bits so truncation changes the value.
+            bad_imm in 0x1001i64..=0x1FFFi64,
+        ) {
+            let ops = vec![
+                Operand::Reg(rn_name),
+                Operand::Imm(bad_imm),
+                Operand::Shift { kind: "lsl".to_string(), amount: 12 },
+            ];
+            let res = encode_cmp(&ops);
+            prop_assert!(
+                res.is_err(),
+                "`lsl #12` immediate {} (> 0xFFF) must be rejected, not silently \
+                 truncated to 0x{:X}; got {:?}",
+                bad_imm, (bad_imm as u32) & 0xFFF, res
+            );
+        }
+    }
+}
