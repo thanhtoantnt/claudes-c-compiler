@@ -3329,3 +3329,205 @@ mod prop_encode_cneg_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_bl_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ---- Opcode constants for the BL instruction class (ARM ARM C5.6.21/22) ----
+    // BL = 1001 01 imm26. Opcode 0b100101 occupies bits [31:26]; the imm26
+    // branch-offset field [25:0] is left zero for the linker to fill via a
+    // Call26 (R_AARCH64_CALL26) relocation.
+    const BL_OPCODE: u32 = 0b100101u32 << 26; // == 0x9400_0000
+    const OPCODE_MASK: u32 = 0xFC00_0000;     // bits [31:26]
+    const IMM26_MASK: u32 = 0x03FF_FFFF;      // bits [25:0] (linker-filled, must be zero)
+
+    fn word_of(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::WordWithReloc { word, .. }) => word,
+            other => panic!("expected WordWithReloc, got {:?}", other),
+        }
+    }
+
+    fn reloc_of(r: Result<EncodeResult, String>) -> Relocation {
+        match r {
+            Ok(EncodeResult::WordWithReloc { reloc, .. }) => reloc,
+            other => panic!("expected WordWithReloc, got {:?}", other),
+        }
+    }
+
+    /// Mirrors `get_symbol`'s forwarding table: every operand kind it accepts
+    /// and the (symbol, addend) the encoder is expected to forward into the
+    /// relocation.
+    fn accepted_operand_and_expected(
+        sym: String,
+        off: i64,
+        kind_idx: usize,
+    ) -> (Operand, String, i64) {
+        let cases: Vec<(Operand, String, i64)> = vec![
+            (Operand::Symbol(sym.clone()), sym.clone(), 0),
+            (Operand::Label(sym.clone()), sym.clone(), 0),
+            (Operand::SymbolOffset(sym.clone(), off), sym.clone(), off),
+            (Operand::Modifier { kind: "lo12".into(), symbol: sym.clone() }, sym.clone(), 0),
+            (Operand::ModifierOffset {
+                kind: "lo12".into(), symbol: sym.clone(), offset: off,
+            }, sym.clone(), off),
+            // The parser misclassifies symbol names colliding with register /
+            // condition / barrier names; `get_symbol` accepts them as symbols.
+            (Operand::Reg(sym.clone()), sym.clone(), 0),
+            (Operand::Cond(sym.clone()), sym.clone(), 0),
+            (Operand::Barrier(sym.clone()), sym.clone(), 0),
+        ];
+        cases[kind_idx].clone()
+    }
+
+    prop_compose! {
+        fn arb_accepted_symbol()(
+            s in "[a-z][a-z0-9_]{0,7}",
+            off in -8192i64..=8192i64,
+            kind_idx in 0usize..8usize,
+        ) -> (Operand, String, i64) {
+            accepted_operand_and_expected(s, off, kind_idx)
+        }
+    }
+
+    proptest! {
+        // Property A — opcode structure oracle. The encoded word is fully
+        // determined: opcode 0b100101 in bits [31:26] and the imm26 offset
+        // field [25:0] is left zero for the linker to fill.
+        #[test]
+        fn prop_opcode_structure_and_imm26_zero(
+            sym in "[a-z][a-z0-9_]{0,7}",
+        ) {
+            let ops = vec![Operand::Symbol(sym)];
+            let word = word_of(encode_bl(&ops));
+            prop_assert_eq!(word & OPCODE_MASK, BL_OPCODE);
+            prop_assert_eq!(word & IMM26_MASK, 0u32);
+            // Equivalently: the word is exactly the fixed base, independent of operand.
+            prop_assert_eq!(word, BL_OPCODE);
+        }
+
+        // Property B — differential: BL (encode_bl) and B (encode_branch)
+        // share the 100101/000101 layout and differ ONLY in bit 31 (the link
+        // bit). BL is the link variant (bit 31 = 1); B is not.
+        #[test]
+        fn prop_bl_vs_branch_differ_only_bit31(
+            sym in "[a-z][a-z0-9_]{0,7}",
+        ) {
+            let ops = vec![Operand::Symbol(sym)];
+            let bl_word = word_of(encode_bl(&ops));
+            let b_word = word_of(encode_branch(&ops));
+            prop_assert_eq!(bl_word ^ b_word, 1u32 << 31);
+            // BL must be the one with the link bit set.
+            prop_assert_eq!(bl_word & (1u32 << 31), 1u32 << 31);
+            prop_assert_eq!(b_word & (1u32 << 31), 0u32);
+        }
+
+        // Property C — relocation contract across every operand kind that
+        // `get_symbol` accepts: the result carries a Call26 relocation whose
+        // symbol & addend exactly mirror the input operand.
+        #[test]
+        fn prop_reloc_is_call26_with_symbol(
+            (op, exp_sym, exp_off) in arb_accepted_symbol(),
+        ) {
+            let reloc = reloc_of(encode_bl(&[op]));
+            prop_assert!(matches!(reloc.reloc_type, RelocType::Call26));
+            prop_assert_eq!(reloc.symbol, exp_sym);
+            prop_assert_eq!(reloc.addend, exp_off);
+        }
+
+        // Property D — word invariance across ALL accepted operand kinds.
+        // Property A only proves the constant word 0x9400_0000 for the
+        // `Symbol` form; Property C only checks the *relocation* across
+        // kinds. This closes the gap: the instruction word must be the
+        // fixed base for EVERY kind `get_symbol` accepts, because the
+        // operand influences ONLY the relocation, never the word.
+        #[test]
+        fn prop_word_is_operand_independent(
+            (op, _sym, _off) in arb_accepted_symbol(),
+        ) {
+            let ops = vec![op];
+            prop_assert_eq!(word_of(encode_bl(&ops)), BL_OPCODE);
+        }
+
+        // Property E — negative contract. Operand kinds that `get_symbol`
+        // does NOT accept must make encode_bl return Err; no silent encoding
+        // of an invalid call target. Also: an empty operand vector (no
+        // target at all) must be rejected — `get_symbol` reads operands[0]
+        // unconditionally.
+        #[test]
+        fn prop_rejects_non_symbol_and_empty_operands(
+            idx in 0usize..11usize,
+        ) {
+            let rejected: Vec<Operand> = vec![
+                Operand::Imm(42),
+                Operand::Mem { base: "x0".into(), offset: 0 },
+                Operand::MemExpr {
+                    base: "x0".into(), expr: "foo".into(), writeback: false,
+                },
+                Operand::MemPreIndex { base: "x0".into(), offset: 8 },
+                Operand::MemPostIndex { base: "x0".into(), offset: 8 },
+                Operand::MemRegOffset {
+                    base: "x0".into(), index: "x1".into(), extend: None, shift: None,
+                },
+                Operand::Shift { kind: "lsl".into(), amount: 2 },
+                Operand::Extend { kind: "sxtw".into(), amount: 0 },
+                Operand::Expr("x + y".into()),
+                Operand::RegArrangement { reg: "v0".into(), arrangement: "16b".into() },
+                Operand::RegLane { reg: "v0".into(), elem_size: "s".into(), index: 2 },
+            ];
+            let op = rejected[idx].clone();
+            prop_assert!(
+                encode_bl(&[op]).is_err(),
+                "encode_bl should reject this operand as a call target"
+            );
+            // Missing operand: empty vector cannot yield a relocation.
+            let empty: Vec<Operand> = vec![];
+            prop_assert!(encode_bl(&empty).is_err());
+        }
+
+        // Property F — negative contract for parser-token collisions. BL takes
+        // a branch target label/immediate, not a register, condition code, or
+        // barrier mnemonic. These token kinds must be rejected at assembler
+        // level instead of being forwarded as relocation symbols.
+        #[test]
+        fn prop_rejects_reg_cond_barrier_targets(
+            idx in 0usize..6usize,
+        ) {
+            let invalid = [
+                Operand::Reg("x0".into()),
+                Operand::Reg("wzr".into()),
+                Operand::Cond("eq".into()),
+                Operand::Cond("nv".into()),
+                Operand::Barrier("sy".into()),
+                Operand::Barrier("ish".into()),
+            ];
+            let op = invalid[idx].clone();
+            prop_assert!(
+                encode_bl(&[op]).is_err(),
+                "encode_bl should reject register/condition/barrier tokens as call targets"
+            );
+        }
+
+        // Property G — determinism / purity. Encoding the same operand
+        // repeatedly yields bit-identical word AND relocation (symbol and
+        // addend). encode_bl is a pure function of its operands.
+        #[test]
+        fn prop_encoding_is_deterministic(
+            (op, exp_sym, exp_off) in arb_accepted_symbol(),
+        ) {
+            let ops = vec![op];
+            prop_assert_eq!(
+                word_of(encode_bl(&ops)),
+                word_of(encode_bl(&ops))
+            );
+            let rel1 = reloc_of(encode_bl(&ops));
+            let rel2 = reloc_of(encode_bl(&ops));
+            prop_assert_eq!(&rel1.symbol, &rel2.symbol);
+            prop_assert_eq!(&rel1.symbol, &exp_sym);
+            prop_assert_eq!(rel1.addend, rel2.addend);
+            prop_assert_eq!(rel1.addend, exp_off);
+        }
+    }
+}
