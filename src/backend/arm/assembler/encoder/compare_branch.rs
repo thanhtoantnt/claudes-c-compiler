@@ -3938,3 +3938,233 @@ mod prop_encode_blr_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_ret_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ---- RET opcode constants (ARM ARM C5.6.20, "Return"); identical layout
+    // to BR/BLR with a different opc sub-field ----
+    // RET <Xn> = 1101 0110 0101 1111 0000 00 Rn 00000
+    //   [31:10] fixed opcode  == 0xD65F_0000
+    //   [9:5]   Rn            (5-bit register field)
+    //   [4:0]   00000         (reserved, must be zero)
+    // Differential bit-masks derived from the fixed opcodes:
+    //   ret ^ br  = 0xD65F0000 ^ 0xD61F0000 = 0x00400000  (bit 22 only)
+    //   ret ^ blr = 0xD65F0000 ^ 0xD63F0000 = 0x00600000  (bits 22 AND 21)
+    // (BR and BLR differ by a single bit 21; RET is opc=0101, sitting two
+    // bits away from BLR's opc=0011 and one bit from BR's opc=0001.)
+    const OPCODE: u32 = 0xD65F_0000;
+    const RN_MASK: u32 = 0x1Fu32 << 5; // bits [9:5]
+    const LOW5: u32 = 0x1Fu32;         // bits [4:0] (reserved zero)
+    const RET_VS_BR_XOR: u32 = 1u32 << 22;
+    const RET_VS_BLR_XOR: u32 = (1u32 << 22) | (1u32 << 21);
+
+    fn word_of(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word_of(encode_ret(ops))
+    }
+
+    fn enc_br(ops: &[Operand]) -> u32 {
+        match encode_br(ops) {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc_blr(ops: &[Operand]) -> u32 {
+        match encode_blr(ops) {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    // General-purpose register: x{n}/w{n} for n in 0..=30 (avoid the
+    // xzr/sp-encoded 31 so structural assertions are unambiguous).
+    prop_compose! {
+        fn arb_gp_reg()(n in 0u32..=30u32, is_64 in any::<bool>()) -> (String, u32) {
+            let name = if is_64 { format!("x{}", n) } else { format!("w{}", n) };
+            (name, n)
+        }
+    }
+
+    proptest! {
+        // Property A — full structural / field-placement oracle.
+        // For a valid GP register the encoded word is fully determined: every
+        // bit outside [9:5] is fixed to the RET opcode, the low 5 bits are
+        // reserved-zero, and Rn occupies [9:5]. Reconstruction must match.
+        #[test]
+        fn prop_opcode_structure_and_fields(
+            (rn_name, rn_num) in arb_gp_reg(),
+        ) {
+            let ops = vec![Operand::Reg(rn_name.clone())];
+            let word = enc(&ops);
+
+            // Every bit outside the Rn field is the fixed opcode.
+            prop_assert_eq!(word & !RN_MASK, OPCODE);
+            // Low 5 reserved bits are zero.
+            prop_assert_eq!(word & LOW5, 0u32);
+            // Rn field [9:5] carries the register number.
+            prop_assert_eq!((word >> 5) & 0x1F, rn_num);
+            // Whole word reconstructs exactly from opcode + shifted Rn.
+            prop_assert_eq!(word, OPCODE | (rn_num << 5));
+        }
+
+        // Property B — default-register contract (RET-specific).
+        // ARM ARM defines RET with no operand as `RET` == `RET X30` (return
+        // via the Link Register). So empty operands, an explicit `x30`, and
+        // the `lr` alias must all encode to the identical word with Rn=30.
+        #[test]
+        fn prop_empty_defaults_to_lr(_dummy in 0u32..=0u32) {
+            let empty: Vec<Operand> = vec![];
+            let from_empty = enc(&empty);
+            let from_x30 = enc(&[Operand::Reg("x30".into())]);
+            let from_lr = enc(&[Operand::Reg("lr".into())]);
+            prop_assert_eq!(from_empty, OPCODE | (30u32 << 5));
+            prop_assert_eq!(from_empty, from_x30);
+            prop_assert_eq!(from_empty, from_lr);
+        }
+
+        // Property C — differential: RET shares BR/BLR's operand contract and
+        // differs only in the fixed opcode. ret^br is exactly 0x00400000 and
+        // ret^blr is exactly 0x00600000, independent of the register.
+        #[test]
+        fn prop_differs_from_br_blr_by_fixed_mask(
+            (rn_name, _) in arb_gp_reg(),
+        ) {
+            let ops = vec![Operand::Reg(rn_name)];
+            prop_assert_eq!(enc(&ops) ^ enc_br(&ops), RET_VS_BR_XOR);
+            prop_assert_eq!(enc(&ops) ^ enc_blr(&ops), RET_VS_BLR_XOR);
+        }
+
+        // Property D — register-number range validation (negative contract).
+        // The Rn field is a 5-bit UNSIGNED value, valid only 0..=31. A
+        // register number above 31 MUST be rejected with Err rather than
+        // silently masked via `rn << 5` (which would wrap/truncate). The
+        // shared parse_reg_num helper enforces `num <= 31`.
+        #[test]
+        fn prop_rejects_register_number_above_31(
+            n in 32u32..=999u32,
+            is_64 in any::<bool>(),
+        ) {
+            let name = if is_64 { format!("x{}", n) } else { format!("w{}", n) };
+            let ops = vec![Operand::Reg(name.clone())];
+            prop_assert!(
+                encode_ret(&ops).is_err(),
+                "register {} (valid 0..=31) must be rejected, got {:?}",
+                name, encode_ret(&ops)
+            );
+        }
+
+        // Property E — non-register operand negative contract.
+        // Operand kinds that get_reg does NOT accept must make encode_ret
+        // return Err. (Note: an EMPTY operand vector is NOT rejected — see
+        // Property B; it defaults to X30.)
+        #[test]
+        fn prop_rejects_non_register_operands(
+            case in 0usize..12usize,
+        ) {
+            let rejected: Vec<Operand> = vec![
+                Operand::Imm(42),
+                Operand::Symbol("tgt".into()),
+                Operand::Label("tgt".into()),
+                Operand::SymbolOffset("tgt".into(), 8),
+                Operand::Mem { base: "x0".into(), offset: 0 },
+                Operand::MemExpr {
+                    base: "x0".into(), expr: "foo".into(), writeback: false,
+                },
+                Operand::MemPreIndex { base: "x0".into(), offset: 8 },
+                Operand::MemPostIndex { base: "x0".into(), offset: 8 },
+                Operand::Shift { kind: "lsl".into(), amount: 2 },
+                Operand::Cond("eq".into()),
+                Operand::Expr("a + b".into()),
+                Operand::RegList(vec![Operand::Reg("x0".into())]),
+            ];
+            let op = rejected[case].clone();
+            let result = encode_ret(&[op]);
+            prop_assert!(result.is_err(),
+                "encode_ret should reject non-register operand case {} (got {:?})", case, result);
+        }
+
+        // Property F — determinism / purity. Encoding the same operand twice
+        // yields a bit-identical word; encode_ret is a pure function of its
+        // operands (no relocation, no hidden state).
+        #[test]
+        fn prop_encoding_is_deterministic(
+            (rn_name, _) in arb_gp_reg(),
+        ) {
+            let ops = vec![Operand::Reg(rn_name)];
+            prop_assert_eq!(enc(&ops), enc(&ops));
+        }
+
+        // Property G — NEGATIVE CONTRACT (FAILING; bug confirmed).
+        // Per ARM ARM C5.6.20, RET's operand is <Xn>: a 64-bit GP register.
+        // The 32-bit W form is UNALLOCATED and a conforming assembler (GAS,
+        // llvm-mc) rejects `ret wN`. encode_ret binds `(rn, _)` and discards
+        // is_64, so it currently accepts the W form and encodes it
+        // bit-identically to `ret xN`. This property asserts the REQUIRED
+        // behavior (Err) and therefore FAILS until validation is added.
+        #[test]
+        fn prop_rejects_32bit_w_form(
+            n in 0u32..=30u32,
+        ) {
+            let res = encode_ret(&[Operand::Reg(format!("w{}", n))]);
+            prop_assert!(
+                res.is_err(),
+                "ret w{} must be rejected (32-bit form is unallocated per ARM ARM C5.6.20), got {:?}",
+                n, res
+            );
+        }
+
+        // Property H — NEGATIVE CONTRACT (FAILING; bug confirmed).
+        // Per ARM ARM C5.6.20, RET's Rn field value 31 denotes XZR; there is
+        // NO SP-using form of RET. The shared parse_reg_num maps both `sp`
+        // and `xzr` to 31, so `ret sp` currently succeeds and silently encodes
+        // a return to the address in XZR (== `ret xzr`) instead of erroring;
+        // `ret wsp` behaves identically. This property asserts the REQUIRED
+        // behavior (Err) and therefore FAILS until validation is added.
+        #[test]
+        fn prop_rejects_sp_wsp(
+            which in 0usize..2usize,
+        ) {
+            let name = if which == 0 { "sp" } else { "wsp" };
+            let res = encode_ret(&[Operand::Reg(name.into())]);
+            prop_assert!(
+                res.is_err(),
+                "ret {} must be rejected (SP/WSP is not a valid RET operand; field 31 == XZR), got {:?}",
+                name, res
+            );
+        }
+
+        // Property I — NEGATIVE CONTRACT (FAILING; bug confirmed).
+        // Per ARM ARM C5.6.20, RET's operand is a GENERAL-PURPOSE register
+        // <Xn>. FP/SIMD operands (d/s/q/v/h/b) are the wrong register class
+        // and `ret d0`, `ret v5`, etc. are unallocated encodings a conforming
+        // assembler must reject. The shared parse_reg_num accepts those
+        // prefixes, so they currently encode as `ret xN`. This property
+        // asserts the REQUIRED behavior (Err) and therefore FAILS until
+        // validation is added.
+        #[test]
+        fn prop_rejects_fp_simd_registers(
+            prefix_idx in 0usize..6usize,
+            n in 0u32..=31u32,
+        ) {
+            let prefixes = ["d", "s", "q", "v", "h", "b"];
+            let prefix = prefixes[prefix_idx];
+            let name = format!("{}{}", prefix, n);
+            let res = encode_ret(&[Operand::Reg(name.clone())]);
+            prop_assert!(
+                res.is_err(),
+                "ret {} must be rejected (FP/SIMD register; RET requires a GP register), got {:?}",
+                name, res
+            );
+        }
+    }
+}
