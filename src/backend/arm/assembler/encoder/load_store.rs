@@ -1364,6 +1364,204 @@ pub(crate) fn encode_stop(mnemonic: &str, operands: &[Operand]) -> Result<Encode
 }
 
 #[cfg(test)]
+mod prop_encode_stop_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: reference-encoding / field-placement (ARMv8.1-A LSE atomic
+    // *store* aliases STADD/STCLR/STEOR/STSET — ARM ARM §C6.2.274 STADD et
+    // seq.). Each is an alias of LDADD/LDCLR/LDEOR/LDSET with Rt = XZR/WZR
+    // (register 31, discard) and NO acquire bit (A hardwired 0; stores only
+    // have a release form).
+    //
+    // Encoding (built from the ARM ARM bit layout, NOT from this crate's
+    // own formula):
+    //   size[31:30] 111000[29:24] 0[23]=A  R[22] 1[21] Rs[20:16] 0[15]
+    //     opc[14:12] 00[11:10] Rn[9:5] Rt[4:0]
+    //
+    //   size: 00 = byte (stadd*b), 01 = half (stadd*h),
+    //         10 = 32-bit (W regs), 11 = 64-bit (X regs)
+    //   opc:  STADD=000, STCLR=001, STEOR=010, STSET=011
+    //   R:    release (mnemonic suffix contains 'l')
+    //   Rt:   ALWAYS 31 (XZR/WZR) — the defining trait of a store alias
+    //
+    // Hand-derived golden encodings (built straight from the bit layout):
+    //   stadd  x0,[x1] = 0xF820003F   stadd  w0,[x1] = 0xB820003F
+    //   staddb w0,[x1] = 0x3820003F   staddh w0,[x1] = 0x7820003F
+    //   staddl x0,[x1] = 0xF860003F
+    //   stclr  x0,[x1] = 0xF820103F   steor  x0,[x1] = 0xF820203F
+    //   stset  x0,[x1] = 0xF820303F
+
+    /// All 24 ST*-alias mnemonics dispatched to `encode_stop`.
+    const STOP_MNEMONICS: &[&str] = &[
+        // STADD family
+        "stadd", "staddl", "staddb", "staddlb", "staddh", "staddlh",
+        // STCLR family
+        "stclr", "stclrl", "stclrb", "stclrlb", "stclrh", "stclrlh",
+        // STEOR family
+        "steor", "steorl", "steorb", "steorlb", "steorh", "steorlh",
+        // STSET family
+        "stset", "stsetl", "stsetb", "stsetlb", "stseth", "stsetlh",
+    ];
+
+    /// Expected opc[14:12] for each base op (independent of suffix).
+    fn expected_opc(mn: &str) -> u32 {
+        if mn.starts_with("stadd") { 0b000 }
+        else if mn.starts_with("stclr") { 0b001 }
+        else if mn.starts_with("steor") { 0b010 }
+        else if mn.starts_with("stset") { 0b011 }
+        else { panic!("unexpected mnemonic {}", mn) }
+    }
+
+    fn gp_reg(width: char, num: u32) -> Operand {
+        Operand::Reg(format!("{}{}", width, num))
+    }
+    fn mem_op(base_num: u32) -> Operand {
+        Operand::Mem { base: format!("x{}", base_num), offset: 0 }
+    }
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    prop_compose! {
+        fn arb_reg()(num in 0u32..=31u32, wide in any::<bool>()) -> (char, u32) {
+            (if wide { 'x' } else { 'w' }, num)
+        }
+    }
+    prop_compose! {
+        fn arb_mn()(idx in 0usize..STOP_MNEMONICS.len()) -> &'static str {
+            STOP_MNEMONICS[idx]
+        }
+    }
+
+    proptest! {
+        // Property 1 — field placement & the store-alias invariant.
+        // Rs[20:16], Rn[9:5] reflect the operand registers, and Rt[4:0] is
+        // ALWAYS 31 (XZR/WZR) for every mnemonic — this is the defining
+        // difference between a STADD-style alias and its LDADD parent.
+        #[test]
+        fn prop_field_placement_and_rt_xzr(
+            (rw, rs_num) in arb_reg(),
+            rn_num in 0u32..=31u32,
+            mn in arb_mn(),
+        ) {
+            let ops = vec![gp_reg(rw, rs_num), mem_op(rn_num)];
+            let w = word(encode_stop(mn, &ops));
+            prop_assert_eq!((w >> 16) & 0x1F, rs_num, "Rs field [20:16]");
+            prop_assert_eq!((w >> 5) & 0x1F, rn_num, "Rn field [9:5]");
+            prop_assert_eq!(w & 0x1F, 31u32, "Rt field [4:0] must be 31 (XZR/WZR)");
+        }
+
+        // Property 2 — fixed opcode bits, the always-zero acquire bit, and
+        // the opc field all match the ARM ARM layout for every variant.
+        // [29:24]=111000, bit[23]=0 (A: no acquire for stores), bit[21]=1,
+        // bit[15]=0, [11:10]=00, opc[14:12]=expected for the base op.
+        #[test]
+        fn prop_fixed_bits_and_opc(
+            (rw, rs_num) in arb_reg(),
+            rn_num in 0u32..=31u32,
+            mn in arb_mn(),
+        ) {
+            let ops = vec![gp_reg(rw, rs_num), mem_op(rn_num)];
+            let w = word(encode_stop(mn, &ops));
+            prop_assert_eq!((w >> 24) & 0x3F, 0b111000u32, "opcode [29:24]");
+            prop_assert_eq!((w >> 23) & 1, 0u32, "acquire bit [23] must be 0");
+            prop_assert_eq!((w >> 21) & 1, 1u32, "fixed bit 21");
+            prop_assert_eq!((w >> 15) & 1, 0u32, "fixed zero bit 15");
+            prop_assert_eq!((w >> 10) & 0x3, 0u32, "fixed zero [11:10]");
+            prop_assert_eq!((w >> 12) & 0x7, expected_opc(mn), "opc [14:12]");
+        }
+
+        // Property 3 — width differential.
+        // For byte/half-suffixed forms the word is width-invariant (size is
+        // driven by the mnemonic). For plain forms only bit 30 flips
+        // between X (size=11) and W (size=10).
+        #[test]
+        fn prop_width_differential(
+            rs_num in 0u32..=31u32,
+            rn_num in 0u32..=31u32,
+            mn in arb_mn(),
+        ) {
+            let x = word(encode_stop(mn, &[gp_reg('x', rs_num), mem_op(rn_num)]));
+            let w = word(encode_stop(mn, &[gp_reg('w', rs_num), mem_op(rn_num)]));
+            if mn.contains('b') || mn.contains('h') {
+                prop_assert_eq!(x, w, "size-suffix mnemonic must be width-invariant");
+            } else {
+                prop_assert_eq!(x ^ w, 1u32 << 30, "X vs W must flip only bit 30");
+            }
+        }
+
+        // Property 4 — release differential.
+        // Adding the 'l' suffix flips ONLY bit 22 (R); nothing else changes.
+        #[test]
+        fn prop_release_differential(
+            rs_num in 0u32..=31u32,
+            rn_num in 0u32..=31u32,
+            pair_idx in 0u8..4,
+        ) {
+            let ops = vec![gp_reg('x', rs_num), mem_op(rn_num)];
+            let (m0, m1) = match pair_idx {
+                0 => ("stadd", "staddl"),
+                1 => ("stclr", "stclrl"),
+                2 => ("steor", "steorl"),
+                _ => ("stset", "stsetl"),
+            };
+            let w0 = word(encode_stop(m0, &ops));
+            let w1 = word(encode_stop(m1, &ops));
+            prop_assert_eq!(w0 ^ w1, 1u32 << 22, "release suffix must flip only bit 22");
+        }
+
+        // Property 5 — NEGATIVE CONTRACT.
+        // Fewer than 2 operands, a 2nd operand that is not a memory operand,
+        // or an unrecognized mnemonic must all be rejected with Err rather
+        // than silently encoding garbage.
+        #[test]
+        fn prop_rejects_bad_operands(n in 0u32..2u32, bad_kind in 0u8..3u8) {
+            // too few operands
+            let short: Vec<Operand> = (0..n).map(|i| gp_reg('x', i)).collect();
+            prop_assert!(encode_stop("stadd", &short).is_err(),
+                "expected Err for {} operands", n);
+            // non-memory second operand
+            let bad_second = match bad_kind {
+                0 => gp_reg('x', 5),
+                1 => Operand::Imm(7),
+                _ => Operand::Symbol("foo".to_string()),
+            };
+            let ops = vec![gp_reg('x', 0), bad_second];
+            prop_assert!(encode_stop("stadd", &ops).is_err(),
+                "expected Err for non-Mem 2nd operand");
+            // unknown base mnemonic
+            prop_assert!(encode_stop("stfoo", &[gp_reg('x', 0), mem_op(1)]).is_err(),
+                "expected Err for unknown base op");
+        }
+    }
+
+    // Deterministic reference-oracle anchor: hand-derived golden words.
+    #[test]
+    fn golden_encodings_match_reference() {
+        let cases: &[(&str, char, u32)] = &[
+            ("stadd",  'x', 0xF820003F),
+            ("stadd",  'w', 0xB820003F),
+            ("staddb", 'w', 0x3820003F),
+            ("staddh", 'w', 0x7820003F),
+            ("staddl", 'x', 0xF860003F),
+            ("stclr",  'x', 0xF820103F),
+            ("steor",  'x', 0xF820203F),
+            ("stset",  'x', 0xF820303F),
+        ];
+        for &(mn, width, golden) in cases {
+            let ops = vec![gp_reg(width, 0), mem_op(1)];
+            let w = word(encode_stop(mn, &ops));
+            assert_eq!(w, golden, "golden mismatch for {} {}0,[x1]", mn, width);
+        }
+    }
+}
+
+#[cfg(test)]
 mod prop_ldr_str_auto_tests {
     use super::*;
     use proptest::prelude::*;

@@ -620,4 +620,173 @@ mod tests {
             );
         }
     }
+
+    // ── encode_fcmp (FP compare) ===========================================
+    // ARMv8-A layout:
+    //   FCMP <Pn>, <Pm>: 0 00 11110 ftype 1 Rm 00 1000 Rn 00 000
+    //     bits[31:24]=0x1E, [23:22]=ftype, [21]=1, [20:16]=Rm,
+    //     [15:10]=001000, [9:5]=Rn, [4:0]=00000.
+    //   FCMP <Pn>, #0.0: 0 00 11110 ftype 1 0000 00 1000 Rn 00 1000
+    //     same fixed fields but [4:0]=01000 (bit 3 = compare-to-zero marker).
+    fn fcmp_rm_of(w: u32) -> u32 { (w >> 16) & 0x1F }
+    // bits[15:10] fixed field shared by both forms (== 0b001000 == 8).
+    fn fcmp_fixed_of(w: u32) -> u32 { (w >> 10) & 0x3F }
+
+    proptest! {
+        // Oracle: reference / field layout (register form). Homogeneous-
+        // precision FP operands => every field at its canonical bit position.
+        #[test]
+        fn prop_fcmp_reg_places_fields(
+            rn in 0u32..32, rm in 0u32..32, dbl in any::<bool>(),
+        ) {
+            let p = if dbl { "d" } else { "s" };
+            let ops = vec![
+                Operand::Reg(format!("{}{}", p, rn)),
+                Operand::Reg(format!("{}{}", p, rm)),
+            ];
+            let w = expect_word(encode_fcmp(&ops));
+            let ftype = if dbl { 0b01u32 } else { 0b00u32 };
+
+            // Reference word: 0x1E202000 | ftype<<22 | rm<<16 | rn<<5.
+            prop_assert_eq!(w, 0x1E202000u32 | (ftype << 22) | (rm << 16) | (rn << 5));
+            // Fixed bits of the scalar FP compare encoding.
+            prop_assert_eq!(w >> 24, 0x1Eu32);            // [31:24] = 0x1E
+            prop_assert_eq!((w >> 21) & 1, 1u32);          // bit 21 = 1
+            prop_assert_eq!(fcmp_fixed_of(w), 0b001000u32);// [15:10] = 001000
+            prop_assert_eq!(ftype_of(w), ftype);           // precision field
+            prop_assert_eq!(sf_of(w), 0);                   // scalar FP, sf always 0
+            // Register fields round-trip exactly into their 5-bit slots.
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(fcmp_rm_of(w), rm);
+            prop_assert_eq!(w & 0x1F, 0u32);                // [4:0] = 0 (register form)
+        }
+
+        // Oracle: reference / field layout (compare-to-zero form). Both the
+        // 1-operand form ("FCMP Pn") and the explicit "FCMP Pn, #0" must yield
+        // the #0.0 encoding with bit 3 set and no Rm field.
+        #[test]
+        fn prop_fcmp_zero_form_places_fields(
+            rn in 0u32..32, dbl in any::<bool>(), explicit in any::<bool>(),
+        ) {
+            let p = if dbl { "d" } else { "s" };
+            let ops = if explicit {
+                vec![
+                    Operand::Reg(format!("{}{}", p, rn)),
+                    Operand::Imm(0),
+                ]
+            } else {
+                vec![Operand::Reg(format!("{}{}", p, rn))]
+            };
+            let w = expect_word(encode_fcmp(&ops));
+            let ftype = if dbl { 0b01u32 } else { 0b00u32 };
+
+            // Reference word: 0x1E202008 | ftype<<22 | rn<<5 (bit 3 set).
+            prop_assert_eq!(w, 0x1E202008u32 | (ftype << 22) | (rn << 5));
+            prop_assert_eq!(w >> 24, 0x1Eu32);
+            prop_assert_eq!((w >> 21) & 1, 1u32);
+            prop_assert_eq!(fcmp_fixed_of(w), 0b001000u32);
+            prop_assert_eq!(ftype_of(w), ftype);
+            prop_assert_eq!(rn_of(w), rn);
+            // The compare-to-zero marker: bits[4:0] == 01000 (bit 3 set),
+            // and no Rm field is encoded (bits[20:16] == 0).
+            prop_assert_eq!(w & 0x1F, 0b01000u32);
+            prop_assert_eq!(fcmp_rm_of(w), 0u32);
+        }
+
+        // Oracle: precision. ftype is derived solely from operand[0]'s prefix:
+        // 'd' => 01 (double), else => 00 (single).
+        #[test]
+        fn prop_fcmp_ftype_from_first_operand(
+            rn in 0u32..32, rm in 0u32..32, dbl in any::<bool>(),
+        ) {
+            let p = if dbl { "d" } else { "s" };
+            let ops = vec![
+                Operand::Reg(format!("{}{}", p, rn)),
+                Operand::Reg(format!("{}{}", p, rm)),
+            ];
+            let w = expect_word(encode_fcmp(&ops));
+            prop_assert_eq!(ftype_of(w), if dbl { 0b01 } else { 0b00 });
+        }
+
+        // Oracle: determinism. Same operands => identical word, both forms.
+        #[test]
+        fn prop_fcmp_is_deterministic(
+            rn in 0u32..32, rm in 0u32..32, dbl in any::<bool>(),
+        ) {
+            let p = if dbl { "d" } else { "s" };
+            let ops = vec![
+                Operand::Reg(format!("{}{}", p, rn)),
+                Operand::Reg(format!("{}{}", p, rm)),
+            ];
+            let w1 = expect_word(encode_fcmp(&ops));
+            let w2 = expect_word(encode_fcmp(&ops));
+            prop_assert_eq!(w1, w2);
+        }
+
+        // Negative contract (validated, PASSES): out-of-range FP register
+        // numbers (>= 32) MUST be rejected by get_reg, not masked into 5 bits;
+        // and non-zero immediates are invalid (FCMP only supports #0.0).
+        #[test]
+        fn prop_fcmp_rejects_out_of_range_reg_and_nonzero_imm(
+            n in 32u32..256u32, bad_imm in 1i64..1000i64,
+        ) {
+            // Out-of-range source register.
+            let ops = vec![Operand::Reg(format!("d{}", n)), Operand::Reg("d0".into())];
+            prop_assert!(
+                encode_fcmp(&ops).is_err(),
+                "register d{} must be rejected (5-bit field), not silently masked", n
+            );
+            // Out-of-range second register.
+            let ops = vec![Operand::Reg("d0".into()), Operand::Reg(format!("d{}", n))];
+            prop_assert!(
+                encode_fcmp(&ops).is_err(),
+                "register d{} must be rejected (5-bit field), not silently masked", n
+            );
+            // Non-zero immediate: only #0.0 is encodable; #<other> is invalid.
+            let ops = vec![Operand::Reg("d0".into()), Operand::Imm(bad_imm)];
+            prop_assert!(
+                encode_fcmp(&ops).is_err(),
+                "FCMP with immediate #{} must be rejected (only #0.0 allowed)", bad_imm
+            );
+        }
+
+        // Negative contract (FINDING — FAILS): FCMP requires homogeneous-
+        // precision FP-register operands. Mixed precision (Dn, Sm) and
+        // GP-bank operands (Wn/Xn) must be rejected, but encode_fcmp derives
+        // ftype ONLY from operand[0] and never validates operand[1]'s bank or
+        // precision, so it silently accepts illegal operands.
+        #[test]
+        fn prop_fcmp_rejects_mismatched_precision_and_bank(n in 0u32..32) {
+            // Mixed precision: D then S.
+            let mix1 = vec![
+                Operand::Reg(format!("d{}", n)),
+                Operand::Reg(format!("s{}", n)),
+            ];
+            prop_assert!(
+                encode_fcmp(&mix1).is_err(),
+                "mixed precision (Dn, Sm) must be rejected; got {:?}",
+                encode_fcmp(&mix1)
+            );
+            // Mixed precision: S then D.
+            let mix2 = vec![
+                Operand::Reg(format!("s{}", n)),
+                Operand::Reg(format!("d{}", n)),
+            ];
+            prop_assert!(
+                encode_fcmp(&mix2).is_err(),
+                "mixed precision (Sn, Dm) must be rejected; got {:?}",
+                encode_fcmp(&mix2)
+            );
+            // GP-bank operands are not valid for FCMP.
+            let gp = vec![
+                Operand::Reg(format!("x{}", n)),
+                Operand::Reg(format!("x{}", n)),
+            ];
+            prop_assert!(
+                encode_fcmp(&gp).is_err(),
+                "GP registers (x{}) are not valid FCMP operands; got {:?}",
+                n, encode_fcmp(&gp)
+            );
+        }
+    }
 }
