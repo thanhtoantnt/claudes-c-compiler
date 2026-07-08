@@ -269,3 +269,133 @@ pub(crate) fn encode_fcvt_precision(operands: &[Operand]) -> Result<EncodeResult
         | (opc << 15) | (0b10000 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── FMOV field extractors (ARMv8 encoding layout) ───────────────────────
+    // All FMOV variants share: bits[4:0]=Rd, bits[9:5]=Rn(source), bits[15:10]=opcode,
+    // bits[18:16]=rmode, bit[21]=1, bits[23:22]=ftype, bit[31]=sf.
+    fn rd_of(w: u32) -> u32    { w & 0x1F }
+    fn rn_of(w: u32) -> u32    { (w >> 5) & 0x1F }      // source register field
+    fn opcode_of(w: u32) -> u32 { (w >> 10) & 0x3F }
+    fn rmode_of(w: u32) -> u32 { (w >> 16) & 0x7 }
+    fn ftype_of(w: u32) -> u32 { (w >> 22) & 0x3 }
+    fn sf_of(w: u32) -> u32    { (w >> 31) & 1 }
+
+    fn expect_word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        // FMOV <Sd>, <Sn>: 0 00 11110 00 1 0000 00 10000 Rn Rd  (= 0x1E204000 | src<<5 | dst)
+        #[test]
+        fn prop_fmov_fp_to_fp_single_places_fields(src in 0u32..32, dst in 0u32..32) {
+            let ops = vec![Operand::Reg(format!("s{}", dst)), Operand::Reg(format!("s{}", src))];
+            let w = expect_word(encode_fmov(&ops));
+            let base = (0b00011110u32 << 24) | (0b100000 << 16) | (0b10000 << 10);
+            prop_assert_eq!(w, base | (src << 5) | dst);
+            // Round-trip: source lands in Rn field, dest in Rd field, no truncation.
+            prop_assert_eq!(rn_of(w), src);
+            prop_assert_eq!(rd_of(w), dst);
+            // Single precision => ftype == 00.
+            prop_assert_eq!(ftype_of(w), 0b00);
+        }
+
+        // FMOV <Dd>, <Dn>: 0 00 11110 01 1 0000 00 10000 Rn Rd  (= 0x1E604000 | src<<5 | dst)
+        #[test]
+        fn prop_fmov_fp_to_fp_double_sets_ftype(src in 0u32..32, dst in 0u32..32) {
+            let ops = vec![Operand::Reg(format!("d{}", dst)), Operand::Reg(format!("d{}", src))];
+            let w = expect_word(encode_fmov(&ops));
+            let base = (0b00011110u32 << 24) | (0b01 << 22) | (0b100000 << 16) | (0b10000 << 10);
+            prop_assert_eq!(w, base | (src << 5) | dst);
+            // Double precision => ftype == 01, i.e. bit 22 must be set.
+            prop_assert_eq!(ftype_of(w), 0b01);
+            prop_assert_eq!(rn_of(w), src);
+            prop_assert_eq!(rd_of(w), dst);
+        }
+
+        // FMOV (general) GP -> FP: sf 00 11110 ftype 1 00 111 000000 Rn Rd
+        // Dd<-Xn (sf=1,ftype=01) and Sd<-Wn (sf=0,ftype=00); rmode==111.
+        #[test]
+        fn prop_fmov_gp_to_fp_uses_rmode111(src in 0u32..32, dst in 0u32..32, dbl in any::<bool>()) {
+            let (dst_reg, src_reg, sf, ftype) = if dbl {
+                (format!("d{}", dst), format!("x{}", src), 1u32, 0b01u32)
+            } else {
+                (format!("s{}", dst), format!("w{}", src), 0u32, 0b00u32)
+            };
+            let ops = vec![Operand::Reg(dst_reg), Operand::Reg(src_reg)];
+            let w = expect_word(encode_fmov(&ops));
+            prop_assert_eq!(sf_of(w), sf);
+            prop_assert_eq!(ftype_of(w), ftype);
+            prop_assert_eq!(rmode_of(w), 0b111);   // GP->FP conversion select
+            prop_assert_eq!(opcode_of(w), 0);       // 000000
+            prop_assert_eq!(rn_of(w), src);
+            prop_assert_eq!(rd_of(w), dst);
+        }
+
+        // FMOV (general) FP -> GP: sf 00 11110 ftype 1 00 110 000000 Rn Rd
+        // Xd<-Dn (sf=1,ftype=01) and Wd<-Sn (sf=0,ftype=00); rmode==110.
+        #[test]
+        fn prop_fmov_fp_to_gp_uses_rmode110(src in 0u32..32, dst in 0u32..32, dbl in any::<bool>()) {
+            let (dst_reg, src_reg, sf, ftype) = if dbl {
+                (format!("x{}", dst), format!("d{}", src), 1u32, 0b01u32)
+            } else {
+                (format!("w{}", dst), format!("s{}", src), 0u32, 0b00u32)
+            };
+            let ops = vec![Operand::Reg(dst_reg), Operand::Reg(src_reg)];
+            let w = expect_word(encode_fmov(&ops));
+            prop_assert_eq!(sf_of(w), sf);
+            prop_assert_eq!(ftype_of(w), ftype);
+            prop_assert_eq!(rmode_of(w), 0b110);   // FP->GP conversion select
+            prop_assert_eq!(opcode_of(w), 0);
+            prop_assert_eq!(rn_of(w), src); // FP source in Rn field
+            prop_assert_eq!(rd_of(w), dst); // GP dest in Rd field
+        }
+
+        // Negative / arity / range contract: immediates, too-few operands, and
+        // out-of-range register numbers must all be rejected (no silent truncation).
+        #[test]
+        fn prop_fmov_rejects_immediate_arity_and_out_of_range(
+            imm in any::<i64>(), n in 0u32..200u32
+        ) {
+            // Immediate operand: code documents this as unsupported -> Err.
+            let imm_ops = vec![Operand::Reg("s0".into()), Operand::Imm(imm)];
+            prop_assert!(encode_fmov(&imm_ops).is_err());
+
+            // Arity: 0 or 1 operands -> Err ("requires 2 operands").
+            prop_assert!(encode_fmov(&[]).is_err());
+            prop_assert!(encode_fmov(&[Operand::Reg("s0".into())]).is_err());
+
+            // Out-of-range register numbers must NOT be truncated into the 5-bit field.
+            if n > 31 {
+                let ops = vec![Operand::Reg(format!("s{}", n)), Operand::Reg("s0".into())];
+                prop_assert!(
+                    encode_fmov(&ops).is_err(),
+                    "register s{} should be rejected, not masked into 5 bits", n
+                );
+            }
+        }
+        // Width/precision negative contract: FMOV's GP/FP transfer forms only
+        // allow W<->S and X<->D, and FP<->FP requires matching precision.
+        #[test]
+        fn prop_fmov_rejects_width_precision_mismatch(n in 0u32..32) {
+            let cases = [
+                vec![Operand::Reg(format!("d{}", n)), Operand::Reg(format!("w{}", n))],
+                vec![Operand::Reg(format!("s{}", n)), Operand::Reg(format!("x{}", n))],
+                vec![Operand::Reg(format!("w{}", n)), Operand::Reg(format!("d{}", n))],
+                vec![Operand::Reg(format!("x{}", n)), Operand::Reg(format!("s{}", n))],
+                vec![Operand::Reg(format!("d{}", n)), Operand::Reg(format!("s{}", n))],
+                vec![Operand::Reg(format!("s{}", n)), Operand::Reg(format!("d{}", n))],
+            ];
+            for ops in cases {
+                prop_assert!(encode_fmov(&ops).is_err(), "mismatched FMOV operands should be Err, got {:?}", encode_fmov(&ops));
+            }
+        }
+    }
+}

@@ -3435,3 +3435,177 @@ mod prop_encode_adrp_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_cas_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ORACLE: reference-encoding / field-placement for ARMv8-A CAS (Compare and
+    // Swap), per ARM ARM §C6.2.21 "CAS" / encoding
+    //   `size 001000 1 L 1 Rs o0 11111 Rn Rt`.
+    // Properties are anchored to HAND-DERIVED golden words (not this crate's
+    // own formula), so each field-layout check is independent of the code:
+    //   cas   x0,x1,[x2] = 0xC8A07C41   (size=11, L=0, o0=0)
+    //   casa  x0,x1,[x2] = 0xC8E07C41   (size=11, L=1)
+    //   casl  x0,x1,[x2] = 0xC8A0FC41   (size=11, o0=1)
+    //   casal x0,x1,[x2] = 0xC8E0FC41   (size=11, L=1, o0=1)
+    //   cas   w0,w1,[w2] = 0x88A07C41   (size=10)
+    //   casb  w0,w1,[w2] = 0x08A07C41   (size=00)
+    //   cash  w0,w1,[w2] = 0x48A07C41   (size=01)
+    // Field map: size[31:30] | 001000[29:24] | 1[23] | L[22] | 1[21] | Rs[20:16]
+    //            | o0[15] | 11111[14:10] | Rn[9:5] | Rt[4:0].
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+    fn mem(base: &str) -> Operand {
+        Operand::Mem { base: base.to_string(), offset: 0 }
+    }
+    fn reg(prefix: char, n: u32) -> Operand {
+        Operand::Reg(format!("{}{}", prefix, n))
+    }
+
+    /// The 12 architecturally-valid CAS variants, grouped by size class:
+    /// 0 = word/doubleword (size from register width), 1 = byte (size=00),
+    /// 2 = halfword (size=01).
+    fn variants() -> &'static [(&'static str, u8)] {
+        &[
+            ("cas", 0), ("casa", 0), ("casl", 0), ("casal", 0),
+            ("casb", 1), ("casab", 1), ("caslb", 1), ("casalb", 1),
+            ("cash", 2), ("casah", 2), ("caslh", 2), ("casalh", 2),
+        ]
+    }
+
+    proptest! {
+        // Property 1 — fixed bits: [29:24]=001000, [23]=1, [21]=1, [14:10]=11111
+        // are constant across every variant and every register value.
+        #[test]
+        fn prop_fixed_bits_constant(
+            vi in 0usize..12usize,
+            rs in 0u32..=31u32,
+            rt in 0u32..=31u32,
+            rn in 0u32..=31u32,
+        ) {
+            let (mn, sc) = variants().get(vi).copied().unwrap();
+            let rp = if sc == 0 { 'x' } else { 'w' };
+            let ops = vec![reg(rp, rs), reg(rp, rt), mem(&format!("x{}", rn))];
+            let w = word(encode_cas(mn, &ops));
+            prop_assert_eq!((w >> 24) & 0x3F, 0b001000u32); // [29:24]
+            prop_assert_eq!((w >> 23) & 1, 1u32);           // [23]
+            prop_assert_eq!((w >> 21) & 1, 1u32);           // [21]
+            prop_assert_eq!((w >> 10) & 0x1F, 0b11111u32);  // [14:10]
+        }
+
+        // Property 2 — field placement: Rs -> [20:16], Rn -> [9:5], Rt -> [4:0].
+        #[test]
+        fn prop_field_placement(
+            vi in 0usize..12usize,
+            rs in 0u32..=31u32,
+            rt in 0u32..=31u32,
+            rn in 0u32..=31u32,
+        ) {
+            let (mn, sc) = variants().get(vi).copied().unwrap();
+            let rp = if sc == 0 { 'x' } else { 'w' };
+            let ops = vec![reg(rp, rs), reg(rp, rt), mem(&format!("x{}", rn))];
+            let w = word(encode_cas(mn, &ops));
+            prop_assert_eq!((w >> 16) & 0x1F, rs); // Rs [20:16]
+            prop_assert_eq!((w >> 5) & 0x1F, rn);  // Rn [9:5]
+            prop_assert_eq!(w & 0x1F, rt);         // Rt [4:0]
+        }
+
+        // Property 3 — differential: an 'a' (acquire) suffix flips ONLY bit 22
+        // (L) and an 'l' (release) suffix flips ONLY bit 15 (o0); nothing else
+        // changes relative to the plain variant of the same size class.
+        #[test]
+        fn prop_acquire_release_only_flips_l_o0(
+            sc in 0u8..3u8,
+            acq in any::<bool>(),
+            rel in any::<bool>(),
+            rs in 0u32..=31u32,
+            rt in 0u32..=31u32,
+            rn in 0u32..=31u32,
+        ) {
+            let size_suffix = match sc { 1 => "b", 2 => "h", _ => "" };
+            let rp = if sc == 0 { 'x' } else { 'w' };
+            let ops = vec![reg(rp, rs), reg(rp, rt), mem(&format!("x{}", rn))];
+            let plain = word(encode_cas(&format!("cas{}", size_suffix), &ops));
+            let mut suf = String::from("cas");
+            if acq { suf.push('a'); }
+            if rel { suf.push('l'); }
+            suf.push_str(size_suffix);
+            let with_ar = word(encode_cas(&suf, &ops));
+            let expected_xor =
+                (if acq { 1u32 << 22 } else { 0 }) |
+                (if rel { 1u32 << 15 } else { 0 });
+            prop_assert_eq!(plain ^ with_ar, expected_xor);
+        }
+
+        // Property 4 — size mapping: byte suffix -> size=00, half -> 01; for the
+        // plain form size follows the Rs register width (x -> 11, w -> 10).
+        #[test]
+        fn prop_size_from_suffix_and_width(
+            sc in 0u8..3u8,
+            rs_is_64 in any::<bool>(),
+        ) {
+            let size_suffix = match sc { 1 => "b", 2 => "h", _ => "" };
+            let mn = format!("cas{}", size_suffix);
+            let rp = if sc == 0 { if rs_is_64 { 'x' } else { 'w' } } else { 'w' };
+            let ops = vec![reg(rp, 7), reg(rp, 8), mem("x2")];
+            let w = word(encode_cas(&mn, &ops));
+            let expected = match sc {
+                1 => 0b00u32,
+                2 => 0b01u32,
+                _ => if rs_is_64 { 0b11u32 } else { 0b10u32 },
+            };
+            prop_assert_eq!((w >> 30) & 0b11, expected);
+        }
+
+        // Property 5 — negative contract: fewer than 3 operands, a non-memory
+        // third operand, or an out-of-range register number (>31) must all be
+        // rejected (parse_reg_num/get_reg already enforce the 0..=31 range).
+        #[test]
+        fn prop_negative_contract(kind in 0u8..5u8) {
+            let r = match kind {
+                0 => encode_cas("cas", &[]),
+                1 => encode_cas("cas", &[reg('x', 0)]),
+                2 => encode_cas("cas", &[reg('x', 0), reg('x', 1)]),
+                3 => encode_cas("cas", &[reg('x', 0), reg('x', 1), Operand::Imm(5)]),
+                _ => encode_cas("cas", &[reg('x', 32), reg('x', 1), mem("x2")]),
+            };
+            prop_assert!(r.is_err(), "expected Err, got {:?}", r);
+        }
+
+        // Property 6 — negative contract: ARMv8-A CAS requires Rs and Rt to be
+        // the SAME width, and byte/half (CASB/CASH) forms must use W (32-bit)
+        // registers only (ARM ARM §C6.2.21). These combinations are
+        // architecturally UNDEFINED and must be rejected.
+        //
+        // NOTE: this property is EXPECTED TO FAIL against the current
+        // implementation — it documents the validation gap described in
+        // pbt-out/bug_reports/encode_cas-mixed-width-operand-validation.md.
+        #[test]
+        fn prop_width_violation_rejected(kind in 0u8..5u8) {
+            let ops = match kind {
+                // byte CAS with 64-bit (X) registers
+                0 => ("casb", vec![reg('x', 0), reg('x', 1), mem("x2")]),
+                1 => ("casab", vec![reg('x', 5), reg('x', 6), mem("x3")]),
+                // halfword CAS with 64-bit (X) registers
+                2 => ("cash", vec![reg('x', 0), reg('x', 1), mem("x2")]),
+                // plain CAS: Rs (W) and Rt (X) differ
+                3 => ("cas", vec![reg('w', 0), reg('x', 1), mem("x2")]),
+                // plain CAS: Rs (X) and Rt (W) differ
+                _ => ("cas", vec![reg('x', 0), reg('w', 1), mem("x2")]),
+            };
+            let r = encode_cas(ops.0, &ops.1);
+            prop_assert!(
+                r.is_err(),
+                "{} {:?}: expected Err for register-width violation, got Ok",
+                ops.0, ops.1
+            );
+        }
+    }
+}
