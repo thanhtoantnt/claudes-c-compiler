@@ -876,6 +876,184 @@ pub(crate) fn encode_swp(mnemonic: &str, operands: &[Operand]) -> Result<EncodeR
     Ok(EncodeResult::Word(word))
 }
 
+#[cfg(test)]
+mod prop_encode_swp_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: reference-encoding / field-placement (ARMv8.1-A LSE atomics,
+    // ARM ARM §C6.2.272 SWP and the size/acquire/release variants
+    // SWPA/SWPAL/SWPL/SWPB/SWPH/...).
+    //
+    // SWP encoding (all variants):
+    //   size[31:30] 111000[29:24] A[23] R[22] 1[21] Rs[20:16] 1[15]
+    //     00000[14:10] Rn[9:5] Rt[4:0]
+    //
+    //   size: 00 = byte (swpb*), 01 = half (swph*),
+    //         10 = 32-bit (W regs), 11 = 64-bit (X regs)
+    //   A: acquire (mnemonic contains 'a')  R: release (mnemonic contains 'l')
+    //
+    // Hand-derived golden encodings (built directly from the ARM ARM bit
+    // layout above, NOT from this crate's own formula):
+    //   swp  x0,x1,[x2] = 0xF8208041   swp  w0,w1,[x2] = 0xB8208041
+    //   swpb w0,w1,[x2] = 0x38208041   swph w0,w1,[x2] = 0x78208041
+    //   swpa x0,x1,[x2] = 0xF8A08041   swpl x0,x1,[x2] = 0xF8608041
+    //   swpal x0,x1,[x2]= 0xF8E08041
+
+    /// All 12 SWP-family mnemonics dispatched to `encode_swp`.
+    const SWP_MNEMONICS: &[&str] = &[
+        "swp", "swpa", "swpal", "swpl",
+        "swpb", "swpab", "swpalb", "swplb",
+        "swph", "swpah", "swpalh", "swplh",
+    ];
+
+    fn gp_reg(width: char, num: u32) -> Operand {
+        Operand::Reg(format!("{}{}", width, num))
+    }
+    fn mem_op(base_num: u32) -> Operand {
+        Operand::Mem { base: format!("x{}", base_num), offset: 0 }
+    }
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    prop_compose! {
+        fn arb_reg()(num in 0u32..=31u32, wide in any::<bool>()) -> (char, u32) {
+            (if wide { 'x' } else { 'w' }, num)
+        }
+    }
+    prop_compose! {
+        fn arb_mn()(idx in 0usize..SWP_MNEMONICS.len()) -> &'static str {
+            SWP_MNEMONICS[idx]
+        }
+    }
+
+    proptest! {
+        // Property 1 — register-field placement (ARM ARM layout).
+        // Rs occupies [20:16], Rt occupies [4:0], Rn occupies [9:5] for any
+        // register numbers and any mnemonic variant.
+        #[test]
+        fn prop_rs_rt_rn_field_placement(
+            (rw, rs_num) in arb_reg(),
+            (tw, rt_num) in arb_reg(),
+            rn_num in 0u32..=31u32,
+            mn in arb_mn(),
+        ) {
+            let ops = vec![gp_reg(rw, rs_num), gp_reg(tw, rt_num), mem_op(rn_num)];
+            let w = word(encode_swp(mn, &ops));
+            prop_assert_eq!((w >> 16) & 0x1F, rs_num, "Rs field [20:16]");
+            prop_assert_eq!(w & 0x1F, rt_num, "Rt field [4:0]");
+            prop_assert_eq!((w >> 5) & 0x1F, rn_num, "Rn field [9:5]");
+        }
+
+        // Property 2 — fixed opcode bits are constant & well-formed.
+        // [29:24]=111000, bit[21]=1, bit[15]=1, [14:10]=0.
+        #[test]
+        fn prop_fixed_opcode_bits(
+            (rw, rs_num) in arb_reg(),
+            (tw, rt_num) in arb_reg(),
+            rn_num in 0u32..=31u32,
+            mn in arb_mn(),
+        ) {
+            let ops = vec![gp_reg(rw, rs_num), gp_reg(tw, rt_num), mem_op(rn_num)];
+            let w = word(encode_swp(mn, &ops));
+            prop_assert_eq!((w >> 24) & 0x3F, 0b111000u32, "opcode [29:24]");
+            prop_assert_eq!((w >> 21) & 1, 1u32, "fixed bit 21");
+            prop_assert_eq!((w >> 15) & 1, 1u32, "fixed bit 15");
+            prop_assert_eq!((w >> 10) & 0x1F, 0u32, "fixed zero [14:10]");
+        }
+
+        // Property 3 — width differential.
+        // For size-suffix-free forms (swp/swpa/swpal/swpl) only bit 30 (size
+        // MSB: 11 for X vs 10 for W) flips; for byte/half forms the word is
+        // width-invariant because size is driven by the mnemonic.
+        #[test]
+        fn prop_width_differential(
+            rs_num in 0u32..=31u32,
+            rt_num in 0u32..=31u32,
+            rn_num in 0u32..=31u32,
+            mn in arb_mn(),
+        ) {
+            let x = word(encode_swp(mn, &[gp_reg('x', rs_num), gp_reg('x', rt_num), mem_op(rn_num)]));
+            let w = word(encode_swp(mn, &[gp_reg('w', rs_num), gp_reg('w', rt_num), mem_op(rn_num)]));
+            if mn.contains('b') || mn.contains('h') {
+                prop_assert_eq!(x, w, "size-suffix mnemonic must be width-invariant");
+            } else {
+                prop_assert_eq!(x ^ w, 1u32 << 30, "X vs W must flip only bit 30");
+            }
+        }
+
+        // Property 4 — acquire/release differential.
+        // Adding 'a' flips ONLY bit 23; adding 'l' flips ONLY bit 22.
+        #[test]
+        fn prop_acrel_differential(
+            rs_num in 0u32..=31u32,
+            rt_num in 0u32..=31u32,
+            rn_num in 0u32..=31u32,
+            pair_idx in 0u8..4,
+        ) {
+            let ops = vec![gp_reg('x', rs_num), gp_reg('x', rt_num), mem_op(rn_num)];
+            let (m0, m1) = match pair_idx {
+                0 => ("swp", "swpa"),
+                1 => ("swp", "swpl"),
+                2 => ("swpa", "swpal"),
+                _ => ("swpl", "swpal"),
+            };
+            let w0 = word(encode_swp(m0, &ops));
+            let w1 = word(encode_swp(m1, &ops));
+            let a_diff = m1.contains('a') != m0.contains('a');
+            let l_diff = m1.contains('l') != m0.contains('l');
+            let mut expected = 0u32;
+            if a_diff { expected |= 1 << 23; }
+            if l_diff { expected |= 1 << 22; }
+            prop_assert_eq!(w0 ^ w1, expected, "acquire/release differential");
+        }
+
+        // Property 5 — NEGATIVE CONTRACT.
+        // Fewer than 3 operands, or a third operand that is not a memory
+        // operand, must be rejected with Err rather than encoding garbage.
+        #[test]
+        fn prop_rejects_bad_operands(n in 0u32..3u32, bad_kind in 0u8..3u8) {
+            // too few operands
+            let short: Vec<Operand> = (0..n).map(|i| gp_reg('x', i)).collect();
+            prop_assert!(encode_swp("swp", &short).is_err(),
+                "expected Err for {} operands", n);
+            // non-memory third operand
+            let bad_third = match bad_kind {
+                0 => gp_reg('x', 5),
+                1 => Operand::Imm(7),
+                _ => Operand::Symbol("foo".to_string()),
+            };
+            let ops = vec![gp_reg('x', 0), gp_reg('x', 1), bad_third];
+            prop_assert!(encode_swp("swp", &ops).is_err(),
+                "expected Err for non-Mem 3rd operand");
+        }
+    }
+
+    // Deterministic reference-oracle anchor: hand-derived golden words.
+    #[test]
+    fn golden_encodings_match_reference() {
+        let cases: &[(&str, char, u32)] = &[
+            ("swp",  'x', 0xF8208041),
+            ("swp",  'w', 0xB8208041),
+            ("swpb", 'w', 0x38208041),
+            ("swph", 'w', 0x78208041),
+            ("swpa", 'x', 0xF8A08041),
+            ("swpl", 'x', 0xF8608041),
+            ("swpal",'x', 0xF8E08041),
+        ];
+        for &(mn, width, golden) in cases {
+            let ops = vec![gp_reg(width, 0), gp_reg(width, 1), mem_op(2)];
+            let w = word(encode_swp(mn, &ops));
+            assert_eq!(w, golden, "golden mismatch for {} {}0,{}1,[x2]", mn, width, width);
+        }
+    }
+}
+
 /// Encode LDADD/LDCLR/LDEOR/LDSET and their acquire/release/byte/halfword variants (LSE atomics).
 /// LDADD Rs, Rt, [Xn]: size 111000 A R 1 Rs 0 opc 00 Rn Rt
 /// opc: LDADD=000, LDCLR=001, LDEOR=010, LDSET=011

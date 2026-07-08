@@ -398,4 +398,131 @@ mod tests {
             }
         }
     }
+
+    // ── encode_fp_arith (FP data-processing, 2-source) =====================
+    // Layout: 0 00 11110 ftype 1 Rm opcode 10 Rn Rd
+    //   bits[4:0]=Rd, [9:5]=Rn, [11:10]=0b10, [15:12]=opcode(4-bit),
+    //   [20:16]=Rm, [21]=1, [23:22]=ftype, [30:24]=0b00011110, [31]=0.
+    fn fp_rm_of(w: u32) -> u32   { (w >> 16) & 0x1F }
+    fn fp_opc_of(w: u32) -> u32  { (w >> 12) & 0xF }
+    fn fp_fixed_of(w: u32) -> u32 { (w >> 10) & 0b11 }
+
+    proptest! {
+        // Oracle: reference / field layout. Homogeneous-precision FP
+        // operands + valid 4-bit opcode => every field at its canonical bit
+        // position with no truncation.
+        #[test]
+        fn prop_fp_arith_places_fields(
+            rd in 0u32..32, rn in 0u32..32, rm in 0u32..32,
+            opcode in 0u32..16, dbl in any::<bool>(),
+        ) {
+            let p = if dbl { "d" } else { "s" };
+            let ops = vec![
+                Operand::Reg(format!("{}{}", p, rd)),
+                Operand::Reg(format!("{}{}", p, rn)),
+                Operand::Reg(format!("{}{}", p, rm)),
+            ];
+            let w = expect_word(encode_fp_arith(&ops, opcode));
+
+            // Fixed bits of the scalar FP data-processing (2-source) encoding.
+            prop_assert_eq!(w >> 24, 0b0001_1110u32); // [31:24] = 0x1E (sf=0 + 00011110)
+            prop_assert_eq!((w >> 21) & 1, 1u32);      // bit 21 = 1
+            prop_assert_eq!(fp_fixed_of(w), 0b10u32); // [11:10] = 0b10
+
+            // Register fields round-trip exactly into their 5-bit slots.
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(fp_rm_of(w), rm);
+
+            // Opcode round-trips into the 4-bit [15:12] slot.
+            prop_assert_eq!(fp_opc_of(w), opcode);
+        }
+
+        // Oracle: reference / precision. ftype is derived solely from the
+        // destination register: 'd' => 01 (double), else => 00 (single).
+        #[test]
+        fn prop_fp_arith_ftype_from_dest(
+            rd in 0u32..32, rn in 0u32..32, rm in 0u32..32, dbl in any::<bool>(),
+        ) {
+            let p = if dbl { "d" } else { "s" };
+            let ops = vec![
+                Operand::Reg(format!("{}{}", p, rd)),
+                Operand::Reg(format!("{}{}", p, rn)),
+                Operand::Reg(format!("{}{}", p, rm)),
+            ];
+            let w = expect_word(encode_fp_arith(&ops, 0b0010));
+            prop_assert_eq!(ftype_of(w), if dbl { 0b01 } else { 0b00 });
+            prop_assert_eq!(sf_of(w), 0); // scalar FP, never sf=1
+        }
+
+        // Oracle: determinism. Same operands + opcode => identical word.
+        #[test]
+        fn prop_fp_arith_is_deterministic(
+            rd in 0u32..32, rn in 0u32..32, rm in 0u32..32, opcode in 0u32..16,
+        ) {
+            let ops = vec![
+                Operand::Reg(format!("d{}", rd)),
+                Operand::Reg(format!("d{}", rn)),
+                Operand::Reg(format!("d{}", rm)),
+            ];
+            let w1 = expect_word(encode_fp_arith(&ops, opcode));
+            let w2 = expect_word(encode_fp_arith(&ops, opcode));
+            prop_assert_eq!(w1, w2);
+        }
+
+        // Negative contract (validated): out-of-range FP register numbers
+        // (>= 32) MUST be rejected, not masked into the 5-bit field.
+        #[test]
+        fn prop_fp_arith_rejects_out_of_range_reg(n in 32u32..256u32, pos in 0u32..3u32) {
+            let mut names = vec!["d0".to_string(), "d0".to_string(), "d0".to_string()];
+            names[pos as usize] = format!("d{}", n);
+            let ops: Vec<Operand> = names.into_iter().map(Operand::Reg).collect();
+            prop_assert!(
+                encode_fp_arith(&ops, 0b0010).is_err(),
+                "register d{} must be rejected (5-bit field), not silently masked", n
+            );
+        }
+
+        // Negative contract (FINDING — see BUGS_fp_arith.md): FP arithmetic
+        // must reject non-FP (GP) operands, mixed-precision operands, and
+        // opcodes that overflow the 4-bit opcode field. Currently NONE of
+        // these are checked, so this property FAILS by design.
+        #[test]
+        fn prop_fp_arith_rejects_wrong_banks_precision_and_oversized_opcode(
+            n in 0u32..32, bad_opcode in 16u32..256u32,
+        ) {
+            // 1. GP-register operands are not valid for FP arithmetic.
+            let gp = vec![
+                Operand::Reg(format!("x{}", n)),
+                Operand::Reg(format!("x{}", n)),
+                Operand::Reg(format!("x{}", n)),
+            ];
+            prop_assert!(
+                encode_fp_arith(&gp, 0b0010).is_err(),
+                "GP registers (x{}) are not valid FP operands", n
+            );
+
+            // 2. Mixed precision across dest/source must be rejected.
+            let mix = vec![
+                Operand::Reg(format!("d{}", n)),
+                Operand::Reg(format!("s{}", n)),
+                Operand::Reg(format!("s{}", n)),
+            ];
+            prop_assert!(
+                encode_fp_arith(&mix, 0b0010).is_err(),
+                "mixed precision (Dd, Sn, Sm) must be rejected"
+            );
+
+            // 3. opcode must fit 4 bits; >= 16 corrupts the Rm field.
+            let ok = vec![
+                Operand::Reg("d0".into()),
+                Operand::Reg("d0".into()),
+                Operand::Reg("d0".into()),
+            ];
+            prop_assert!(
+                encode_fp_arith(&ok, bad_opcode).is_err(),
+                "opcode {} must be rejected (4-bit field), not OR'd into Rm", bad_opcode
+            );
+        }
+    }
 }
