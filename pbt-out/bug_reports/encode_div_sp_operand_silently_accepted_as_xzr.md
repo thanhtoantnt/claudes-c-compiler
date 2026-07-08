@@ -38,3 +38,4 @@ Failing property: `div_rejects_sp_operands`
 ```rust
 prop_assert!(encode_sdiv(&[xreg(0), xreg(1), Operand::Reg("sp".into())]).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/38

@@ -31,3 +31,4 @@ if offset % scale != 0 {
     return Err(format!("ldnp/stnp offset must be aligned to {} bytes: {}", scale, offset));
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/45

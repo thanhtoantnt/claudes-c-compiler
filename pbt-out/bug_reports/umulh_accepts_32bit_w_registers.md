@@ -118,3 +118,4 @@ input like `umulh x0, x1, x2, x3` is accepted and encoded as `umulh x0, x1, x2`
 (instead of erroring on the unexpected 4th operand). This is consistent with the
 rest of the encoder module (which uniformly lacks max-arity validation) and is
 recorded here as a characterization, not a regression target.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/123

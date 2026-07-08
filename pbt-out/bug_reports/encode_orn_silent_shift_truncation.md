@@ -63,3 +63,4 @@ In the `encode_orn` test block of `data_processing.rs::tests`:
 | 3 | `orn_differs_from_orr_only_in_n_bit` — differential vs `encode_logical(opc=01)`: XOR == `1<<21` | PASS |
 | 4 | `orn_neon_vector_form_fields` — bit31=0, Q tracks 8b/16b, op5=01110, size/op=11, fixed6=000111 | PASS |
 | 5 | `orn_negative_contracts` — (a) <3 operands → Err [PASS]; (b) W-reg shift 32..63 → Err | **FAIL (part b)** |
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/88

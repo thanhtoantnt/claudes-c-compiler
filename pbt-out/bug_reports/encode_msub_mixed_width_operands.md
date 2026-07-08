@@ -84,3 +84,4 @@ pub(crate) fn encode_msub(operands: &[Operand]) -> Result<EncodeResult, String> 
 Same class of bug as `encode_madd_mixed_width_operands.md`, `encode_div_mixed_width_operands.md`,
 `encode_adc_silent_mixed_width.md`, `encode_sbc_silent_mixed_width.md`, `encode_eon_mixed_register_widths.md`.
 Filed separately per function as requested; each affected encoder needs its own validation.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/68

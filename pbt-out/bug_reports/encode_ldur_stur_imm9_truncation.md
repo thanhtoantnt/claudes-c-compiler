@@ -94,3 +94,4 @@ Failing property: `prop_out_of_range_imm9_is_rejected`
 ```rust
 prop_assert!(encode_ldur_stur(&[xreg(0), mem_offset(xreg(1), 257)], true, 0).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/49

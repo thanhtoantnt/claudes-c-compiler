@@ -86,3 +86,4 @@ Failing property: `prop_forced_size_out_of_range_rejected`
 ```rust
 prop_assert!(encode_ldar_stlr(&[xreg(0), mem(xreg(1))], false, 4).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/43

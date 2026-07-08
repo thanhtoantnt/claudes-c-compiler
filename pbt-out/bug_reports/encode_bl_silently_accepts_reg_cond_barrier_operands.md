@@ -29,3 +29,4 @@ Invalid `BL` source is accepted and emitted as a relocation against names like `
 ## Suggested fix
 
 Use a stricter branch-target helper for `B`/`BL` that accepts only labels, symbols, symbol offsets, and symbol modifiers, and rejects parser token kinds that are instruction operands in this context (`Reg`, `Cond`, `Barrier`).
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/12

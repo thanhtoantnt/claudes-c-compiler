@@ -106,3 +106,4 @@ Failing property: `prop_rejects_al_nv_conditions`
 ```rust
 prop_assert!(encode_csetm(&[xreg(rd)], "al").is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/31

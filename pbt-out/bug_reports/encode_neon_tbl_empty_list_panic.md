@@ -84,3 +84,4 @@ The new `tbl_pbt_tests` module (same file) adds 7 properties:
 Note: the empty-list case is currently a panic; `prop_empty_list_does_not_panic`
 catches it via `catch_unwind` so the failure is reported cleanly. The regression
 seed is recorded in `proptest-regressions/backend/arm/assembler/encoder/neon.txt`.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/84

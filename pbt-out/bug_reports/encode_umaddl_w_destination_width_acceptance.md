@@ -33,3 +33,4 @@ if !rd64 || !ra64 {
     return Err("umaddl requires X destination and X accumulator".to_string());
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/105

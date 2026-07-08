@@ -69,3 +69,4 @@ correct — the only defect is the missing range check. This is the same
 silent-truncation bug pattern already documented by negative-contract
 properties on the sibling functions `encode_ldr_str`, `encode_ldur_stur`,
 `encode_ldp_stp`, and `encode_ldnp_stnp` in this same file.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/117

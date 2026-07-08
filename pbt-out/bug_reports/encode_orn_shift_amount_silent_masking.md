@@ -48,3 +48,4 @@ if shift_amount > max_shift {
 
 Any caller passing an out-of-range shift emits a different instruction than intended with no
 diagnostic — a silent miscompilation of the source assembly.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/87

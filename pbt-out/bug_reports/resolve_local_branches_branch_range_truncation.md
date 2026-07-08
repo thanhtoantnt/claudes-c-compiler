@@ -111,3 +111,4 @@ suite for this function:
 * `prop_branch_cross_section_uses_section_symbol` ✓
 * `prop_branch_jump26_call26_round_trips` ✓ (round-trip oracle on imm26)
 * `prop_branch_condbr19_tstbr14_round_trips` ✓ (round-trip oracle on imm19/imm14)
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/121

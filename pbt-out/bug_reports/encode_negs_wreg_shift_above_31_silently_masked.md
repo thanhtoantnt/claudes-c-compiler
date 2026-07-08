@@ -32,3 +32,4 @@ if shift_amount > max_shift {
     return Err(format!("negs shift out of range: {}", shift_amount));
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/82

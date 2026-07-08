@@ -84,3 +84,4 @@ fn get_gp_reg(operands: &[Operand], idx: usize) -> Result<(u32, bool), String> {
 ```
 
 and route `encode_csetm`'s `Rd` through it.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/32

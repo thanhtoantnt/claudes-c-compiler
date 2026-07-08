@@ -32,3 +32,4 @@ Failing property: `eon_unknown_shift_kind_is_rejected`
 ```rust
 prop_assert!(encode_eon(&[xreg(0), xreg(1), xreg(2)], "foo", 1).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/41

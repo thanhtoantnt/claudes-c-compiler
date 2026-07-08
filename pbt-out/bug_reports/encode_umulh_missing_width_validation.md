@@ -94,3 +94,4 @@ Added `mod umulh_props` with 5 property-based tests in
 | P3 | `umulh_rejects_too_few_operands` — negative contract | PASS |
 | P4 | `umulh_rejects_non_register_operands` — negative contract | PASS |
 | P5 | `umulh_rejects_wrong_width_operands` — spec: `W` → `Err` | **FAIL (this bug)** |
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/107

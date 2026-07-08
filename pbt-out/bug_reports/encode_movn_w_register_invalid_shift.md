@@ -35,3 +35,4 @@ match (*amount, is_64) {
     _ => return Err(format!("movn lsl shift {} invalid for {}-bit register", amount, if is_64 { 64 } else { 32 })),
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/64

@@ -86,3 +86,4 @@ let word = (1u32 << 31) | (0b0011011101 << 21) | (rm << 16)
     | (ra << 10) | (rn << 5) | rd;
 Ok(EncodeResult::Word(word))
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/104

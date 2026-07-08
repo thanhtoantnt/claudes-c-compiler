@@ -40,3 +40,4 @@ Collect the `is_64` flag from all four `get_reg` calls and assert equality:
 ## Related
 `madd_props::madd_rejects_sp_operand` (separate bug report) — same missing
 validation layer in `encode_madd`.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/56

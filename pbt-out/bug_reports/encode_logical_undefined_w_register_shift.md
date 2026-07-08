@@ -100,3 +100,4 @@ Failing property: `logical_w_reg_rejects_shift_above_31`
 ```rust
 prop_assert!(encode_logical(&[wreg(0), wreg(1), wreg(2)], "and", "lsl", 32).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/55

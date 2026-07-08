@@ -128,3 +128,4 @@ Properties added in `src/backend/arm/assembler/encoder/data_processing.rs`
 
 P3 documents the current (incorrect) behavior; P4 asserts the spec-correct
 behavior and is the property that fails, proving the gap.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/70

@@ -54,3 +54,4 @@ a word whose Q bit is wrong and which decodes as an `ORN Vd.8b, …` — a silen
 that is undetectable until runtime. The same `if arr_d == "16b" { 1 } else { 0 }` pattern (no
 arrangement validation) recurs across many NEON encoders in this file/dir and likely harbours
 the identical defect.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/86

@@ -68,3 +68,4 @@ if !(*nzcv >= 0 && *nzcv <= 15) {
 
 The masked writes (`& 0x1F`, `& 0xF`) can then be left in place as a defensive
 no-op or removed once range validation guarantees they are identity.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/21

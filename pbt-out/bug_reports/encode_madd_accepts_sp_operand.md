@@ -25,3 +25,4 @@ A source typo that names `sp` instead of `xzr` is accepted without diagnostic, c
 ## Suggested fix
 
 Reject `sp`/`wsp` in the accumulator position for MADD/MSUB-style data-processing (3-source) encoders before converting the token to a register number.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/57

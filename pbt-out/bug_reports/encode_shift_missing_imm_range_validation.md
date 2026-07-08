@@ -71,3 +71,4 @@ if !(lo..width).contains(&imm) {
 
 The differential oracles confirm the *encoding formula is correct for all legal inputs*;
 the only defect is the missing range-validation guard.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/94

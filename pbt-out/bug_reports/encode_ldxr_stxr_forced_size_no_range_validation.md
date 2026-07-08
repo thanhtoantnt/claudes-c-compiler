@@ -99,3 +99,4 @@ Failing property: `prop_forced_size_out_of_range_rejected`
 ```rust
 prop_assert!(encode_ldxr_stxr(&[xreg(0), mem(xreg(1))], true, Some(4)).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/53

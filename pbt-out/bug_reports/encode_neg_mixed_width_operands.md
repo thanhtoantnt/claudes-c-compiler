@@ -24,3 +24,4 @@ A source typo or macro-generated mixed-width NEG assembles successfully but uses
 ## Suggested fix
 
 Compare the `is_64` flags returned by `get_reg` for `Rd` and `Rm`; return `Err` when they differ.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/74

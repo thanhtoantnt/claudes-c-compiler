@@ -79,3 +79,4 @@ current code encodes them (e.g. `mvn w0, w0, lsl #40` succeeds and emits imm6=40
 | 4 | `sf_bit_tracks_register_width` | PASS |
 | 5 | `mvn_equals_orn_with_xzr_rn` (differential vs `encode_orn`) | PASS |
 | 6 | `out_of_range_shift_amount_is_rejected` (negative contract) | **FAIL** |
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/72

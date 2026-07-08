@@ -23,3 +23,4 @@ Invalid source is accepted and assembled as a different instruction than written
 ## Suggested fix
 
 For multiply/long-multiply instruction classes, reject `sp`/`wsp` before converting to a register number.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/98

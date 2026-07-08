@@ -83,3 +83,4 @@ The 4 passing properties confirm the *field placement and opcode bits* of the
 encoder are correct (every field lands exactly where the ARM ARM mandates,
 cross-checked against `llvm-mc-18`). The only defect is the missing offset
 validation.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/115

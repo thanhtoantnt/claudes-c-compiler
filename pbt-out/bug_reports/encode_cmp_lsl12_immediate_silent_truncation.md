@@ -115,3 +115,4 @@ Failing property: `prop_rejects_large_imm_with_explicit_shift`
 ```rust
 prop_assert!(encode_cmp(&[wreg(rn), Operand::Imm(4097), Operand::Shift { kind: "lsl".into(), amount: 12 }]).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/26

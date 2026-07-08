@@ -92,3 +92,4 @@ Failing property: `div_rejects_mixed_register_widths`
 ```rust
 prop_assert!(encode_sdiv(&[xreg(0), wreg(1), wreg(2)]).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/37

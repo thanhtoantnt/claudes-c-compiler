@@ -24,3 +24,4 @@ A bad shift amount silently assembles into a different instruction, changing pro
 ## Suggested fix
 
 Validate shift range against operand width before encoding (`31` for W, `63` for X).
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/78

@@ -1632,6 +1632,119 @@ mod tests {
         }
     }
 
+    // ── encode_add_sub: extended-register / UXTX focused oracles ──────────
+    //
+    // ARMv8 ARM "ADD/SUB (extended register)" bit-string:
+    //   sf op S 01011 00 1 Rm option imm3 Rn Rd
+    // where option=0b011 selects UXTX and imm3 is the optional additional
+    // left shift (range 0..=4 per the ARM, default 0).
+    //
+    // The full-word reference constant below was cross-validated against
+    // LLVM/clang: `add x0,x1,x2,uxtx` assembles to 0x8b226020, i.e.
+    //   0x8B206000 | (rm<<16) | (rn<<5) | rd   (with rm=2,rn=1,rd=0).
+    // clang --target=aarch64 also confirms uxtx #5 is rejected
+    // ("integer in range [0, 4]") and an unknown extend mnemonic is rejected.
+    proptest! {
+        // E1. Full-word reference oracle (UXTX, no shift): the encoded word
+        //     equals the spec-derived constant with Rm/Rn/Rd placed in their
+        //     fields. This is the strongest positive oracle for the UXTX path.
+        #[test]
+        fn add_uxtx_reference_encoding(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm),
+                           Operand::Extend { kind: "uxtx".into(), amount: 0 }];
+            let w = expect_word(encode_add_sub(&ops, false, false));
+            let expected = 0x8B206000u32 | (rm << 16) | (rn << 5) | rd;
+            prop_assert_eq!(w, expected);
+        }
+
+        // E2. UXTX with a valid additional shift (0..=4): the imm3 field
+        //     (bits 12:10) round-trips the shift amount exactly, option stays
+        //     UXTX (0b011), and the extended-register indicator (bit 21) is set.
+        #[test]
+        fn add_uxtx_shift_round_trips(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            amount in 0u32..=4u32,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm),
+                           Operand::Extend { kind: "uxtx".into(), amount }];
+            let w = expect_word(encode_add_sub(&ops, false, false));
+            prop_assert_eq!(opcode5_of(w), 0b01011);
+            prop_assert_eq!(ext21_of(w), 1);          // extended register form
+            prop_assert_eq!(option_of(w), 0b011);     // UXTX
+            prop_assert_eq!(imm3_of(w), amount);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // E3. UXTX op/S propagation: SUB vs ADD and the flag-setting variants
+        //     flip op (bit 30) and S (bit 29) while leaving the UXTX option
+        //     field and the extended-register layout untouched.
+        #[test]
+        fn add_uxtx_op_and_flags_propagate(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            is_sub in any::<bool>(),
+            set_flags in any::<bool>(),
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm),
+                           Operand::Extend { kind: "uxtx".into(), amount: 0 }];
+            let w = expect_word(encode_add_sub(&ops, is_sub, set_flags));
+            prop_assert_eq!(sf_of(w), 1);
+            prop_assert_eq!(op_of(w), if is_sub { 1 } else { 0 });
+            prop_assert_eq!(s_of(w), if set_flags { 1 } else { 0 });
+            prop_assert_eq!(opcode5_of(w), 0b01011);
+            prop_assert_eq!(ext21_of(w), 1);
+            prop_assert_eq!(option_of(w), 0b011);     // UXTX unchanged
+        }
+
+        // E4. NEGATIVE CONTRACT (spec, llvm-validated): for the extended-register
+        //     form the additional shift (imm3) is restricted to 0..=4. A UXTX
+        //     shift of 5, 6, or 7 is UNDEFINED and MUST be rejected (clang emits
+        //     "integer in range [0, 4]"). The encoder masks the amount with
+        //     `& 0x7` and silently accepts it — this property asserts the
+        //     spec-correct rejection and is EXPECTED TO FAIL, flagging the gap.
+        #[test]
+        fn add_uxtx_shift_above_4_must_be_rejected(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            amount in 5u32..=7u32,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm),
+                           Operand::Extend { kind: "uxtx".into(), amount }];
+            prop_assert!(encode_add_sub(&ops, false, false).is_err());
+        }
+
+        // E5. NEGATIVE CONTRACT (spec, llvm-validated): an extend mnemonic that
+        //     is not one of the eight valid AArch64 extend kinds has no encoding.
+        //     clang rejects `add x0,x1,x2,foo`. The encoder's `_ => 0b011` arm
+        //     silently maps ANY unrecognized kind to UXTX instead of returning
+        //     Err. This property asserts rejection and is EXPECTED TO FAIL,
+        //     flagging the silent-default-to-UXTX gap.
+        #[test]
+        fn add_extended_register_rejects_unknown_extend_kind(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            kind in "(ux|sx|lsl)zz|foo|bogus|extend|sxtq|uxtx2".prop_filter(
+                "must not be a valid extend kind",
+                |k| !matches!(k.as_str(),
+                    "uxtb"|"uxth"|"uxtw"|"uxtx"|"sxtb"|"sxth"|"sxtw"|"sxtx")),
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm),
+                           Operand::Extend { kind: kind.into(), amount: 0 }];
+            prop_assert!(encode_add_sub(&ops, false, false).is_err());
+        }
+    }
+
     // ── MOVZ field extractors ─────────────────────────────────────────────
     // ARMv8 MOVZ (wide immediate): sf 10 100101 hw imm16 Rd
     //   bit 31      : sf

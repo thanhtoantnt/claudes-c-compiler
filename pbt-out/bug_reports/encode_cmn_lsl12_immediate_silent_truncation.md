@@ -121,3 +121,4 @@ Failing property: `prop_rejects_oversized_lsl12_immediate`
 ```rust
 prop_assert!(encode_cmn(&[wreg(rn), Operand::Imm(4097), Operand::Shift { kind: "lsl".into(), amount: 12 }]).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/25

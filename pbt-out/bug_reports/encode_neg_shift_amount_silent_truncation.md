@@ -79,3 +79,4 @@ let (shift_type, shift_amount) = match operands.get(2) {
 
 This makes the already-failing negative-contract properties `neg_w_reg_rejects_shift_above_31`,
 `neg_rejects_ror_shift`, and `neg_x_reg_rejects_shift_above_63` pass.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/77

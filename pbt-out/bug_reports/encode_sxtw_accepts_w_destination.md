@@ -102,3 +102,4 @@ fn sxtw_rejects_w_destination(n in 0u32..=31) {
 
 Minimal failing input: `n = 0` → `encode_sxtw(&[wreg(0), wreg(0)])` returns
 `Ok(Word(0x93407C00))`.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/101

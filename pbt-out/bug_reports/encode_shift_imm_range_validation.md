@@ -100,3 +100,4 @@ Four `proptest!` properties in `data_processing.rs` (`mod tests`):
 
 Properties 1–3 confirm the encoder's field placement is otherwise spec-correct; the
 defect is isolated to the missing input-range validation on the immediate path.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/93

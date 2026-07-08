@@ -56,3 +56,4 @@ module of `src/backend/arm/assembler/encoder/data_processing.rs`.
 Minimal input: `rd = 0, rm = 0, sk = 0, amount = 32`.
 
 Run with: `cargo test --lib negs_props::negs_rejects_32bit_unallocated_shift_amount`
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/79

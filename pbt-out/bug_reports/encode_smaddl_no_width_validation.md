@@ -92,3 +92,4 @@ fn smaddl_rejects_wrong_width_operands(n in 0u32..=30) {
     prop_assert!(encode_smaddl(&ops).is_err());
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/95

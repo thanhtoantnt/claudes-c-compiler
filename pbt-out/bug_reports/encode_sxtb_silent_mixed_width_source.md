@@ -82,3 +82,4 @@ fn sxtb_rejects_w_destination_with_x_source(n in 0u32..=31) {
     );
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/99

@@ -34,3 +34,4 @@ let shift_type = match kind.as_str() {
     other => return Err(format!("negs invalid shift kind: {}", other)),
 };
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/81

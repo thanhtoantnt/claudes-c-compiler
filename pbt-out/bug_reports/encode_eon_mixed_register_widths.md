@@ -32,3 +32,4 @@ Failing property: `eon_rejects_mixed_register_widths`
 ```rust
 prop_assert!(encode_eon(&[wreg(0), xreg(1), wreg(2)], "lsl", 0).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/39

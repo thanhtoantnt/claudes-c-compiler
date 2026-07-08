@@ -32,3 +32,4 @@ Failing property: `eon_x_register_shift_above_63_is_rejected`
 ```rust
 prop_assert!(encode_eon(&[xreg(0), xreg(1), xreg(2)], "lsl", 64).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/42

@@ -84,3 +84,4 @@ The identical bug affects every "long multiply" sibling that binds `is_64` to
 `smull_rejects_wrong_width_destination` test, which also fails for the same
 reason). The encoding bits themselves are correct; only the width validation is
 missing.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/109

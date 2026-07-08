@@ -32,3 +32,4 @@ if !(rd64 && rn64 && rm64) {
     return Err("umull requires 64-bit destination and 32-bit sources".to_string());
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/110

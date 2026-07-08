@@ -66,3 +66,4 @@ pub(crate) fn encode_sxth(operands: &[Operand]) -> Result<EncodeResult, String> 
 }
 ```
 Note: a 64-bit destination with a 32-bit source (`sxth x0, w0`) must remain accepted, so the guard is one-directional. Apply the same fix to `encode_sxtb`, `encode_uxth`, and `encode_uxtb`.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/100

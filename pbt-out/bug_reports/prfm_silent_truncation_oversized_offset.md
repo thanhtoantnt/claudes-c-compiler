@@ -42,3 +42,4 @@ if scaled > 0xFFF {
 }
 let imm12 = scaled as u32;
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/120

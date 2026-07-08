@@ -28,3 +28,4 @@ A typo or macro-generated mixed-width `SBC`/`SBCS` instruction assembles without
 ## Suggested fix
 
 Preserve and compare the `is_64` flags returned by `get_reg` for `Rd`, `Rn`, and `Rm`; reject when they differ before emitting the word.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/92

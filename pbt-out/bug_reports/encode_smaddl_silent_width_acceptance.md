@@ -76,3 +76,4 @@ if rn64 || rm64 {
 ```
 
 Note: the same defect exists in the sibling `encode_umaddl` (UMADDL Xd, Wn, Wm, Xa).
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/96

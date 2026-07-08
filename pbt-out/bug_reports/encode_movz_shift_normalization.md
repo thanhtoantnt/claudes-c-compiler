@@ -49,3 +49,4 @@ let hw = match *amount {
 ```
 
 Apply the same fix to `encode_movk` and `encode_movn`, which duplicate the same shift-normalization pattern.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/66

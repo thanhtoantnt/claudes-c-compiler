@@ -90,3 +90,4 @@ this second latent bug; out of scope for this report but worth a follow-up.)
   the valid range and confirm correct field placement there.
 - New properties F (`prop_rejects_bit_above_63`) and G
   (`prop_rejects_negative_bit`) **FAIL**, demonstrating the missing range check.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/102

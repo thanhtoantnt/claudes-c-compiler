@@ -96,3 +96,4 @@ prop_assert!(encode_br(&[Operand::Reg("d0".into())]).is_err());
 ```bash
 cargo test --lib prop_fp_simd_registers_wrongly_accepted
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/16

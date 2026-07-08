@@ -104,3 +104,4 @@ Failing property: `prop_out_of_range_offset_is_rejected`
 ```rust
 prop_assert!(encode_ldr_str(&[xreg(0), mem_offset(xreg(1), 32761)], true, 3, false, false).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/48

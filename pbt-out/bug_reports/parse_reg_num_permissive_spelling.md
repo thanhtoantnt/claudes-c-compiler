@@ -82,3 +82,4 @@ Property suite added inline at the bottom of
 ```
 cargo test --lib parse_reg_num_props
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/118

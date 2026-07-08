@@ -91,3 +91,4 @@ In `load_store.rs`, module `prop_encode_ldrsw_tests` (5 properties, proptest):
 3. `prop_pre_post_index_imm9_and_marker` — imm9 sign-extends, markers 11/01, goldens (**pass**).
 4. `prop_reg_offset_fields` — Rm[20:16], option[15:13], S[12] (**pass**).
 5. `prop_out_of_range_mem_offset_rejected` — negative contract (**FAIL** → this bug).
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/116

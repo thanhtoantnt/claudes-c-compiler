@@ -92,3 +92,4 @@ a `get_reg_no_sp` helper (parse only `xN`/`wN`/`xzr`/`wzr`, error on `sp`/`wsp`
 and FP/SIMD names) and route `encode_cbz`/`encode_cbnz` (and the rest of the
 XZR-only encoders) through it. Once fixed, flip the `is_ok()` assertions in
 `prop_sp_silently_aliased_to_xzr` to `is_err()`.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/20

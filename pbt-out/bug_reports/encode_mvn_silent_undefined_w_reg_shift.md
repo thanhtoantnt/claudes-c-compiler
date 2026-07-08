@@ -57,3 +57,4 @@ if shift_amount > max_shift {
                        shift_amount, if is_64 { 64 } else { 32 }));
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/73

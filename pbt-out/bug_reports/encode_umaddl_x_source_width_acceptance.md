@@ -33,3 +33,4 @@ if rn64 || rm64 {
     return Err("umaddl requires W source registers".to_string());
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/106

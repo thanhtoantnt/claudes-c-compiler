@@ -75,3 +75,4 @@ Failing property: `prop_rejects_fp_simd_registers`
 ```rust
 prop_assert!(encode_csinv(&[xreg(rd), xreg(rn), xreg(rm)], "eq").is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/34

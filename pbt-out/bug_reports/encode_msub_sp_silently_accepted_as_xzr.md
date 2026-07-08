@@ -92,3 +92,4 @@ Five `proptest!` properties added to the `tests` module of
 | `msub_sf_tracks_rd_width` | Width contract (sf bit) |
 | `msub_is_deterministic` | Purity |
 | `msub_missing_operands_return_err` | Negative/error contract (< 4 operands → Err) |
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/69

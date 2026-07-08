@@ -53,3 +53,4 @@ let st = match kind.as_str() {
     other => return Err(format!("neg does not support shift '{}'", other)),
 };
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/76

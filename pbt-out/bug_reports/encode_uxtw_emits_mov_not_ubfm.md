@@ -94,3 +94,4 @@ fn uxtw_canonical_encoding_for_xd_wn() {
 ```
 
 **Reproduce:** `cargo test --lib data_processing::uxtw_props::uxtw_canonical_encoding_for_xd_wn`
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/111

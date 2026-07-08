@@ -35,3 +35,4 @@ match (*amount, is_64) {
     _ => return Err(format!("movk invalid lsl shift: {}", amount)),
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/60

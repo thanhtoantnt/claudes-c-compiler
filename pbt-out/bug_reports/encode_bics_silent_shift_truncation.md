@@ -75,3 +75,4 @@ Failing property: `bics_rejects_oversized_shift`
 ```rust
 prop_assert!(encode_bics(&[xreg(rd), xreg(rn), xreg(rm)], "lsl", 64).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/11

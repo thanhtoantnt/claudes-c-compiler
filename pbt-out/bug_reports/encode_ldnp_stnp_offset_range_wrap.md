@@ -31,3 +31,4 @@ if offset < -(64 * scale) || offset > (63 * scale) {
     return Err(format!("ldnp/stnp offset out of range: {}", offset));
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/44

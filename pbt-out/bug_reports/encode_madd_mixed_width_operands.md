@@ -87,3 +87,4 @@ Failing property: `madd_mixed_width_operands_rejected`
 ```rust
 prop_assert!(encode_madd(&[xreg(0), wreg(1), wreg(2), xreg(3)]).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/58

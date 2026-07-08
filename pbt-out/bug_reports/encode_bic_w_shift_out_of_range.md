@@ -90,3 +90,4 @@ Failing property: `bic_w_register_rejects_shift_above_31`
 ```rust
 prop_assert!(encode_bic(&[wreg(rd), wreg(rn), wreg(rm)], "lsl", 32).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/10

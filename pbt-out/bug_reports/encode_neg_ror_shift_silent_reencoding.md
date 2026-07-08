@@ -24,3 +24,4 @@ Typos or upstream parser bugs silently produce a different instruction than the 
 ## Suggested fix
 
 Return `Err` for any shift kind other than `lsl`, `lsr`, or `asr`.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/75

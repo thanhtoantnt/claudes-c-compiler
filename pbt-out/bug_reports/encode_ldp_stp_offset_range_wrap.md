@@ -33,3 +33,4 @@ if offset < -(64 * scale) || offset > (63 * scale) {
 ```
 
 Then encode only after validation.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/46

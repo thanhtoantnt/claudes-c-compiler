@@ -61,3 +61,4 @@ module of `src/backend/arm/assembler/encoder/data_processing.rs`.
 Minimal input: `rd = 0, rm = 0, sk = 0, amount = 64`.
 
 Run with: `cargo test --lib negs_props::negs_rejects_64bit_shift_amount_above_field`
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/80

@@ -125,3 +125,4 @@ Failing property: `prop_rejects_invalid_operands`
 ```rust
 prop_assert!(encode_cinc(&[xreg(rd), xreg(rn), xreg(rm)], "eq").is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/23

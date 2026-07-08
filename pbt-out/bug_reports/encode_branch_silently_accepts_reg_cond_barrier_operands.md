@@ -77,3 +77,4 @@ Failing property: `prop_symbol_forwarding_all_accepted_kinds`
 ```rust
 prop_assert!(!matches!(encode_branch(&[Operand::Reg("x0".into())]), Ok(EncodeResult::Jump26(_))));
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/19

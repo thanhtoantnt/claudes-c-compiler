@@ -96,3 +96,4 @@ own `prop_sp_silently_aliased_to_xzr` test).
 ```bash
 cargo test --lib prop_sp_silently_aliased_to_xzr
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/18

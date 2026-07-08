@@ -100,3 +100,4 @@ Failing properties:
 prop_assert!(encode_logical(&[wreg(0), wreg(1), wreg(2)], "and", "lsl", 32).is_err());
 prop_assert!(encode_logical(&[xreg(0), xreg(1), xreg(2)], "and", "lsl", 64).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/54

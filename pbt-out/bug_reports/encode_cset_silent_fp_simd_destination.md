@@ -38,3 +38,4 @@ fn get_gp_reg(operands: &[Operand], idx: usize) -> Result<(u32, bool), String> {
     Ok((reg, is_64))
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/30

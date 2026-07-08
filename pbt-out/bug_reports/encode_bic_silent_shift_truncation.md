@@ -88,3 +88,4 @@ currently fails; once the fix lands it will pass, at which point the four
 companion properties (`bic_register_form_fields`,
 `bic_register_form_shift_fields`, `bic_sf_tracks_register_width`,
 `bic_immediate_is_and_of_inverted`) remain green.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/9

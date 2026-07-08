@@ -42,3 +42,4 @@ if !(0..=0xFFFF).contains(&imm) {
 ```
 
 The same validation pattern should be applied to `encode_movk` and `encode_movn`, which duplicate the masking pattern.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/65

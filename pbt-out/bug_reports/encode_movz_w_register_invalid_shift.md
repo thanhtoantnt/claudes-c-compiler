@@ -48,3 +48,4 @@ match (*amount, is_64) {
 ```
 
 Apply the same width gate to `encode_movk` and `encode_movn`.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/67

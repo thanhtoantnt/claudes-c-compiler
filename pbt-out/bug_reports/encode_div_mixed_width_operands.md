@@ -40,3 +40,4 @@ Failing property: `div_mixed_width_operands_rejected`
 ```rust
 prop_assert!(encode_sdiv(&[xreg(0), wreg(1), xreg(2)]).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/36

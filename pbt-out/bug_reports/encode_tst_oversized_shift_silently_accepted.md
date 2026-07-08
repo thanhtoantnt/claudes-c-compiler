@@ -81,3 +81,4 @@ Appended module `prop_encode_tst_tests` to `compare_branch.rs` (6 properties,
 | D | `prop_tst_is_ands_and_differs_only_in_opc` | differential vs AND | ✅ pass |
 | E | `prop_rejects_invalid_inputs` | negative contract (#0 imm, x32, arity) | ✅ pass |
 | F | `prop_rejects_oversized_shift` | negative contract (shift range) | ❌ **FAIL → this bug** |
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/103

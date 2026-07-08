@@ -35,3 +35,4 @@ if !rd_is_64 || rn_is_64 || rm_is_64 {
     return Err("smull requires Xd, Wn, Wm".into());
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/97

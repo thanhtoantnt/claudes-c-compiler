@@ -101,3 +101,4 @@ Output shows `Ok(Word(...))` with Rm field == 31 instead of an `Err`.
 Open. No evidence found that this behavior is intentional; the encoder's own design
 (distinguishing SP-aware ADD/SUB/extended forms from XZR-only MUL) implies SP should be
 rejected here.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/71

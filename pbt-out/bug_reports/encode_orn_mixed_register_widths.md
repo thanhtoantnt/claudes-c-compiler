@@ -51,3 +51,4 @@ A typo'd `orn x0, w1, w2` assembles without error and produces a 64-bit instruct
 the intended (small) register numbers but with the wrong `sf` — a silent miscompilation. The
 same latent bug class exists in the sibling encoders (`encode_eon`, `encode_bics`,
 `encode_mvn`, `encode_logical` register path) which derive `sf` from operand 0 only.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/85

@@ -93,3 +93,4 @@ smulh_always_64bit .............................. ok
 smulh_vs_umulh_only_sign_bit_differs ............ ok
 smulh_rejects_32bit_w_registers ................. FAILED   <-- this bug
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/122

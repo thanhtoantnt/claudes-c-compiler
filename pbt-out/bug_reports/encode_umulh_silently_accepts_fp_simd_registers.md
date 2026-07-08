@@ -98,3 +98,4 @@ fn require_x_reg(operands: &[Operand], idx: usize) -> Result<u32, String> {
 After the fix, `umulh_rejects_fp_simd_register_in_any_position` should pass; the
 pinning property `umulh_sp_operand_silently_becomes_xzr` should be revisited
 together with the broader SP-as-XZR handling.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/108

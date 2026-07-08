@@ -33,3 +33,4 @@ if offset % scale != 0 {
 ```
 
 Then perform the signed-range check and encode the scaled imm7 field.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/47

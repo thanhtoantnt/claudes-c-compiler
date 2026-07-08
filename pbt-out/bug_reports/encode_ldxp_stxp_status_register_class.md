@@ -45,3 +45,4 @@ Failing property: `stxp_status_register_must_be_w`
 ```rust
 prop_assert!(encode_ldxp_stxp(&[xreg(9), xreg(0), xreg(1), mem(xreg(2))], false).is_err());
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/52
