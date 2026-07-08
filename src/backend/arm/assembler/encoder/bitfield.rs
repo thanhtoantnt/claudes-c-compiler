@@ -1378,3 +1378,271 @@ mod prop_encode_sbfx_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_bfi_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::panic;
+
+    // ── Field layout of the BFM (BFI alias) word (ARM ARM, Bitfield) ────
+    //   sf [31] | opc=01 [30:29] | 100110 [28:23] | N [22]
+    //   | immr [21:16] | imms [15:10] | Rn [9:5] | Rd [4:0]
+    //
+    // BFI Rd, Rn, #lsb, #width is the alias
+    //   BFM Rd, Rn, #(-lsb MOD regsize), #(width-1)
+    // so immr == (regsize - lsb) % regsize and imms == width - 1.
+    const MASK_SF: u32 = 0x8000_0000;
+    const FIXED_30_29: u32 = 0b01 << 29; // BFM opc=01 -> 0x2000_0000
+    const MASK_30_29: u32 = 0b11 << 29; // 0x6000_0000
+    const FIXED_28_23: u32 = 0b100110 << 23; // 0x1300_0000
+    const MASK_28_23: u32 = 0b111111 << 23; // 0x1F80_0000
+    const MASK_N: u32 = 1 << 22; // 0x0040_0000
+    const MASK_IMMR: u32 = 0x003F_0000; // bits [21:16]
+    const MASK_IMMS: u32 = 0x0000_FC00; // bits [15:10]
+    const MASK_RN: u32 = 0x0000_03E0; // bits [9:5]
+    const MASK_RD: u32 = 0x0000_001F; // bits [4:0]
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    fn enc(ops: &[Operand]) -> u32 {
+        word(encode_bfi(ops))
+    }
+
+    fn reg_name(num: u32, is_64: bool) -> String {
+        if is_64 {
+            format!("x{}", num)
+        } else {
+            format!("w{}", num)
+        }
+    }
+
+    /// (rd_name, rd_num, rn_name, rn_num, lsb, width, is_64) with lsb/width
+    /// constrained to the architecturally-valid ranges (ARM ARM BFI):
+    ///   64-bit: 0 <= lsb <= 63, 1 <= width <= 64 - lsb
+    ///   32-bit: 0 <= lsb <= 31, 1 <= width <= 32 - lsb
+    fn arb_valid_case() -> impl Strategy<Value = (String, u32, String, u32, u32, u32, bool)> {
+        (any::<bool>(), 0u32..=30u32, 0u32..=30u32, 0u32..=63u32, 1u32..=64u32)
+            .prop_filter(
+                "lsb+width must fit regsize",
+                |&(is_64, _rd, _rn, lsb, width)| {
+                    let max = if is_64 { 64 } else { 32 };
+                    lsb < max && width >= 1 && lsb + width <= max
+                },
+            )
+            .prop_map(|(is_64, rd, rn, lsb, width)| {
+                (reg_name(rd, is_64), rd, reg_name(rn, is_64), rn, lsb, width, is_64)
+            })
+    }
+
+    proptest! {
+        // Property A — structural / field-placement oracle.
+        // Every fixed opcode bit and variable field lands in its mandated
+        // position; opc[30:29]=01 (the BFM opcode shared by BFI/BFXIL);
+        // immr/imms reconstruct to the alias-computed values; N == sf.
+        #[test]
+        fn prop_bfi_field_placement(c in arb_valid_case()) {
+            let (rd_name, rd, rn_name, rn, lsb, width, is_64) = c;
+            let ops = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(width as i64),
+            ];
+            let w = enc(&ops);
+            let reg_width: u32 = if is_64 { 64 } else { 32 };
+            let expected_immr = (reg_width - lsb) % reg_width;
+            let expected_imms = width - 1;
+
+            prop_assert_eq!(w & MASK_30_29, FIXED_30_29, "BFI/BFM opc[30:29] must be 01");
+            prop_assert_eq!(w & MASK_28_23, FIXED_28_23);
+            prop_assert_eq!(w & MASK_SF, if is_64 { MASK_SF } else { 0 });
+            prop_assert_eq!(w & MASK_N, if is_64 { MASK_N } else { 0 });
+            prop_assert_eq!((w & MASK_IMMR) >> 16, expected_immr);
+            prop_assert_eq!((w & MASK_IMMS) >> 10, expected_imms);
+            prop_assert_eq!((w & MASK_RN) >> 5, rn);
+            prop_assert_eq!(w & MASK_RD, rd);
+            // N == sf invariant (ARM ARM: constrained N == sf for BFM).
+            prop_assert_eq!((w >> 31) & 1, (w >> 22) & 1);
+        }
+
+        // Property B — differential oracle vs the raw BFM encoder.
+        // BFI Rd, Rn, #lsb, #width is the alias
+        //   BFM Rd, Rn, #(-lsb MOD regsize), #(width-1).
+        // Feeding both encoders the alias-equivalent operands must yield a
+        // bit-identical word.
+        #[test]
+        fn prop_bfi_equals_bfm_alias(c in arb_valid_case()) {
+            let (rd_name, _rd, rn_name, _rn, lsb, width, is_64) = c;
+            let reg_width: u32 = if is_64 { 64 } else { 32 };
+            let immr = (reg_width - lsb) % reg_width;
+            let imms = width - 1;
+            let bfi = vec![
+                Operand::Reg(rd_name.clone()),
+                Operand::Reg(rn_name.clone()),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(width as i64),
+            ];
+            let bfm = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name),
+                Operand::Imm(immr as i64),
+                Operand::Imm(imms as i64),
+            ];
+            prop_assert_eq!(enc(&bfi), word(encode_bfm(&bfm)));
+        }
+
+        // Property C — register-width differential. Encoding x{N} vs w{N}
+        // (same numeric register, same lsb/width) must differ ONLY in the
+        // sf bit [31], the N bit [22], and the immr field [21:16] — because
+        // immr = (-lsb) MOD regsize is regsize-dependent (unlike raw BFM
+        // where immr is passed through verbatim). imms, Rn and Rd are
+        // identical. Constrained to lsb/width valid in BOTH widths.
+        #[test]
+        fn prop_width_changes_sf_n_and_immr_only(
+            num in 0u32..=30u32,
+            lsb in 0u32..=31u32,
+            width in 1u32..=32u32,
+        ) {
+            let ops64 = vec![
+                Operand::Reg(format!("x{}", num)),
+                Operand::Reg("x0".into()),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(width as i64),
+            ];
+            let ops32 = vec![
+                Operand::Reg(format!("w{}", num)),
+                Operand::Reg("w0".into()),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(width as i64),
+            ];
+            let diff = enc(&ops64) ^ enc(&ops32);
+            let immr64 = (64u32 - lsb) % 64;
+            let immr32 = (32u32 - lsb) % 32;
+            let expected = MASK_SF | MASK_N | (((immr64 ^ immr32) << 16) & MASK_IMMR);
+            prop_assert_eq!(diff, expected);
+            // And the fields that must NOT change:
+            prop_assert_eq!(diff & MASK_IMMS, 0, "imms must be identical");
+            prop_assert_eq!(diff & MASK_RN, 0, "Rn must be identical");
+            prop_assert_eq!(diff & MASK_RD, 0, "Rd must be identical");
+        }
+
+        // Property D — determinism. The encoder is pure: the same operand
+        // list always yields the same 32-bit word.
+        #[test]
+        fn prop_deterministic(c in arb_valid_case()) {
+            let (rd_name, _rd, rn_name, _rn, lsb, width, _is_64) = c;
+            let ops = vec![
+                Operand::Reg(rd_name),
+                Operand::Reg(rn_name),
+                Operand::Imm(lsb as i64),
+                Operand::Imm(width as i64),
+            ];
+            prop_assert_eq!(enc(&ops), enc(&ops));
+        }
+
+        // Property E — NEGATIVE CONTRACT / PANIC RISK (the finding).
+        // BFI <Xd>,<Xn>,#<lsb>,#<width> (ARM ARM BFI) constrains
+        //   64-bit: 0 <= lsb <= 63, 1 <= width <= 64 - lsb
+        //   32-bit: 0 <= lsb <= 31, 1 <= width <= 32 - lsb
+        // An assembler MUST reject out-of-range operands with a clean Err
+        // rather than (a) silently encoding garbage or (b) PANICKING. The
+        // current encode_bfi computes `imms = width - 1` (panics in debug
+        // when width == 0) and `immr = (reg_width - lsb) % reg_width`
+        // (panics on subtraction underflow when lsb > reg_width), and
+        // performs NO range validation of its own. This property is
+        // EXPECTED TO FAIL and documents both the missing validation and
+        // the panic risk shared with the sibling BFM-family encoders.
+        #[test]
+        fn prop_rejects_out_of_range_operands(
+            is_64 in any::<bool>(),
+            over_lsb in 64u32..=1023u32,
+            over_width in 65u32..=1023u32,
+            neg in (-1024i64)..(-1i64),
+        ) {
+            let reg_width: u32 = if is_64 { 64 } else { 32 };
+            // Each (lsb, width, label) is an out-of-range operand the encoder
+            // MUST reject with a clean Err (not a panic, not a silent Ok word).
+            let cases: &[(i64, i64, &str)] = &[
+                (0, 0, "width=0 (imms underflow)"),
+                (reg_width as i64, 1, "lsb==regsize"),
+                (over_lsb as i64, 1, "lsb>regsize (immr underflow)"),
+                ((reg_width - 1) as i64, 2, "lsb+width>regsize"),
+                (0, over_width as i64, "width>regsize"),
+                (neg, 1, "negative lsb"),
+                (0, neg, "negative width"),
+            ];
+            for &(lsb, width, label) in cases {
+                let ops = vec![
+                    Operand::Reg(reg_name(0, is_64)),
+                    Operand::Reg(reg_name(1, is_64)),
+                    Operand::Imm(lsb),
+                    Operand::Imm(width),
+                ];
+                // Catch panics so a panic is reported as a contract failure
+                // instead of aborting the proptest run.
+                // (Note: the default panic hook still prints the debug underflow
+                // message to stderr; this is harmless noise from proptest
+                // shrinking the failing input.)
+                let got = panic::catch_unwind(panic::AssertUnwindSafe(|| encode_bfi(&ops)));
+                match got {
+                    Ok(Ok(w)) => prop_assert!(false,
+                        "{}: lsb={} width={} should be Err, got Ok({:?})",
+                        label, lsb, width, w),
+                    Ok(Err(_)) => {} // clean rejection: good
+                    Err(_) => prop_assert!(false,
+                        "{}: lsb={} width={} should be Err but PANICKED",
+                        label, lsb, width),
+                }
+            }
+        }
+
+        // Property F — malformed-operands negative contract (should pass).
+        // Missing operands / wrong types in fixed slots must yield Err.
+        #[test]
+        fn prop_rejects_malformed_operands(
+            bad in prop_oneof![Just(0u8), Just(1u8), Just(2u8), Just(3u8), Just(4u8), Just(5u8)],
+            n in 0u32..=30u32,
+            v in -16i64..=16i64,
+        ) {
+            let r = match bad {
+                0 => encode_bfi(&[]),
+                1 => encode_bfi(&[
+                    Operand::Reg(reg_name(n, true)),
+                    Operand::Reg("x1".into()),
+                    Operand::Imm(v),
+                ]),
+                2 => encode_bfi(&[
+                    Operand::Imm(v),
+                    Operand::Reg("x1".into()),
+                    Operand::Imm(0),
+                    Operand::Imm(1),
+                ]),
+                3 => encode_bfi(&[
+                    Operand::Reg("x0".into()),
+                    Operand::Imm(v),
+                    Operand::Imm(0),
+                    Operand::Imm(1),
+                ]),
+                4 => encode_bfi(&[
+                    Operand::Reg("x0".into()),
+                    Operand::Reg("x1".into()),
+                    Operand::Reg(reg_name(n, true)),
+                    Operand::Imm(1),
+                ]),
+                _ => encode_bfi(&[
+                    Operand::Reg("x0".into()),
+                    Operand::Reg("x1".into()),
+                    Operand::Imm(0),
+                    Operand::Reg(reg_name(n, true)),
+                ]),
+            };
+            prop_assert!(r.is_err(), "expected Err, got {:?}", r);
+        }
+    }
+}
