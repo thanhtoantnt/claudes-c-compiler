@@ -1044,4 +1044,148 @@ mod tests {
             );
         }
     }
+
+    // ── encode_fcvt_precision (FCVT: float precision conversion) ============
+    // ARMv8-A "Floating-point data-processing (1 source)" layout:
+    //   0 00 11110 ftype 1 0001 opc 10000 Rn Rd
+    //   bits[31]=0, bits[30:24]=0011110 (0x1E), bits[23:22]=ftype
+    //     (source: S=00, D=01, H=11), bit[21]=1, bits[20:17]=0001,
+    //   bits[16:15]=opc (dest: S=00, D=01, H=11), bits[14:10]=10000,
+    //   bits[9:5]=Rn (src reg), bits[4:0]=Rd (dst reg).
+    //   Cross-checked: FCVT D0,S0 = 0x1E22C000, FCVT S0,D0 = 0x1E624000,
+    //   FCVT H0,S0 = 0x1E23C000, FCVT D0,H0 = 0x1EE2C000.
+    fn fcvt_opc_of(w: u32) -> u32    { (w >> 15) & 0x3 }
+    fn fcvt_fixed_hi(w: u32) -> u32  { (w >> 17) & 0xF }
+    fn fcvt_fixed_lo(w: u32) -> u32  { (w >> 10) & 0x1F }
+
+    proptest! {
+        // Oracle: reference / field layout. Distinct-precision FP operands
+        // (source precision != dest precision) => every field lands at its
+        // canonical ARMv8 bit position with no truncation.
+        #[test]
+        fn prop_fcvt_precision_places_fields(
+            rd in 0u32..32, rn in 0u32..32,
+            src_kind in 0u32..3u32, dst_kind in 0u32..3u32,
+        ) {
+            // kind: 0=S, 1=D, 2=H. Skip same-precision combos (UNALLOCATED).
+            prop_assume!(src_kind != dst_kind);
+            let pre = ["s", "d", "h"];
+            let map = [0b00u32, 0b01u32, 0b11u32];
+            let src_pre = pre[src_kind as usize];
+            let dst_pre = pre[dst_kind as usize];
+            let ftype = map[src_kind as usize];
+            let opc   = map[dst_kind as usize];
+            let ops = vec![
+                Operand::Reg(format!("{}{}", dst_pre, rd)),
+                Operand::Reg(format!("{}{}", src_pre, rn)),
+            ];
+            let w = expect_word(encode_fcvt_precision(&ops));
+
+            // Fixed bits of the FCVT encoding.
+            prop_assert_eq!(w >> 24, 0x1Eu32);             // [31:24] = 0x1E (sf=0 + 0011110)
+            prop_assert_eq!((w >> 21) & 1, 1u32);          // bit 21 = 1
+            prop_assert_eq!(fcvt_fixed_hi(w), 0b0001u32);  // [20:17] = 0001
+            prop_assert_eq!(fcvt_fixed_lo(w), 0b10000u32); // [14:10] = 10000
+            prop_assert_eq!(sf_of(w), 0u32);               // scalar FP, sf always 0
+
+            // Precision fields: ftype from source prefix, opc from dest prefix.
+            prop_assert_eq!(ftype_of(w), ftype);
+            prop_assert_eq!(fcvt_opc_of(w), opc);
+
+            // Register fields round-trip exactly into their 5-bit slots.
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+
+            // Reference reconstruction.
+            let expected = (0b00011110u32 << 24) | (ftype << 22) | (1u32 << 21)
+                | (0b0001u32 << 17) | (opc << 15) | (0b10000u32 << 10)
+                | (rn << 5) | rd;
+            prop_assert_eq!(w, expected);
+        }
+
+        // Oracle: precision derivation. ftype encodes the SOURCE precision,
+        // opc encodes the DEST precision; both map S->00, D->01, H->11. They
+        // are derived independently from the two operands.
+        #[test]
+        fn prop_fcvt_precision_ftype_and_opc_derivation(
+            rd in 0u32..32, rn in 0u32..32,
+            src_kind in 0u32..3u32, dst_kind in 0u32..3u32,
+        ) {
+            prop_assume!(src_kind != dst_kind);
+            let pre = ["s", "d", "h"];
+            let map = [0b00u32, 0b01u32, 0b11u32];
+            let ops = vec![
+                Operand::Reg(format!("{}{}", pre[dst_kind as usize], rd)),
+                Operand::Reg(format!("{}{}", pre[src_kind as usize], rn)),
+            ];
+            let w = expect_word(encode_fcvt_precision(&ops));
+            prop_assert_eq!(ftype_of(w), map[src_kind as usize]);
+            prop_assert_eq!(fcvt_opc_of(w), map[dst_kind as usize]);
+        }
+
+        // Oracle: determinism. Same operands => identical word.
+        #[test]
+        fn prop_fcvt_precision_is_deterministic(rd in 0u32..32, rn in 0u32..32) {
+            let ops = vec![Operand::Reg(format!("d{}", rd)), Operand::Reg(format!("s{}", rn))];
+            let w1 = expect_word(encode_fcvt_precision(&ops));
+            let w2 = expect_word(encode_fcvt_precision(&ops));
+            prop_assert_eq!(w1, w2);
+        }
+
+        // Negative contract (validated, PASSES): out-of-range register numbers
+        // (>= 32) MUST be rejected by get_reg, not masked into 5 bits; too-few
+        // operands, non-register operands, and unsupported type prefixes
+        // (GP registers W/X, or any non-{s,d,h} prefix) must be Err.
+        #[test]
+        fn prop_fcvt_precision_rejects_bad_operands(
+            n in 32u32..256u32, pos in 0u32..2u32, imm in any::<i64>(),
+            in_range in 0u32..32u32,
+        ) {
+            // Out-of-range register in either position.
+            let prefix = if pos == 0 { "d" } else { "s" };
+            let mut names = vec!["d0".to_string(), "s0".to_string()];
+            names[pos as usize] = format!("{}{}", prefix, n);
+            let ops: Vec<Operand> = names.into_iter().map(Operand::Reg).collect();
+            prop_assert!(
+                encode_fcvt_precision(&ops).is_err(),
+                "register {}{} must be rejected (5-bit field), not silently masked", prefix, n
+            );
+            // Too few operands.
+            prop_assert!(encode_fcvt_precision(&[]).is_err());
+            prop_assert!(encode_fcvt_precision(&[Operand::Reg("d0".into())]).is_err());
+            // Non-register operand.
+            let bad = vec![Operand::Reg("d0".into()), Operand::Imm(imm)];
+            prop_assert!(encode_fcvt_precision(&bad).is_err());
+            // Unsupported type prefix: GP registers (w/x) are not valid FP types.
+            let gp = vec![
+                Operand::Reg(format!("x{}", in_range)),
+                Operand::Reg(format!("w{}", in_range)),
+            ];
+            prop_assert!(
+                encode_fcvt_precision(&gp).is_err(),
+                "GP registers (x{}/w{}) are not valid FCVT operands", in_range, in_range
+            );
+        }
+
+        // Negative contract (FINDING — FAILS): FCVT converts precision; the
+        // destination precision MUST differ from the source precision.
+        // Per ARMv8-A, the combos ftype==opc (S->S, D->D, H->H) are
+        // UNALLOCATED encodings — there is no FCVT Sd,Sn / Dd,Dn / Hd,Hn.
+        // But encode_fcvt_precision never checks this and emits the
+        // unallocated word (e.g. FCVT S0,S0 -> 0x1E604000, which is actually
+        // the FMOV Sd,Sn encoding, not FCVT).
+        #[test]
+        fn prop_fcvt_precision_rejects_same_precision(kind in 0u32..3u32, n in 0u32..32) {
+            let pre = ["s", "d", "h"][kind as usize];
+            let ops = vec![
+                Operand::Reg(format!("{}{}", pre, n)),
+                Operand::Reg(format!("{}{}", pre, n)),
+            ];
+            prop_assert!(
+                encode_fcvt_precision(&ops).is_err(),
+                "FCVT {}{},{}{} is UNALLOCATED (same precision); must be rejected, got {:?}",
+                pre, n, pre, n, encode_fcvt_precision(&ops)
+            );
+        }
+    }
 }
