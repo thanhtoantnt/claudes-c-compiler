@@ -6661,3 +6661,200 @@ mod umulh_props {
     }
 }
 
+// ── encode_negs ───────────────────────────────────────────────────────────
+// NEGS <Rd>, <Rm>{, <shift> #<amount>} is the SET-FLAGS alias of NEG and maps
+// to SUBS <Rd>, ZR, <Rm>{, <shift> #<amount>}. The defining alias invariants
+// are: op=1 (subtract), S=1 (set flags — the only difference vs NEG), and the
+// fixed Rn=11111 (XZR/WZR) field.
+//
+// ARMv8 ARM bit-string (SUBS shifted register): sf op S 01011 shift Rm imm6 Rn Rd
+//   64-bit base (all regs 0, no shift): 1110 1011 0000 0000 0000 0011 1110 0000 = 0xEB0003E0
+//   32-bit base (all regs 0, no shift): 0110 1011 0000 0000 0000 0011 1110 0000 = 0x6B0003E0
+//   with Rm OR'd into bits[20:16] and Rd OR'd into bits[4:0].
+//   (Cross-checked against llvm-mc: `.word 0xeb0003e0` disassembles to `negs x0, x0`.)
+mod negs_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn sf_of(w: u32) -> u32         { (w >> 31) & 1 }     // bit 31
+    fn op_of(w: u32) -> u32         { (w >> 30) & 1 }     // bit 30
+    fn s_of(w: u32) -> u32          { (w >> 29) & 1 }     // bit 29
+    fn opcode5_of(w: u32) -> u32    { (w >> 24) & 0x1F }  // bits 28:24
+    fn shift_type_of(w: u32) -> u32 { (w >> 22) & 0x3 }   // bits 23:22
+    fn rm_of(w: u32) -> u32         { (w >> 16) & 0x1F }  // bits 20:16
+    fn imm6_of(w: u32) -> u32       { (w >> 10) & 0x3F }  // bits 15:10
+    fn rn_of(w: u32) -> u32         { (w >> 5) & 0x1F }   // bits 9:5
+    fn rd_of(w: u32) -> u32         { w & 0x1F }          // bits 4:0
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+    fn shift(kind: &str, amount: u32) -> Operand {
+        Operand::Shift { kind: kind.into(), amount }
+    }
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        // P1. Full-word reference oracle (differential): the encoded word equals
+        //     the spec-derived constant with Rm/Rd placed in their fields, for
+        //     both 32- and 64-bit. This pins the entire encoding at once.
+        #[test]
+        fn negs_reference_encoding(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let ops64 = vec![xreg(rd), xreg(rm)];
+            let w64 = word(encode_negs(&ops64));
+            prop_assert_eq!(w64, 0xEB0003E0u32 | (rm << 16) | rd);
+
+            let ops32 = vec![wreg(rd), wreg(rm)];
+            let w32 = word(encode_negs(&ops32));
+            prop_assert_eq!(w32, 0x6B0003E0u32 | (rm << 16) | rd);
+        }
+
+        // P2. Fixed-field placement + alias invariants: op=1 (subtract), S=1
+        //     (set flags — distinguishes NEGS from NEG), opcode5=01011
+        //     (add/sub shifted register), and Rn=31 (XZR) — all independent of
+        //     width, registers, and shift. Rm/Rd land in their exact bitfields.
+        #[test]
+        fn negs_fixed_fields_and_alias_invariants(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+            sk in 0u32..=2u32,           // 0=lsl, 1=lsr, 2=asr
+            amount in 0u32..=63u32,
+            is_64 in any::<bool>(),
+        ) {
+            let kind = ["lsl", "lsr", "asr"][sk as usize];
+            let mk = |n: u32| if is_64 { xreg(n) } else { wreg(n) };
+            let ops = vec![mk(rd), mk(rm), shift(kind, amount)];
+            let w = word(encode_negs(&ops));
+            prop_assert_eq!(op_of(w), 1);                   // SUB
+            prop_assert_eq!(s_of(w), 1);                    // SET FLAGS (NEGS not NEG)
+            prop_assert_eq!(opcode5_of(w), 0b01011);        // shifted register
+            prop_assert_eq!(rn_of(w), 31);                  // Rn == ZR (alias)
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // P3. Rn is ALWAYS 31 (ZR) — the defining alias invariant of
+        //     NEGS -> SUBS Rd, ZR, Rm. Holds for every width/register/shift.
+        #[test]
+        fn negs_rn_field_always_zero_reg(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+            sk in 0u32..=2u32,
+            amount in 0u32..=63u32,
+            is_64 in any::<bool>(),
+        ) {
+            let kind = ["lsl", "lsr", "asr"][sk as usize];
+            let mk = |n: u32| if is_64 { xreg(n) } else { wreg(n) };
+            let ops = vec![mk(rd), mk(rm), shift(kind, amount)];
+            let w = word(encode_negs(&ops));
+            prop_assert_eq!(rn_of(w), 31);
+        }
+
+        // P4. sf (bit 31) is derived ONLY from the destination register's width:
+        //     Xdst -> sf=1, Wdst -> sf=0, regardless of the (possibly mismatched)
+        //     width of Rm. (This mirrors the same behavior observed in encode_neg
+        //     and the other register-form encoders.)
+        #[test]
+        fn negs_sf_tracks_destination_width_only(
+            n in 0u32..=30,
+            rm_is_x in any::<bool>(),
+            rd_is_x in any::<bool>(),
+        ) {
+            let rd = if rd_is_x { xreg(n) } else { wreg(n) };
+            let rm = if rm_is_x { xreg(n) } else { wreg(n) };
+            let ops = vec![rd, rm];
+            let w = word(encode_negs(&ops));
+            prop_assert_eq!(sf_of(w), if rd_is_x { 1 } else { 0 });
+        }
+
+        // P5. Shift type lands in bits[23:22] (lsl=00, lsr=01, asr=10) and the
+        //     amount lands in imm6 bits[15:10]. Default (no shift) => 00 / 0.
+        #[test]
+        fn negs_shift_type_and_amount_fields(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+            sk in 0u32..=2u32,
+            amount in 0u32..=63u32,
+        ) {
+            let (kind, want_st) = match sk {
+                0 => ("lsl", 0u32),
+                1 => ("lsr", 1u32),
+                _ => ("asr", 2u32),
+            };
+            let ops = vec![xreg(rd), xreg(rm), shift(kind, amount)];
+            let w = word(encode_negs(&ops));
+            prop_assert_eq!(shift_type_of(w), want_st);
+            prop_assert_eq!(imm6_of(w), amount);
+
+            // Default form: no third operand => LSL #0.
+            let w0 = word(encode_negs(&[xreg(rd), xreg(rm)]));
+            prop_assert_eq!(shift_type_of(w0), 0);
+            prop_assert_eq!(imm6_of(w0), 0);
+        }
+
+        // P6. Negative contract: fewer than two register operands => Err.
+        //     NEGS requires <Rd>, <Rm>{, <shift> #<amount>}.
+        #[test]
+        fn negs_rejects_too_few_operands(
+            n in 0u32..=30,
+            missing in 1u32..=2,
+        ) {
+            let mut ops = vec![xreg(n), xreg(n)];
+            for _ in 0..missing {
+                ops.pop();
+            }
+            prop_assert!(encode_negs(&ops).is_err());
+        }
+
+        // P7. FINDING (expected to FAIL). Spec negative contract: for the 32-bit
+        //     (sf=0) form, ARMv8 ARM allocates imm6 only in the range 0..=31;
+        //     shift amounts 32..=63 are UNALLOCATED and a conforming assembler
+        //     (llvm-mc / GAS) rejects them, e.g. `negs w0, w1, lsl #40` -> error.
+        //     The encoder masks the amount with 0x3F and never validates the
+        //     width, so it silently emits an unallocated encoding instead of Err.
+        #[test]
+        fn negs_rejects_32bit_unallocated_shift_amount(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+            sk in 0u32..=2u32,
+            amount in 32u32..=63u32,
+        ) {
+            let kind = ["lsl", "lsr", "asr"][sk as usize];
+            let ops = vec![wreg(rd), wreg(rm), shift(kind, amount)];
+            prop_assert!(
+                encode_negs(&ops).is_err(),
+                "32-bit NEGS shift amount {} is UNALLOCATED (imm6>31); got {:?}",
+                amount, encode_negs(&ops)
+            );
+        }
+
+        // P8. FINDING (expected to FAIL). Spec negative contract: even for the
+        //     64-bit form the shift amount must be 0..=63 (the imm6 field width).
+        //     Amounts >= 64 are out of range, but the encoder masks with 0x3F,
+        //     so e.g. `negs x0, x1, lsl #64` silently becomes `lsl #0`. This is
+        //     silent truncation rather than rejection.
+        #[test]
+        fn negs_rejects_64bit_shift_amount_above_field(
+            rd in 0u32..=30,
+            rm in 0u32..=30,
+            sk in 0u32..=2u32,
+            amount in 64u32..=200u32,
+        ) {
+            let kind = ["lsl", "lsr", "asr"][sk as usize];
+            let ops = vec![xreg(rd), xreg(rm), shift(kind, amount)];
+            prop_assert!(
+                encode_negs(&ops).is_err(),
+                "shift amount {} exceeds the 6-bit imm6 field; got {:?}",
+                amount, encode_negs(&ops)
+            );
+        }
+    }
+}
+
