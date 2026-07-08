@@ -2107,6 +2107,149 @@ mod tests {
         }
     }
 
+    // ── encode_shift: full-word differential oracle + range contract ──────
+    // These properties re-derive the *entire* 32-bit instruction word straight
+    // from the ARMv8 ARM layout (not field-by-field), giving a holistic oracle
+    // that would flag any stray bit. They complement the per-field checks above.
+    //
+    // Reference layouts (ARMv8 ARM C4.1):
+    //   LSL/LSR #imm -> UBFM : sf 10 100110 N immr imms Rn Rd
+    //   ASR #imm     -> SBFM : sf 00 100110 N immr imms Rn Rd
+    //   ROR #imm     -> EXTR : sf 00 100111 N 0 Rm imms Rn Rd   (Rm==Rn)
+    //   <shift>  Rm        : sf 0 0 11010110 Rm 0010(op2) Rn Rd
+    proptest! {
+        // 5a. Full-word differential: for every in-range immediate amount and
+        //     every LSL/LSR/ASR kind, the produced word is byte-identical to the
+        //     ARM ARM reference assembly. Holistic: catches misplaced or stray bits.
+        #[test]
+        fn shift_immediate_full_word_matches_arm_reference(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            st in 0u32..=2u32,          // 0=lsl, 1=lsr, 2=asr
+            imm in 0u32..=63u32,
+            is_64 in any::<bool>(),
+        ) {
+            let width = if is_64 { 64u32 } else { 32u32 };
+            let sf = if is_64 { 1u32 } else { 0u32 };
+            let n = sf;
+            prop_assume!(imm < width);
+            if st != 0 { prop_assume!(imm >= 1); }   // lsr/asr #0 is the MOV alias
+
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rn_op = if is_64 { xreg(rn) } else { Operand::Reg(format!("w{}", rn)) };
+            let ops = vec![rd_op, rn_op, Operand::Imm(imm as i64)];
+            let w = expect_word(encode_shift(&ops, st));
+
+            let (immr, imms, opc) = match st {
+                0 => ((width - imm) % width, width - 1 - imm, 0b10u32), // LSL -> UBFM
+                1 => (imm, width - 1, 0b10u32),                         // LSR -> UBFM
+                _ => (imm, width - 1, 0b00u32),                         // ASR -> SBFM
+            };
+            let expect = (sf << 31) | (opc << 29) | (0b100110 << 23) | (n << 22)
+                       | (immr << 16) | (imms << 10) | (rn << 5) | rd;
+            prop_assert_eq!(w, expect);
+        }
+
+        // 5b. ROR #imm full-word differential: EXTR with Rm==Rn.
+        #[test]
+        fn shift_ror_immediate_full_word_matches_arm_reference(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            imm in 1u32..=63u32,
+            is_64 in any::<bool>(),
+        ) {
+            let width = if is_64 { 64u32 } else { 32u32 };
+            prop_assume!(imm < width);
+            let sf = if is_64 { 1u32 } else { 0u32 };
+            let n = sf;
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rn_op = if is_64 { xreg(rn) } else { Operand::Reg(format!("w{}", rn)) };
+            let ops = vec![rd_op, rn_op, Operand::Imm(imm as i64)];
+            let w = expect_word(encode_shift(&ops, 0b11));
+            // EXTR: sf 00 100111 N 0 Rm imms Rn Rd  (Rm==Rn, imms==imm)
+            let expect = (sf << 31) | (0b00100111 << 23) | (n << 22)
+                       | (rn << 16) | (imm << 10) | (rn << 5) | rd;
+            prop_assert_eq!(w, expect);
+        }
+
+        // 5c. Register form full-word differential: data-processing (2 source).
+        #[test]
+        fn shift_register_full_word_matches_arm_reference(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            st in 0u32..=3u32,         // 0=lsl,1=lsr,2=asr,3=ror
+            is_64 in any::<bool>(),
+        ) {
+            let sf = if is_64 { 1u32 } else { 0u32 };
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rn_op = if is_64 { xreg(rn) } else { Operand::Reg(format!("w{}", rn)) };
+            let rm_op = if is_64 { xreg(rm) } else { Operand::Reg(format!("w{}", rm)) };
+            let ops = vec![rd_op, rn_op, rm_op];
+            let w = expect_word(encode_shift(&ops, st));
+            // sf 0 0 11010110 Rm 0010(op2) Rn Rd
+            let expect = (sf << 31) | (0b0011010110 << 21) | (rm << 16)
+                       | (0b0010 << 12) | (st << 10) | (rn << 5) | rd;
+            prop_assert_eq!(w, expect);
+        }
+
+        // 5d. Positive range contract: every *legal* immediate amount yields Ok,
+        //     and the encoded immr/imms fields never exceed width-1 (they index a
+        //     [0,width) rotation/width space). Establishes the valid frontier.
+        #[test]
+        fn shift_immediate_in_range_is_ok_and_fields_bounded(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            st in 0u32..=3u32,
+            imm in 0u32..=63u32,
+            is_64 in any::<bool>(),
+        ) {
+            let width = if is_64 { 64u32 } else { 32u32 };
+            // Legal immediate ranges per ARMv8 ARM:
+            //   LSL: 0..=width-1 ; LSR/ASR/ROR: 1..=width-1
+            let lo = if st == 0 { 0u32 } else { 1u32 };
+            prop_assume!((lo..width).contains(&imm));
+            let rd_op = if is_64 { xreg(rd) } else { Operand::Reg(format!("w{}", rd)) };
+            let rn_op = if is_64 { xreg(rn) } else { Operand::Reg(format!("w{}", rn)) };
+            let ops = vec![rd_op, rn_op, Operand::Imm(imm as i64)];
+            let w = expect_word(encode_shift(&ops, st));
+            prop_assert!(immr_of(w) < width, "immr {} >= width {}", immr_of(w), width);
+            prop_assert!(imms_of(w) < width, "imms {} >= width {}", imms_of(w), width);
+        }
+
+        // 5e. NEGATIVE CONTRACT (panic-distinguishing): an immediate shift
+        //     amount at or above the width boundary, or negative, is UNDEFINED
+        //     per the ARMv8 ARM and MUST be rejected with Err — the way GAS and
+        //     LLVM-MC do. This variant uses catch_unwind so we can tell apart
+        //     the three failure modes (Err = correct, panic = debug-underflow,
+        //     Ok = silent bogus encoding) instead of just observing a crash.
+        #[test]
+        fn shift_immediate_out_of_range_never_returns_ok(
+            st in 0u32..=3u32,
+            is_64 in any::<bool>(),
+            over in 0u32..=64u32,       // over==0 -> imm==width (exact boundary)
+            neg in any::<bool>(),
+        ) {
+            let width = if is_64 { 64u32 } else { 32u32 };
+            let imm: i64 = if neg { -((over + 1) as i64) } else { (width + over) as i64 };
+            let rd_op = if is_64 { xreg(0) } else { Operand::Reg("w0".into()) };
+            let rn_op = if is_64 { xreg(1) } else { Operand::Reg("w1".into()) };
+            let ops = vec![rd_op, rn_op, Operand::Imm(imm)];
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                encode_shift(&ops, st)
+            }));
+            match caught {
+                Ok(Err(_)) => { /* correct: rejected */ }
+                Ok(Ok(_)) => return Err(proptest::test_runner::TestCaseError::fail(format!(
+                    "out-of-range imm={} (width={}, st={}) was SILENTLY ACCEPTED as Ok",
+                    imm, width, st))),
+                Err(_) => return Err(proptest::test_runner::TestCaseError::fail(format!(
+                    "out-of-range imm={} (width={}, st={}) PANICKED instead of returning Err",
+                    imm, width, st))),
+            }
+        }
+    }
+
     // ── encode_mvn (MVN = ORN Rd, XZR, Rm) ────────────────────────────────
     // ARMv8 logical (shifted register): sf opc 01010 shift N Rm imm6 Rn Rd
     // MVN aliases ORN with Rn hardwired to XZR (11111) and N (bit 21) = 1.
