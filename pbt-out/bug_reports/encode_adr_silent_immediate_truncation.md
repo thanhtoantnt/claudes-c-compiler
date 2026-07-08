@@ -110,3 +110,5 @@ applied. The five passing properties (`golden_anchored_encodings`,
 `prop_symbol_form_relocation`, `prop_reg_second_operand_rejected`)
 independently confirm that in-range immediates, field placement, op bits, and
 the `AdrPrelLo21` relocation path are all correct.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/8
