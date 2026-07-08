@@ -912,4 +912,136 @@ mod tests {
             );
         }
     }
+
+    // ── encode_int_to_float (SCVTF/UCVTF: integer→float conversion) =========
+    // ARMv8-A "Floating-point<->integer conversions" layout:
+    //   sf 0 0 1 1 1 1 0 ftype 1 00 opcode 000000 Rn Rd
+    //   bit31=sf (0=W source, 1=X source), bits[30:24]=0011110 (0x1E),
+    //   bits[23:22]=ftype (00=S dest, 01=D dest), bit[21]=1,
+    //   bits[20:19]=00, bits[18:16]=opcode (010=SCVTF signed, 011=UCVTF unsigned),
+    //   bits[15:10]=000000, bits[9:5]=Rn (GP source), bits[4:0]=Rd (FP dest).
+    //   (Cross-checked: SCVTF <Sd>,<Wn> = 0x1E220000, SCVTF <Dd>,<Xn> = 0x9E260000,
+    //    UCVTF <Dd>,<Wn> = 0x1E270000.)
+    fn itf_opcode_of(w: u32) -> u32 { (w >> 16) & 0x7 }
+    fn itf_fixed_of(w: u32) -> u32 { (w >> 10) & 0x3F }
+
+    proptest! {
+        // Oracle: reference / field layout. A valid FP destination (Sd/Dd) and
+        // GP source (Wn/Xn) with in-range register numbers => every field lands
+        // at its canonical ARMv8 bit position with no truncation.
+        #[test]
+        fn prop_int_to_float_places_fields(
+            rd in 0u32..32, rn in 0u32..32,
+            dbl_dst in any::<bool>(), src64 in any::<bool>(), signed in any::<bool>(),
+        ) {
+            let dst_reg = if dbl_dst { format!("d{}", rd) } else { format!("s{}", rd) };
+            let src_reg = if src64  { format!("x{}", rn) } else { format!("w{}", rn) };
+            let ops = vec![Operand::Reg(dst_reg), Operand::Reg(src_reg)];
+            let sf     = if src64  { 1u32 } else { 0u32 };
+            let ftype  = if dbl_dst { 0b01u32 } else { 0b00u32 };
+            let opcode = if signed  { 0b010u32 } else { 0b011u32 };
+            let w = expect_word(encode_int_to_float(&ops, signed));
+
+            // Fixed bits of the FP<->int conversion encoding.
+            prop_assert_eq!((w >> 24) & 0x7F, 0x1Eu32); // bits[30:24] = 0011110
+            prop_assert_eq!((w >> 21) & 1, 1u32);      // bit 21 = 1
+            prop_assert_eq!((w >> 19) & 0x3, 0u32);    // bits[20:19] = 00
+            prop_assert_eq!(itf_fixed_of(w), 0u32);    // bits[15:10] = 000000
+
+            // Field derivation: sf (bit31) from source GP width, ftype[23:22]
+            // from dest prefix, opcode[18:16] from signedness.
+            prop_assert_eq!(sf_of(w), sf);
+            prop_assert_eq!(ftype_of(w), ftype);
+            prop_assert_eq!(itf_opcode_of(w), opcode);
+
+            // Register fields round-trip exactly into their 5-bit slots.
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(rn_of(w), rn);
+
+            // Reference reconstruction.
+            let expected = (sf << 31) | (0x1Eu32 << 24) | (ftype << 22)
+                | (1u32 << 21) | (opcode << 16) | (rn << 5) | rd;
+            prop_assert_eq!(w, expected);
+        }
+
+        // Oracle: sf/ftype independence. sf comes solely from the GP source
+        // width (X=>1, W=>0); ftype comes solely from the FP dest prefix
+        // ('d'=>01, else=>00). The two vary independently.
+        #[test]
+        fn prop_int_to_float_sf_ftype_derivation(
+            rd in 0u32..32, rn in 0u32..32,
+            dbl_dst in any::<bool>(), src64 in any::<bool>(),
+        ) {
+            let dst_reg = if dbl_dst { format!("d{}", rd) } else { format!("s{}", rd) };
+            let src_reg = if src64  { format!("x{}", rn) } else { format!("w{}", rn) };
+            let ops = vec![Operand::Reg(dst_reg), Operand::Reg(src_reg)];
+            let w = expect_word(encode_int_to_float(&ops, true));
+            prop_assert_eq!(sf_of(w), if src64 { 1 } else { 0 });
+            prop_assert_eq!(ftype_of(w), if dbl_dst { 0b01 } else { 0b00 });
+        }
+
+        // Oracle: signedness derivation. is_signed selects opcode 010 (SCVTF)
+        // in [18:16] vs 011 (UCVTF); only bit 16 differs between the two.
+        #[test]
+        fn prop_int_to_float_signedness_selects_opcode(
+            rd in 0u32..32, rn in 0u32..32,
+        ) {
+            let ops = vec![Operand::Reg(format!("d{}", rd)), Operand::Reg(format!("x{}", rn))];
+            let w_signed   = expect_word(encode_int_to_float(&ops, true));
+            let w_unsigned = expect_word(encode_int_to_float(&ops, false));
+            prop_assert_eq!(w_signed ^ w_unsigned, 1u32 << 16);
+            prop_assert_eq!(itf_opcode_of(w_signed), 0b010u32);
+            prop_assert_eq!(itf_opcode_of(w_unsigned), 0b011u32);
+        }
+
+        // Negative contract (validated, PASSES): out-of-range register numbers
+        // (>= 32) MUST be rejected by get_reg (parse_reg_num caps at 31), not
+        // masked into 5 bits; too-few operands and non-register dests rejected.
+        #[test]
+        fn prop_int_to_float_rejects_bad_regs_and_arity(
+            n in 32u32..256u32, pos in 0u32..2u32, bad_imm in any::<i64>(),
+        ) {
+            let prefix = if pos == 0 { "s" } else { "w" };
+            let mut names = vec!["s0".to_string(), "w0".to_string()];
+            names[pos as usize] = format!("{}{}", prefix, n);
+            let ops: Vec<Operand> = names.into_iter().map(Operand::Reg).collect();
+            prop_assert!(
+                encode_int_to_float(&ops, true).is_err(),
+                "register {}{} must be rejected (5-bit field), not silently masked", prefix, n
+            );
+            // Too few operands.
+            prop_assert!(encode_int_to_float(&[], true).is_err());
+            prop_assert!(encode_int_to_float(&[Operand::Reg("s0".into())], true).is_err());
+            // Non-register dest operand.
+            let bad = vec![Operand::Imm(bad_imm), Operand::Reg("w0".into())];
+            prop_assert!(encode_int_to_float(&bad, true).is_err());
+        }
+
+        // Negative contract (FINDING — FAILS): SCVTF/UCVTF convert a GP
+        // integer source (Wn/Xn) to an FP destination (Sd/Dd). The source MUST
+        // be a GP register and the dest MUST be an FP register; any other bank
+        // combination is an illegal operand. But encode_int_to_float never
+        // validates operand banks: it accepts an FP source (mis-reading its
+        // width as sf=0) and a GP dest (mis-reading it as ftype=00 single),
+        // silently producing a word with wrong register-class semantics.
+        #[test]
+        fn prop_int_to_float_rejects_wrong_operand_banks(n in 0u32..32) {
+            // GP destination: SCVTF Wd, Wn is not a valid instruction (dest
+            // must be FP). Currently ftype is mis-derived as 00 from 'w'.
+            let gp_dst = vec![Operand::Reg(format!("w{}", n)), Operand::Reg(format!("w{}", n))];
+            prop_assert!(
+                encode_int_to_float(&gp_dst, true).is_err(),
+                "GP destination (w{}) must be rejected; SCVTF/UCVTF dest must be FP, got {:?}",
+                n, encode_int_to_float(&gp_dst, true)
+            );
+            // FP source: SCVTF Dd, Dn is not a valid instruction (source must
+            // be GP). Currently sf is mis-derived as 0 from the 'd' prefix.
+            let fp_src = vec![Operand::Reg(format!("d{}", n)), Operand::Reg(format!("d{}", n))];
+            prop_assert!(
+                encode_int_to_float(&fp_src, true).is_err(),
+                "FP source (d{}) must be rejected; SCVTF/UCVTF source must be GP, got {:?}",
+                n, encode_int_to_float(&fp_src, true)
+            );
+        }
+    }
 }
