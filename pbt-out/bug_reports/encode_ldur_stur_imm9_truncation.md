@@ -86,3 +86,11 @@ The five passing properties independently confirm (via ARM-ARM golden
 encodings) that field placement, size/opc derivation, the load⊕store opc bit,
 and the `op2_bits` (LDUR=00 vs LDTR=10) field are all correct — the defect is
 isolated to the missing range check on `imm9`.
+
+## Regression property
+
+Failing property: `prop_out_of_range_imm9_is_rejected`
+
+```rust
+prop_assert!(encode_ldur_stur(&[xreg(0), mem_offset(xreg(1), 257)], true, 0).is_err());
+```

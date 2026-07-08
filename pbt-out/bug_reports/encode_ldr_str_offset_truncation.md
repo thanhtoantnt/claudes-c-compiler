@@ -96,3 +96,11 @@ an unsigned opc — an inconsistent contract for a low-level API that takes
 Oracle: reference/field-placement against hand-derived ARMv8-A golden encodings
 (§C4.1.64, §C4.1.66). Differential validation against `llvm-mc`/`aarch64-as`
 was not possible (neither is installed in this environment).
+
+## Regression property
+
+Failing property: `prop_out_of_range_offset_is_rejected`
+
+```rust
+prop_assert!(encode_ldr_str(&[xreg(0), mem_offset(xreg(1), 32761)], true, 3, false, false).is_err());
+```

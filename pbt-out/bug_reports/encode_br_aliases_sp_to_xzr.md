@@ -80,6 +80,14 @@ Ok(EncodeResult::Word(word))
 When landed, `prop_sp_silently_aliased_to_xzr`'s `is_ok()` assertions should
 flip to `is_err()`.
 
+## Regression property
+
+Failing property: `prop_sp_silently_aliased_to_xzr`
+
+```rust
+prop_assert!(encode_br(&[Operand::Reg("sp".into())]).is_err());
+```
+
 ## Related
 The identical defect exists in `encode_cbz`/`encode_cbnz` (pinned by their
 own `prop_sp_silently_aliased_to_xzr` test).

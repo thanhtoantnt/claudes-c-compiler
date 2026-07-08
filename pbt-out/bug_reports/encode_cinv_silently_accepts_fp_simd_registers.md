@@ -73,3 +73,11 @@ Routing the conditional-select encoders (`csel`/`csinc`/`csinv`/`csneg`/
   full word reconstruction), `cinv == csinv Rd,Rn,Rn,invert(cond)` differential,
   sf-derived-from-Rd-only differential, and operand-shape negative contract.
 - 1/5 **fails** as documented above — the failure *is* the proof of the bug.
+
+## Regression property
+
+Failing property: `prop_rejects_fp_simd_registers`
+
+```rust
+prop_assert!(encode_cinv(&[xreg(rd), xreg(rn), xreg(rm)], "eq").is_err());
+```

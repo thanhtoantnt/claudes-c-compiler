@@ -67,3 +67,11 @@ field placement (`opc=11`, `01010`, `N=1`), all four shift-kind encodings, `sf` 
 tracking, and — via the cross-instruction differential `bics_word ^ bic_word == 0x6000_0000`
 — that BICS differs from BIC *only* in the opc field, exactly as the flag-setting variant
 should.
+
+## Regression property
+
+Failing property: `bics_rejects_oversized_shift`
+
+```rust
+prop_assert!(encode_bics(&[xreg(rd), xreg(rn), xreg(rm)], "lsl", 64).is_err());
+```

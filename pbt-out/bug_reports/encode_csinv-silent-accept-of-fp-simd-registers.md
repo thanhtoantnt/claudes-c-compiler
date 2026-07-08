@@ -67,3 +67,11 @@ entire conditional-select family (and any other GP-only consumer of `get_reg`).
 | `prop_cond_round_trips_and_aliases` | PASS | condition-code mapping + cs/hs, cc/lo aliases |
 | `prop_rejects_invalid_operands` | PASS | negative contract (arity / wrong operand kind / missing cond) |
 | `prop_rejects_fp_simd_registers` | **FAIL** | negative contract (register class) — **this bug** |
+
+## Regression property
+
+Failing property: `prop_rejects_fp_simd_registers`
+
+```rust
+prop_assert!(encode_csinv(&[xreg(rd), xreg(rn), xreg(rm)], "eq").is_err());
+```

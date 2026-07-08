@@ -110,4 +110,12 @@ applied. The five passing properties (`golden_anchored_encodings`,
 independently confirm that in-range immediates, field placement, op bits, and
 the `AdrPrelLo21` relocation path are all correct.
 
+## Regression property
+
+Failing property: `prop_out_of_range_immediate_rejected`
+
+```rust
+prop_assert!(encode_adr(&[xreg(0), Operand::Imm(1048577)]).is_err());
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/8

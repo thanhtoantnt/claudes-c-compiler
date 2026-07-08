@@ -117,3 +117,11 @@ Five `proptest!` properties added to `prop_encode_cinc_tests` in
 | `prop_rm_equals_rn` | Invariant (alias sets Rm field == Rn field) | PASS |
 | `prop_condition_is_inverted` | Algebraic (cond field == `encode_cond(c)^1`; complementary pairs differ only in bit 12) | PASS |
 | `prop_rejects_invalid_operands` | Negative/error contract (this finding, cases 10-15) | **FAIL** |
+
+## Regression property
+
+Failing property: `prop_rejects_invalid_operands`
+
+```rust
+prop_assert!(encode_cinc(&[xreg(rd), xreg(rn), xreg(rm)], "eq").is_err());
+```

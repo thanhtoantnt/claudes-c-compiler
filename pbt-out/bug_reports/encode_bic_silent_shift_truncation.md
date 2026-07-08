@@ -72,6 +72,14 @@ if shift_amount > max_shift {
 (For `ror` on 64-bit registers the architecturally-valid range is `1..=63`;
 `0` is CONSTRAINED UNPREDICTABLE — at minimum reject `> 63` as above.)
 
+## Regression property
+
+Failing property: `bic_rejects_oversized_shift`
+
+```rust
+prop_assert!(encode_bic(&[xreg(rd), xreg(rn), xreg(rm)], "lsl", 64).is_err());
+```
+
 ## Test evidence
 
 `bic_props::bic_rejects_oversized_shift` (in `data_processing.rs`) asserts

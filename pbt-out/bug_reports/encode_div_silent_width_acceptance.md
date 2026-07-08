@@ -84,3 +84,11 @@ if rn_64 != is_64 || rm_64 != is_64 {
 let sf = sf_bit(is_64);
 // ... unchanged emission ...
 ```
+
+## Regression property
+
+Failing property: `div_rejects_mixed_register_widths`
+
+```rust
+prop_assert!(encode_sdiv(&[xreg(0), wreg(1), wreg(2)]).is_err());
+```

@@ -110,3 +110,11 @@ vector load/store or FP arithmetic. Add a `get_reg_gp` variant if a blanket
 After the fix, all FP/SIMD cases (10–14) in
 `prop_encode_csinc_tests::prop_rejects_invalid_operands` and the CSEL sibling
 test should pass with no other test regressions.
+
+## Regression property
+
+Failing property: `prop_rejects_invalid_operands`
+
+```rust
+prop_assert!(encode_csinc(&[xreg(rd), xreg(rn), xreg(rm)], "eq").is_err());
+```

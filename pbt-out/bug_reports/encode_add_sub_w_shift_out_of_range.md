@@ -69,4 +69,12 @@ All other `encode_add_sub` branches are correct for the tested inputs:
   `TlsLeAddTprelLo12`, `:tprel_hi12:` → `TlsLeAddTprelHi12` with `sh = 1`;
   `imm12` left zero for the linker in all three.
 
+## Regression property
+
+Failing property: `w_reg_shifted_form_rejects_shift_above_31`
+
+```rust
+prop_assert!(encode_add_sub(&[wreg(rd), wreg(rn), wreg(rm), Operand::Shift { kind: "lsl".into(), amount: 32 }], false, false).is_err());
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/7

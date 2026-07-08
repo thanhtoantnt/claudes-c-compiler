@@ -64,3 +64,11 @@ if matches!(name.as_str(), "sp" | "wsp") {
     return Err("blr: SP/WSP is not a valid operand".into());
 }
 ```
+
+## Regression property
+
+Failing property: `prop_rejects_sp_wsp`
+
+```rust
+prop_assert!(encode_blr(&[Operand::Reg("sp".into())]).is_err());
+```

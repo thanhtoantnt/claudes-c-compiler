@@ -32,3 +32,11 @@ if rn64 != rd64 || rm64 != rd64 {
     return Err("div register operands must have matching widths".to_string());
 }
 ```
+
+## Regression property
+
+Failing property: `div_mixed_width_operands_rejected`
+
+```rust
+prop_assert!(encode_sdiv(&[xreg(0), wreg(1), xreg(2)]).is_err());
+```

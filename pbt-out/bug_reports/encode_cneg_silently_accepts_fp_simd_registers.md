@@ -81,3 +81,11 @@ Routing the conditional-select encoders (`csel`/`csinc`/`csinv`/`csneg`/
 - `prop_rejects_invalid_operands` — operand-shape negative contract.
 
 1/6 **fails** as documented above — the failure *is* the proof of the bug.
+
+## Regression property
+
+Failing property: `prop_rejects_fp_simd_registers`
+
+```rust
+prop_assert!(encode_cneg(&[xreg(rd), xreg(rn)], "eq").is_err());
+```

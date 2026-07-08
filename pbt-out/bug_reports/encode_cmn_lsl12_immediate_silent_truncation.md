@@ -113,3 +113,11 @@ All other `encode_cmn` behaviour is correct for the tested inputs:
   bit 30 (op = add vs sub).
 - Plain unshifted immediate range validation: out-of-range `imm` (e.g. `#0x1001`)
   is correctly rejected.
+
+## Regression property
+
+Failing property: `prop_rejects_oversized_lsl12_immediate`
+
+```rust
+prop_assert!(encode_cmn(&[wreg(rn), Operand::Imm(4097), Operand::Shift { kind: "lsl".into(), amount: 12 }]).is_err());
+```

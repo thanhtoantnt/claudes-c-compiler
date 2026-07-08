@@ -52,3 +52,11 @@ if !is_64 {
     return Err(format!("blr: operand must be 64-bit (Xn)"));
 }
 ```
+
+## Regression property
+
+Failing property: `prop_rejects_32bit_w_form`
+
+```rust
+prop_assert!(encode_blr(&[Operand::Reg("w0".into())]).is_err());
+```

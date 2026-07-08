@@ -53,4 +53,12 @@ proptest! {
 }
 ```
 
+## Regression property
+
+Failing property: `cast_float_to_target_preserves_float_targets`
+
+```rust
+prop_assert!(cast_float_to_target(v, IrType::F128).is_some());
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/4

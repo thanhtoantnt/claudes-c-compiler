@@ -106,3 +106,11 @@ register is required.
 | D | `prop_cond_round_trips_and_aliases` — cond table + cs/hs, cc/lo aliases | ✅ pass |
 | E | `prop_rejects_invalid_operands` — arity / type structural negative contract | ✅ pass |
 | F | `prop_rejects_fp_simd_registers` — register-class negative contract | ❌ **fail (this bug)** |
+
+## Regression property
+
+Failing property: `prop_rejects_fp_simd_registers`
+
+```rust
+prop_assert!(encode_csneg(&[xreg(rd), xreg(rn)], "eq").is_err());
+```

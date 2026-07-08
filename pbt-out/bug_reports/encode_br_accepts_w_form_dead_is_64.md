@@ -64,6 +64,14 @@ Ok(EncodeResult::Word(word))
 When landed, `prop_width_independent_w_form_accepted`'s `is_ok()` assertion
 should flip to `is_err()`.
 
+## Regression property
+
+Failing property: `prop_width_independent_w_form_accepted`
+
+```rust
+prop_assert!(encode_br(&[Operand::Reg("w0".into())]).is_err());
+```
+
 ## Reproduce
 ```bash
 cargo test --lib prop_width_independent_w_form_accepted

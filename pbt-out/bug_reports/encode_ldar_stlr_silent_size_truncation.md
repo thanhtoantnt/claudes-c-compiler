@@ -78,3 +78,11 @@ The following hand-derived golden encodings (ARM ARM §C4 LDAR/STLR layout) all 
 Field placement (Rt[4:0], Rn[9:5]), the load/store `L`-bit differential
 (`LDAR ^ STLR == 0x00400000`), and the constant skeleton invariant
 (`word & 0x3FBFFC00 == 0x089FFC00`) all hold for every in-range input.
+
+## Regression property
+
+Failing property: `prop_forced_size_out_of_range_rejected`
+
+```rust
+prop_assert!(encode_ldar_stlr(&[xreg(0), mem(xreg(1))], false, 4).is_err());
+```

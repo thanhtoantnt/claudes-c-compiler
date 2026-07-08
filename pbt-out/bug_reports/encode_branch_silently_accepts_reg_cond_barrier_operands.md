@@ -69,3 +69,11 @@ Shared helper `get_symbol` (`encoder/mod.rs`) accepts `Operand::Reg`/`Operand::C
 calls it unconditionally, so all three operand kinds are silently treated as branch targets.
 The same root cause affects `encode_bl`, `encode_cond_branch`, `encode_cbz`, `encode_tbz`, but
 this report is scoped to `encode_branch` per per-function filing.
+
+## Regression property
+
+Failing property: `prop_symbol_forwarding_all_accepted_kinds`
+
+```rust
+prop_assert!(!matches!(encode_branch(&[Operand::Reg("x0".into())]), Ok(EncodeResult::Jump26(_))));
+```

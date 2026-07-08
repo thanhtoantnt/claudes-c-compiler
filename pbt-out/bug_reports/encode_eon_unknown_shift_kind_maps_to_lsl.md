@@ -24,3 +24,11 @@ Typos or parser bugs in the shift kind silently produce a valid but unintended i
 ## Suggested fix
 
 Replace the catch-all shift mapping with an error for unknown kinds, as done by stricter sibling encoders.
+
+## Regression property
+
+Failing property: `eon_unknown_shift_kind_is_rejected`
+
+```rust
+prop_assert!(encode_eon(&[xreg(0), xreg(1), xreg(2)], "foo", 1).is_err());
+```

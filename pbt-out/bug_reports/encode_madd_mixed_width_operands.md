@@ -79,3 +79,11 @@ A pre-existing characterization test `madd_silently_accepts_mixed_width_operands
 (data_processing.rs:3788, comment 3783-3787) already documents the acceptance
 without asserting it is correct. This report upgrades it to a confirmed
 spec-violation with a failing property.
+
+## Regression property
+
+Failing property: `madd_mixed_width_operands_rejected`
+
+```rust
+prop_assert!(encode_madd(&[xreg(0), wreg(1), wreg(2), xreg(3)]).is_err());
+```

@@ -89,3 +89,14 @@ check) and should be fixed there too.
 | 4b| `logical_x_reg_rejects_shift_above_63` (negative, **new**) | FAIL — this bug |
 | 5 | `logical_immediate_form_roundtrips` (independent ARM-ARM decoder oracle) | pass |
 | 6 | `logical_immediate_rejects_non_bitmask` (0 / all-ones -> Err) | pass |
+
+## Regression property
+
+Failing properties:
+- `logical_w_reg_rejects_shift_above_31`
+- `logical_x_reg_rejects_shift_above_63`
+
+```rust
+prop_assert!(encode_logical(&[wreg(0), wreg(1), wreg(2)], "and", "lsl", 32).is_err());
+prop_assert!(encode_logical(&[xreg(0), xreg(1), xreg(2)], "and", "lsl", 64).is_err());
+```

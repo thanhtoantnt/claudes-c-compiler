@@ -76,6 +76,14 @@ cargo test --lib backend::arm::assembler::encoder::compare_branch::prop_encode_c
 - Same shared-helper defect recurs across the whole XZR-only data-processing /
   branch family (see sibling reports).
 
+## Regression property
+
+Failing property: `prop_sp_silently_aliased_to_xzr`
+
+```rust
+prop_assert!(encode_cbz(&[Operand::Reg("sp".into()), Operand::Imm(0)]).is_err());
+```
+
 ## Suggested fix
 
 Reject SP/WSP (and, ideally, mixed/FP-SIMD registers) in `encode_cbz` before

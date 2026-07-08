@@ -24,3 +24,11 @@ Invalid assembly is accepted and silently re-encoded as a different valid instru
 ## Suggested fix
 
 Validate the shift amount before masking: `amount <= 63` for X-register forms and `amount <= 31` for W-register forms.
+
+## Regression property
+
+Failing property: `eon_x_register_shift_above_63_is_rejected`
+
+```rust
+prop_assert!(encode_eon(&[xreg(0), xreg(1), xreg(2)], "lsl", 64).is_err());
+```

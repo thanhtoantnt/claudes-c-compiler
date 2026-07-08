@@ -37,3 +37,11 @@ if rt_is_64 != rt2_is_64 {
     return Err("ldxp/stxp pair registers must have matching widths".to_string());
 }
 ```
+
+## Regression property
+
+Failing property: `ldxp_stxp_mismatched_widths_rejected`
+
+```rust
+prop_assert!(encode_ldxp_stxp(&[wreg(0), xreg(1), xreg(2), xreg(3)], true).is_err());
+```

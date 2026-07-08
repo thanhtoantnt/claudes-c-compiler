@@ -67,3 +67,11 @@ if is_fp_reg(&name) {
 ```
 
 (`is_fp_reg` already exists in `encoder/mod.rs` and matches prefixes `d | s | q | v | h | b`.)
+
+## Regression property
+
+Failing property: `prop_rejects_fp_simd_registers`
+
+```rust
+prop_assert!(encode_blr(&[Operand::Reg("d0".into())]).is_err());
+```

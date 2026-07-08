@@ -37,3 +37,11 @@ match operands.get(mem_index) {
     _ => return Err("ldxp/stxp needs memory operand".to_string()),
 }
 ```
+
+## Regression property
+
+Failing property: `ldxp_stxp_nonzero_offset_rejected`
+
+```rust
+prop_assert!(encode_ldxp_stxp(&[xreg(0), xreg(1), mem_offset(xreg(2), 8), xreg(3)], true).is_err());
+```

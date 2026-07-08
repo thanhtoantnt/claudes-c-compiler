@@ -98,3 +98,11 @@ cset w5, ne   -> 0x1A9F07E5  (matches [0xe5,0x07,0x9f,0x1a])
 cset x10, gt  -> 0x9A9FD7EA  (matches [0xea,0xd7,0x9f,0x9a])
 cset w31, cs  -> 0x1A9F37FF  (matches [0xff,0x37,0x9f,0x1a]; llvm normalizes w31->wzr, cs->hs)
 ```
+
+## Regression property
+
+Failing property: `prop_rejects_al_nv_conditions`
+
+```rust
+prop_assert!(encode_cset(&[xreg(rd)], "al").is_err());
+```

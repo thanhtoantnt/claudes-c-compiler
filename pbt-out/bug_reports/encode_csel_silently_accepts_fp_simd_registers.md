@@ -108,3 +108,11 @@ encode to **bit-identical** words — the encoder does not verify that `Rn`/`Rm`
 share `Rd`'s width. A reference assembler rejects mixed widths (`operand size
 mismatch`). Worth a follow-up `get_reg`-level width-consistency check, but out of
 scope for the current failing test.
+
+## Regression property
+
+Failing property: `prop_rejects_fp_simd_registers`
+
+```rust
+prop_assert!(encode_csel(&[xreg(rd), xreg(rn), xreg(rm)], "eq").is_err());
+```

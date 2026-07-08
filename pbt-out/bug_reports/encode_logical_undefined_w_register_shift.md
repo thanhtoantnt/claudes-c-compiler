@@ -92,3 +92,11 @@ $ cargo test --lib data_processing::tests::logical
 test result: FAILED. 5 passed; 1 failed
 minimal failing input: rd = 0, rn = 0, rm = 0, amount = 32, sk = 0
 ```
+
+## Regression property
+
+Failing property: `logical_w_reg_rejects_shift_above_31`
+
+```rust
+prop_assert!(encode_logical(&[wreg(0), wreg(1), wreg(2)], "and", "lsl", 32).is_err());
+```

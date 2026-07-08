@@ -91,3 +91,11 @@ field-placement properties continue to pass unchanged.
 
 Golden values cross-checked against the ARMv8-A ARM:
 `ldxr x0,[x1] = 0xC85F7C20`, `stxr w0,x0,[x1] = 0xC8007C20`.
+
+## Regression property
+
+Failing property: `prop_forced_size_out_of_range_rejected`
+
+```rust
+prop_assert!(encode_ldxr_stxr(&[xreg(0), mem(xreg(1))], true, Some(4)).is_err());
+```

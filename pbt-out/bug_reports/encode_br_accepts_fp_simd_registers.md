@@ -84,6 +84,14 @@ Ok(EncodeResult::Word(word))
 When landed, `prop_fp_simd_registers_wrongly_accepted`'s `is_ok()` assertion
 should flip to `is_err()`.
 
+## Regression property
+
+Failing property: `prop_fp_simd_registers_wrongly_accepted`
+
+```rust
+prop_assert!(encode_br(&[Operand::Reg("d0".into())]).is_err());
+```
+
 ## Reproduce
 ```bash
 cargo test --lib prop_fp_simd_registers_wrongly_accepted

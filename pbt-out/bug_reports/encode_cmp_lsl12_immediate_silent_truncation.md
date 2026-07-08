@@ -107,3 +107,11 @@ All other `encode_cmp` behaviour is correct for the tested inputs:
   bit 30 (op = sub vs add).
 - Plain unshifted immediate range validation: out-of-range `imm` (e.g. `#0x1001`)
   is correctly rejected.
+
+## Regression property
+
+Failing property: `prop_rejects_large_imm_with_explicit_shift`
+
+```rust
+prop_assert!(encode_cmp(&[wreg(rn), Operand::Imm(4097), Operand::Shift { kind: "lsl".into(), amount: 12 }]).is_err());
+```

@@ -30,3 +30,11 @@ if rm_name.eq_ignore_ascii_case("sp") || rm_name.eq_ignore_ascii_case("wsp") {
     return Err("div operands cannot use SP/WSP".to_string());
 }
 ```
+
+## Regression property
+
+Failing property: `div_rejects_sp_operands`
+
+```rust
+prop_assert!(encode_sdiv(&[xreg(0), xreg(1), Operand::Reg("sp".into())]).is_err());
+```

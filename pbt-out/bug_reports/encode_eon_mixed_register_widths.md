@@ -24,3 +24,11 @@ A mixed-width source typo silently assembles into an instruction operating at a 
 ## Suggested fix
 
 Compare the `is_64` flags returned by `get_reg` for `Rd`, `Rn`, and `Rm`; reject when they differ.
+
+## Regression property
+
+Failing property: `eon_rejects_mixed_register_widths`
+
+```rust
+prop_assert!(encode_eon(&[wreg(0), xreg(1), wreg(2)], "lsl", 0).is_err());
+```

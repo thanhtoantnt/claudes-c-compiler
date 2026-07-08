@@ -82,3 +82,11 @@ All other `encode_bic` branches are correct for the tested inputs:
   selects 128-bit vs 64-bit, bits 31/29 are 0, fixed `01110` at bits 28:24,
   size/op `01` at bits 23:22, `N=1`, fixed `000111` at bits 15:10, and
   `Rm`/`Rn`/`Rd` placement.
+
+## Regression property
+
+Failing property: `bic_w_register_rejects_shift_above_31`
+
+```rust
+prop_assert!(encode_bic(&[wreg(rd), wreg(rn), wreg(rm)], "lsl", 32).is_err());
+```

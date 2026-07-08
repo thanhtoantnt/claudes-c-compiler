@@ -98,3 +98,11 @@ if matches!(cond, 14 | 15) {
 Happy-path correctness cross-checked by manual decode of the emitted word
 (e.g. `csetm x0, eq` -> `0xDA9F17E0` == `CSINV x0, xzr, xzr, ne`,
 sf=1 op=1 o1=0 Rm=Rn=31 cond=1=invert(eq)=ne Rd=0).
+
+## Regression property
+
+Failing property: `prop_rejects_al_nv_conditions`
+
+```rust
+prop_assert!(encode_csetm(&[xreg(rd)], "al").is_err());
+```
