@@ -6360,3 +6360,236 @@ mod mneg_props {
         }
     }
 }
+
+// ── encode_smulh property tests ──────────────────────────────────────────
+// SMULH <Xd>, <Xn>, <Xm> (signed multiply high), Data-processing (3 source):
+//   sf=1[31] 0[30] S=0[29] 11011[28:24] o1=0[23] 10[22:21] Rm[20:16]
+//   o0=0[15] Ra=11111[14:10] Rn[9:5] Rd[4:0]
+// Reference (ARMv8 ARM): SMULH is defined ONLY in the 64-bit (X) form — there
+// is no 32-bit "W" encoding, so W-register operands are architecturally UNDEF.
+// Base word with all register fields zero: 0x9B407C00.
+// (SMULH and UMULH share this layout and differ only in o1, bit 23.)
+#[cfg(test)]
+mod smulh_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn sf_of(w: u32) -> u32    { (w >> 31) & 1 }
+    fn fixed_of(w: u32) -> u32 { (w >> 21) & 0x3FF } // bits [30:21]
+    fn o0_of(w: u32) -> u32    { (w >> 15) & 1 }     // bit 15
+    fn ra_of(w: u32) -> u32    { (w >> 10) & 0x1F }  // bits [14:10]
+    fn rm_of(w: u32) -> u32    { (w >> 16) & 0x1F }
+    fn rn_of(w: u32) -> u32    { (w >> 5) & 0x1F }
+    fn rd_of(w: u32) -> u32    { w & 0x1F }
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        // P1. Reference encoding oracle: the encoded word equals an
+        //     independently-derived constant (base 0x9B407C00 with Rm/Rn/Rd
+        //     OR'd into their fields). Verifies the bit layout holistically
+        //     without reusing the encoder's own arithmetic.
+        #[test]
+        fn smulh_reference_encoding(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = word(encode_smulh(&ops));
+            let expected = 0x9B407C00u32 | (rm << 16) | (rn << 5) | rd;
+            prop_assert_eq!(w, expected);
+        }
+
+        // P2. Field placement: every fixed opcode bit-group and every register
+        //     field lands exactly where the ARMv8 SMULH encoding dictates.
+        //     fixed bits [30:21] = 0b0011011010 (op=0, S=0, 11011, o1=0, 10);
+        //     o0 (bit 15) = 0; Ra hardwired to 11111.
+        #[test]
+        fn smulh_field_placement(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = word(encode_smulh(&ops));
+            prop_assert_eq!(sf_of(w), 1);                       // SMULH is always 64-bit
+            prop_assert_eq!(fixed_of(w), 0b0011011010);         // op/S/11011/o1/10 fixed bits
+            prop_assert_eq!(o0_of(w), 0);                       // o0 = 0
+            prop_assert_eq!(ra_of(w), 0b11111);                 // Ra hardwired to XZR
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // P3. Differential / algebraic oracle: SMULH (signed) and UMULH
+        //     (unsigned) share an identical bit layout and differ ONLY in the
+        //     sign-select bit o1 (bit 23). For identical operands their XOR is
+        //     exactly 1<<23 — proving the two encoders agree on every shared
+        //     field and that o1 is the sole distinguisher.
+        #[test]
+        fn smulh_xor_umulh_only_o1_bit_differs(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let s = word(encode_smulh(&ops));
+            let u = word(encode_umulh(&ops));
+            prop_assert_eq!(s ^ u, 1u32 << 23);
+            prop_assert_eq!((s >> 23) & 1, 0); // SMULH: o1 = 0
+            prop_assert_eq!((u >> 23) & 1, 1); // UMULH: o1 = 1
+        }
+
+        // P4. Negative contract: SMULH takes exactly three register operands
+        //     (<Xd>, <Xn>, <Xm>). Fewer than three, or a non-register
+        //     (immediate) operand in any of the three positions, must be Err.
+        #[test]
+        fn smulh_rejects_missing_or_non_register_operands(
+            n in 0u32..=30,
+            missing in 1u32..=3,
+            bad_pos in 0u32..3,
+        ) {
+            // too few operands
+            {
+                let mut ops = vec![xreg(n), xreg(n), xreg(n)];
+                for _ in 0..missing {
+                    ops.pop();
+                }
+                prop_assert!(encode_smulh(&ops).is_err());
+            }
+            // a non-register operand in any position
+            {
+                let mut ops = vec![xreg(n), xreg(n), xreg(n)];
+                ops[bad_pos as usize] = Operand::Imm(7);
+                prop_assert!(encode_smulh(&ops).is_err());
+            }
+        }
+
+        // P5. Negative contract (spec): SMULH is defined EXCLUSIVELY as the
+        //     64-bit form "SMULH <Xd>, <Xn>, <Xm>" (ARMv8 ARM, Data-processing
+        //     (3 source)). There is no 32-bit encoding; W-register operands are
+        //     architecturally UNDEF and MUST be rejected with Err, not silently
+        //     re-encoded with sf=1. (This currently FAILS — see BUG report.)
+        #[test]
+        fn smulh_rejects_32bit_w_registers(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let ops = vec![wreg(rd), wreg(rn), wreg(rm)];
+            prop_assert!(encode_smulh(&ops).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod umulh_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+
+    fn expect_word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    // Field extractors for the AArch64 data-processing register layout.
+    fn sf_of(w: u32) -> u32 { (w >> 31) & 1 }
+    fn rm_of(w: u32) -> u32 { (w >> 16) & 0x1F }
+    fn rn_of(w: u32) -> u32 { (w >> 5) & 0x1F }
+    fn rd_of(w: u32) -> u32 { w & 0x1F }
+
+    proptest! {
+        // ── encode_umulh: UMULH <Xd>, <Xn>, <Xm> ────────────────────────────────
+        // Differential oracle: the base constant 0x9BC07C00 was produced by an
+        // independent reference assembler (clang/LLVM `--target=aarch64-linux-gnu`):
+        //   umulh x0, x0, x0  -> 0x9bc07c00
+        //   umulh x5, x6, x7  -> 0x9bc77cc5
+        //   umulh x9, x10, x11 -> 0x9bcb7d49
+        // Rm occupies bits 20:16, Rn bits 9:5, Rd bits 4:0.
+
+        // P1. Differential reference: encoded word == clang-derived base constant
+        //     with Rm/Rn/Rd placed in their fields, for the full register range.
+        #[test]
+        fn umulh_matches_llvm_reference(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_umulh(&ops));
+            let expected = 0x9BC07C00u32 | (rm << 16) | (rn << 5) | rd;
+            prop_assert_eq!(w, expected);
+        }
+
+        // P2. Field placement: sf is set and Rm/Rn/Rd land in their exact fields.
+        #[test]
+        fn umulh_field_placement(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = expect_word(encode_umulh(&ops));
+            prop_assert_eq!(sf_of(w), 1);     // UMULH is a 64-bit instruction
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // P3. Negative contract: fewer than three register operands -> Err.
+        #[test]
+        fn umulh_rejects_too_few_operands(
+            n in 0u32..=30,
+            missing in 1u32..=3,
+        ) {
+            let mut ops = vec![xreg(n), xreg(n), xreg(n)];
+            for _ in 0..missing { ops.pop(); }
+            prop_assert!(encode_umulh(&ops).is_err());
+        }
+
+        // P4. Negative contract: a non-register operand in any of the three
+        //     positions is rejected (UMULH takes no immediates / shifts).
+        #[test]
+        fn umulh_rejects_non_register_operands(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            bad_pos in 0u32..3,
+        ) {
+            let mut ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            ops[bad_pos as usize] = Operand::Imm(5);
+            prop_assert!(encode_umulh(&ops).is_err());
+        }
+
+        // P5. Spec negative contract: UMULH is a 64-bit-only instruction
+        //     (ARMv8 ARM, C4.1.68). A reference assembler rejects W operands:
+        //       `clang --target=aarch64-linux-gnu` on "umulh w0,w1,w2"
+        //       -> error: invalid operand for instruction
+        //     The encoder MUST therefore reject W registers with Err.
+        #[test]
+        fn umulh_rejects_wrong_width_operands(
+            n in 0u32..=30,
+        ) {
+            let ops = vec![wreg(n), wreg(n), wreg(n)]; // umulh w0, w1, w2
+            prop_assert!(
+                encode_umulh(&ops).is_err(),
+                "UMULH is 64-bit-only; W operands must be rejected (got {:?})",
+                encode_umulh(&ops)
+            );
+        }
+    }
+}
