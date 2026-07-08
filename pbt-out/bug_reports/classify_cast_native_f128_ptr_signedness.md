@@ -61,3 +61,5 @@ if from_ty.is_unsigned() || from_ty == IrType::Ptr {
     return CastKind::UnsignedToF128 { from_ty };
 }
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/5
