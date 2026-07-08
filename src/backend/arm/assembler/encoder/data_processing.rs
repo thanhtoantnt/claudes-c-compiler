@@ -5199,3 +5199,137 @@ mod bic_props {
         }
     }
 }
+
+// ── encode_bics property tests ───────────────────────────────────────────
+// BICS (shifted register) = AND with inverted operand, setting flags:
+//   sf opc[30:29]=11 01010[28:24] shift[23:22] N[21]=1 Rm[20:16] imm6[15:10] Rn[9:5] Rd[4:0]
+// Identical to BIC except opc=11 (BIC opc=00); the opc=11 value is exactly
+// what raises the condition flags. Reference: ARMv8 ARM, §C4.1.4
+// (Logical (shifted register)).
+#[cfg(test)]
+mod bics_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn sf_of(w: u32) -> u32         { (w >> 31) & 1 }
+    fn opc_of(w: u32) -> u32        { (w >> 29) & 0x3 }
+    fn opcode5_of(w: u32) -> u32    { (w >> 24) & 0x1F }
+    fn shift_type_of(w: u32) -> u32 { (w >> 22) & 0x3 }
+    fn n_of(w: u32) -> u32          { (w >> 21) & 1 }   // bit 21: inverted-operand flag
+    fn rm_of(w: u32) -> u32         { (w >> 16) & 0x1F }
+    fn imm6_of(w: u32) -> u32       { (w >> 10) & 0x3F }
+    fn rn_of(w: u32) -> u32         { (w >> 5) & 0x1F }
+    fn rd_of(w: u32) -> u32         { w & 0x1F }
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+    fn shift(kind: &str, amount: u32) -> Operand {
+        Operand::Shift { kind: kind.into(), amount }
+    }
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        // 1. Default register form BICS Xd, Xn, Xm: every fixed field matches
+        //    the ARMv8 shifted-register encoding. opc=11 (the flag-setting
+        //    variant of BIC), 01010, N=1 (inverted operand), shift=0, imm6=0,
+        //    and Rm/Rn/Rd land in their exact bitfields.
+        #[test]
+        fn bics_register_form_fields(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = word(encode_bics(&ops));
+            prop_assert_eq!(sf_of(w), 1);
+            prop_assert_eq!(opc_of(w), 0b11);
+            prop_assert_eq!(opcode5_of(w), 0b01010);
+            prop_assert_eq!(n_of(w), 1);
+            prop_assert_eq!(shift_type_of(w), 0b00);
+            prop_assert_eq!(imm6_of(w), 0);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 2. Shifted register form BICS Xd, Xn, Xm, <shift> #amount: the
+        //    shift-type field (bits 23:22) and imm6 amount (bits 15:10) are
+        //    placed exactly as supplied across all four shift kinds, with
+        //    opc=11 and N=1 held constant.
+        #[test]
+        fn bics_register_form_shift_fields(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            sk in 0u32..=3u32,          // 0=lsl, 1=lsr, 2=asr, 3=ror
+            amount in 0u32..=63u32,     // full 6-bit imm6 range for X registers
+        ) {
+            let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm), shift(kind, amount)];
+            let w = word(encode_bics(&ops));
+            prop_assert_eq!(opc_of(w), 0b11);
+            prop_assert_eq!(n_of(w), 1);
+            prop_assert_eq!(shift_type_of(w), sk);
+            prop_assert_eq!(imm6_of(w), amount);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 3. sf (bit 31) tracks register width: Wn -> 0, Xn -> 1.
+        #[test]
+        fn bics_sf_tracks_register_width(
+            n in 0u32..=30,
+            is_w in any::<bool>(),
+        ) {
+            let mk = |is_w: bool, n: u32| if is_w { wreg(n) } else { xreg(n) };
+            let ops = vec![mk(is_w, n), mk(is_w, n), mk(is_w, n)];
+            let w = word(encode_bics(&ops));
+            prop_assert_eq!(sf_of(w), if is_w { 0 } else { 1 });
+        }
+
+        // 4. Differential oracle: BICS and BIC share an identical encoding
+        //    EXCEPT for the opc field (bits 30:29). BICS sets both bits (opc=11)
+        //    to raise the flags; BIC leaves them clear (opc=00). For identical
+        //    operands and shift, the XOR of the two words must be exactly
+        //    0x6000_0000 (bits 30 and 29), proving no other field diverges.
+        #[test]
+        fn bics_differs_from_bic_only_in_opc(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            sk in 0u32..=3u32,
+            amount in 0u32..=63u32,
+            is_w in any::<bool>(),
+        ) {
+            let mk = |is_w: bool, n: u32| if is_w { wreg(n) } else { xreg(n) };
+            let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+            let ops = vec![mk(is_w, rd), mk(is_w, rn), mk(is_w, rm), shift(kind, amount)];
+            let bics = word(encode_bics(&ops));
+            let bic  = word(encode_bic(&ops));
+            prop_assert_eq!(bics ^ bic, 0x6000_0000);
+        }
+
+        // 5. Negative contract: imm6 is a 6-bit field, so shift amounts > 63
+        //    are unrepresentable and must be rejected. (Currently FAILS: the
+        //    encoder masks with `& 0x3F`, silently truncating out-of-range
+        //    amounts instead of returning Err.)
+        #[test]
+        fn bics_rejects_oversized_shift(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            amount in 64u32..=4095,
+            sk in 0u32..=3u32,
+        ) {
+            let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm), shift(kind, amount)];
+            prop_assert!(encode_bics(&ops).is_err());
+        }
+    }
+}
