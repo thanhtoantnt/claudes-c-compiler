@@ -1196,6 +1196,89 @@ mod tests {
     }
 
     proptest! {
+        // ── encode_mul: MUL Rd, Rn, Rm -> MADD Rd, Rn, Rm, XZR ─────────────────
+        // ARMv8 MADD bit-string: sf 0 0 11011 000 Rm 0 Ra Rn Rd.
+        // The MUL alias sets Ra = 11111 (XZR/WZR). With all registers = 0:
+        //   32-bit: 0001 1011 0000 0000 0111 1100 0000 0000 = 0x1B007C00
+        //   64-bit: 1001 1011 0000 0000 0111 1100 0000 0000 = 0x9B007C00
+        // with Rm/Rn/Rd OR'd into their respective fields.
+
+        // P1. Full-word reference oracle: the encoded word equals the spec-derived
+        //     constant with Rm/Rn/Rd placed in their fields, for both 32- and 64-bit.
+        #[test]
+        fn mul_reference_encoding(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+        ) {
+            let ops64 = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w64 = expect_word(encode_mul(&ops64));
+            prop_assert_eq!(w64, 0x9B007C00u32 | (rm << 16) | (rn << 5) | rd);
+
+            let ops32 = vec![wreg(rd), wreg(rn), wreg(rm)];
+            let w32 = expect_word(encode_mul(&ops32));
+            prop_assert_eq!(w32, 0x1B007C00u32 | (rm << 16) | (rn << 5) | rd);
+        }
+
+        // P2. Field placement: every fixed opcode bit-group and every register
+        //     field lands exactly where the ARMv8 MADD/MUL encoding dictates.
+        #[test]
+        fn mul_field_placement(
+            rd in 0u32..=31,
+            rn in 0u32..=31,
+            rm in 0u32..=31,
+            is_64 in any::<bool>(),
+        ) {
+            let dst = if is_64 { xreg(rd) } else { wreg(rd) };
+            let ops = vec![dst, xreg(rn), xreg(rm)];
+            let w = expect_word(encode_mul(&ops));
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!((w >> 21) & 0x3FF, 0b0011011000); // 0 0 11011 000 fixed bits
+            prop_assert_eq!((w >> 15) & 1, 0);                // o0 = 0
+            prop_assert_eq!((w >> 10) & 0x1F, 0b11111);       // Ra = 31 (XZR) -> MUL alias
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // P3. sf is derived ONLY from the destination register's width: Xdst -> sf=1,
+        //     Wdst -> sf=0, regardless of the (possibly mismatched) source widths.
+        #[test]
+        fn mul_sf_tracks_destination_width_only(
+            n in 0u32..=31,
+            rn_is_x in any::<bool>(),
+            rm_is_x in any::<bool>(),
+            rd_is_x in any::<bool>(),
+        ) {
+            let rd = if rd_is_x { xreg(n) } else { wreg(n) };
+            let rn = if rn_is_x { xreg(n) } else { wreg(n) };
+            let rm = if rm_is_x { xreg(n) } else { wreg(n) };
+            let ops = vec![rd, rn, rm];
+            let w = expect_word(encode_mul(&ops));
+            prop_assert_eq!(sf_of(w), if rd_is_x { 1 } else { 0 });
+        }
+
+        // P4. Negative contract (spec): ARMv8 ARM "MUL" requires <Rd>, <Rn>, <Rm>
+        //     to all share the same register width. The encoder derives sf from
+        //     the destination only and does NOT validate source widths, so a
+        //     mixed-width form such as `mul x0, w1, w2` is silently mis-encoded
+        //     (it produces a 64-bit MADD with W-numbered sources). This property
+        //     asserts the spec-correct behavior (rejection) and is EXPECTED TO
+        //     FAIL, demonstrating the gap. (llvm-mc rejects these as invalid.)
+        #[test]
+        fn mul_rejects_mixed_register_widths(
+            n in 0u32..=30,
+        ) {
+            // Destination 64-bit, sources 32-bit: mul x{n}, w{n}, w{n}
+            let ops1 = vec![xreg(n), wreg(n), wreg(n)];
+            prop_assert!(encode_mul(&ops1).is_err());
+            // Destination 32-bit, sources 64-bit: mul w{n}, x{n}, x{n}
+            let ops2 = vec![wreg(n), xreg(n), xreg(n)];
+            prop_assert!(encode_mul(&ops2).is_err());
+        }
+    }
+
+    proptest! {
         // 1. ADD Xd, Xn, #imm (0..=0xFFF, unshifted): every fixed field and every
         //    register/immediate field lands exactly where the ARMv8 spec dictates.
         #[test]
