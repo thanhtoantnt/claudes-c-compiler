@@ -5015,3 +5015,187 @@ mod eon_props {
         }
     }
 }
+
+// ── encode_bic property tests ────────────────────────────────────────────
+// BIC (shifted register) = AND with inverted operand:
+//   sf opc[30:29]=00 01010[28:24] shift[23:22] N[21]=1 Rm[20:16] imm6[15:10] Rn[9:5] Rd[4:0]
+// BIC (immediate) = AND Rd,Rn,#~imm:
+//   sf 00 100100[28:23] N[22] immr[21:16] imms[15:10] Rn[9:5] Rd[4:0]
+// Reference: ARMv8 ARM, §C4.1.4 (Logical (shifted register)) and
+// §C4.1.5 (Logical (immediate)).
+#[cfg(test)]
+mod bic_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn sf_of(w: u32) -> u32         { (w >> 31) & 1 }
+    fn opc_of(w: u32) -> u32        { (w >> 29) & 0x3 }
+    fn opcode5_of(w: u32) -> u32    { (w >> 24) & 0x1F }
+    fn opcode6_of(w: u32) -> u32    { (w >> 23) & 0x3F }
+    fn shift_type_of(w: u32) -> u32 { (w >> 22) & 0x3 }
+    fn n_of(w: u32) -> u32          { (w >> 21) & 1 }   // bit 21: inverted-operand flag (reg form)
+    fn n_imm_of(w: u32) -> u32      { (w >> 22) & 1 }   // bit 22: N field of immediate form
+    fn rm_of(w: u32) -> u32         { (w >> 16) & 0x1F }
+    fn immr_of(w: u32) -> u32       { (w >> 16) & 0x3F }
+    fn imm6_of(w: u32) -> u32       { (w >> 10) & 0x3F }
+    fn imms_of(w: u32) -> u32       { (w >> 10) & 0x3F }
+    fn rn_of(w: u32) -> u32         { (w >> 5) & 0x1F }
+    fn rd_of(w: u32) -> u32         { w & 0x1F }
+
+    fn xreg(n: u32) -> Operand { Operand::Reg(format!("x{}", n)) }
+    fn wreg(n: u32) -> Operand { Operand::Reg(format!("w{}", n)) }
+    fn shift(kind: &str, amount: u32) -> Operand {
+        Operand::Shift { kind: kind.into(), amount }
+    }
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r.unwrap() {
+            EncodeResult::Word(w) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    /// Build a value that is a valid AArch64 bitmask immediate for `width`: a
+    /// contiguous run of `k` ones (1 <= k < size), rotated, then replicated to
+    /// fill the width. Feeding `!bm` to BIC exercises the immediate form on its
+    /// happy path (BIC inverts its operand before the bitmask encode).
+    fn valid_bitmask(is_64: bool) -> impl Strategy<Value = u64> {
+        let width = if is_64 { 64u32 } else { 32u32 };
+        (0u32..6, any::<u32>(), any::<u32>())
+            .prop_map(move |(si, ones_seed, rot_seed)| {
+                let sizes = [2u32, 4, 8, 16, 32, 64];
+                let s = sizes[si as usize].min(width);
+                let k = 1 + (ones_seed % (s - 1));
+                let r = rot_seed % s;
+                if s == 64 {
+                    let base = (!0u64) >> (64 - k);
+                    return base.rotate_right(r);
+                }
+                let smask = (1u64 << s) - 1;
+                let base = ((1u64 << k) - 1) & smask;
+                let rot = if r == 0 {
+                    base
+                } else {
+                    ((base >> r) | (base << (s - r))) & smask
+                };
+                let mut v = 0u64;
+                let mut pos = 0u32;
+                while pos < width {
+                    v |= rot << pos;
+                    pos += s;
+                }
+                v
+            })
+    }
+
+    fn width_and_bitmask() -> impl Strategy<Value = (bool, u64)> {
+        any::<bool>().prop_flat_map(|is_64| {
+            valid_bitmask(is_64).prop_map(move |bm| (is_64, bm))
+        })
+    }
+
+    proptest! {
+        // 1. Default register form BIC Xd, Xn, Xm: every fixed field matches the
+        //    ARMv8 shifted-register encoding BIC aliases (AND with N=1). opc=00,
+        //    01010, N=1, shift=0, imm6=0, and Rm/Rn/Rd land in their exact
+        //    bitfields.
+        #[test]
+        fn bic_register_form_fields(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+        ) {
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm)];
+            let w = word(encode_bic(&ops));
+            prop_assert_eq!(sf_of(w), 1);
+            prop_assert_eq!(opc_of(w), 0b00);
+            prop_assert_eq!(opcode5_of(w), 0b01010);
+            prop_assert_eq!(n_of(w), 1);
+            prop_assert_eq!(shift_type_of(w), 0b00);
+            prop_assert_eq!(imm6_of(w), 0);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 2. Shifted register form BIC Xd, Xn, Xm, <shift> #amount: the
+        //    shift-type field (bits 23:22) and imm6 amount (bits 15:10) are
+        //    placed exactly as supplied, and N stays 1 (inverted operand).
+        #[test]
+        fn bic_register_form_shift_fields(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            sk in 0u32..=3u32,         // 0=lsl, 1=lsr, 2=asr, 3=ror
+            amount in 0u32..=63u32,    // full 6-bit imm6 range for X registers
+        ) {
+            let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm), shift(kind, amount)];
+            let w = word(encode_bic(&ops));
+            prop_assert_eq!(sf_of(w), 1);
+            prop_assert_eq!(opc_of(w), 0b00);
+            prop_assert_eq!(opcode5_of(w), 0b01010);
+            prop_assert_eq!(n_of(w), 1);
+            prop_assert_eq!(shift_type_of(w), sk);
+            prop_assert_eq!(imm6_of(w), amount);
+            prop_assert_eq!(rm_of(w), rm);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 3. sf (bit 31) tracks register width: Wn -> 0, Xn -> 1.
+        #[test]
+        fn bic_sf_tracks_register_width(
+            n in 0u32..=30,
+            is_w in any::<bool>(),
+        ) {
+            let mk = |is_w: bool, n: u32| if is_w { wreg(n) } else { xreg(n) };
+            let ops = vec![mk(is_w, n), mk(is_w, n), mk(is_w, n)];
+            let w = word(encode_bic(&ops));
+            prop_assert_eq!(sf_of(w), if is_w { 0 } else { 1 });
+        }
+
+        // 4. Immediate form: BIC Xd, Xn, #imm must encode identically to
+        //    AND Xd, Xn, #(~imm) — opc=00, 100100, and the N/immr/imms fields
+        //    equal what encode_bitmask_imm yields for the inverted value.
+        #[test]
+        fn bic_immediate_is_and_of_inverted(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            wb in width_and_bitmask(),
+        ) {
+            let (is_64, bm) = wb;
+            let width_mask: u64 = if is_64 { !0u64 } else { 0xFFFF_FFFF };
+            let imm: u64 = !bm & width_mask;          // what BIC receives
+            let mk = |is_64: bool, n: u32| if is_64 { xreg(n) } else { wreg(n) };
+            let ops = vec![mk(is_64, rd), mk(is_64, rn), Operand::Imm(imm as i64)];
+            let w = word(encode_bic(&ops));
+
+            let (n, immr, imms) = encode_bitmask_imm(bm, is_64).expect("valid bitmask");
+            prop_assert_eq!(sf_of(w), if is_64 { 1 } else { 0 });
+            prop_assert_eq!(opc_of(w), 0b00);
+            prop_assert_eq!(opcode6_of(w), 0b100100);
+            prop_assert_eq!(n_imm_of(w), n);
+            prop_assert_eq!(immr_of(w), immr);
+            prop_assert_eq!(imms_of(w), imms);
+            prop_assert_eq!(rn_of(w), rn);
+            prop_assert_eq!(rd_of(w), rd);
+        }
+
+        // 5. Negative contract: the shifted-register imm6 field is only 6 bits,
+        //    so shift amounts > 63 are unrepresentable and must be rejected.
+        //    (Currently FAILS: the encoder masks with `& 0x3F`, silently
+        //    truncating out-of-range amounts instead of returning Err.)
+        #[test]
+        fn bic_rejects_oversized_shift(
+            rd in 0u32..=30,
+            rn in 0u32..=30,
+            rm in 0u32..=30,
+            amount in 64u32..=4095,
+            sk in 0u32..=3u32,
+        ) {
+            let kind = match sk { 0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror" };
+            let ops = vec![xreg(rd), xreg(rn), xreg(rm), shift(kind, amount)];
+            prop_assert!(encode_bic(&ops).is_err());
+        }
+    }
+}
