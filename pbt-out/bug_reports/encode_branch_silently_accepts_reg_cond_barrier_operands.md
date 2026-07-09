@@ -1,80 +1,62 @@
-# BUG: `encode_branch` silently accepts `Reg`/`Cond`/`Barrier` operands as branch targets
+# Bug Report: `encode_branch` silently accepts `Reg`/`Cond`/`Barrier` operands as branch targets
 
-**Function:** `src/backend/arm/assembler/encoder/compare_branch.rs` → `encode_branch`
-**Severity:** Medium (silent acceptance of invalid branch forms → spurious / mis-targeted relocation)
+**Target:** `src/backend/arm/assembler/encoder/compare_branch.rs` → `encode_branch`
+**Severity:** Medium
 
 ## Summary
 
-`encode_branch` (the `B <target>` unconditional-branch encoder) resolves its single target via
-the shared helper `get_symbol(operands, 0)`. That helper accepts not only `Symbol`/`Label`/
-`SymbolOffset`/`Modifier{}`/`ModifierOffset{}` but also `Operand::Reg`, `Operand::Cond`, and
-`Operand::Barrier`, forwarding the register/condition/barrier token verbatim as the relocation
-**symbol**. As a result the following *invalid* AArch64 inputs are silently accepted as
-`Jump26` relocations against spurious symbol names instead of being rejected:
+`encode_branch` (the `B <target>` unconditional-branch encoder) resolves its single target via the shared helper `get_symbol(operands, 0)`. That helper accepts not only `Symbol`/`Label`/`SymbolOffset`/`Modifier{}`/`ModifierOffset{}` but also `Operand::Reg`, `Operand::Cond`, and `Operand::Barrier`, forwarding the register/condition/barrier token verbatim as the relocation **symbol**. As a result, invalid AArch64 inputs are silently accepted as `Jump26` relocations.
 
+Example invalid inputs that are silently accepted:
 ```
-b x0  -> Ok(WordWithReloc { word: 0x1400_0000, reloc: Jump26 { symbol: "x0",  addend: 0 } })
+b x0  -> Ok(WordWithReloc { word: 0x1400_0000, reloc: Jump26 { symbol: "x0", addend: 0 } })
 b wzr -> Ok(WordWithReloc { word: 0x1400_0000, reloc: Jump26 { symbol: "wzr", addend: 0 } })
-b eq  -> Ok(WordWithReloc { word: 0x1400_0000, reloc: Jump26 { symbol: "eq",  addend: 0 } })
-b sy  -> Ok(WordWithReloc { word: 0x1400_0000, reloc: Jump26 { symbol: "sy",  addend: 0 } })
+b eq  -> Ok(WordWithReloc { word: 0x1400_0000, reloc: Jump26 { symbol: "eq", addend: 0 } })
 ```
 
-(`b` with no target is correctly rejected — see `prop_empty_operands_rejected`; the defect is
-specifically the silent acceptance of the `Reg`/`Cond`/`Barrier` operand forms.)
+## Root Cause
 
-## Why this is a defect
+Shared helper `get_symbol` (`encoder/mod.rs`) accepts `Operand::Reg`/`Operand::Cond`/`Operand::Barrier` and forwards their inner string as the relocation symbol. `encode_branch` calls it unconditionally, so all three operand kinds are silently treated as branch targets.
 
-The AArch64 `B` instruction takes **only** a branch label/offset as its operand (ARM ARM C5.6.5).
-Branching *to a register* is a different instruction, `BR <Xn>`, handled by `encode_br`. So
-`b x0`, `b wzr`, `b eq`, `b sy` are not valid `B` operands. Accepting them has two concrete harms:
+## Reproduction
 
-1. **Misleading link-time failure.** The relocation is emitted against a symbol named `"x0"`,
-   `"eq"`, etc. — symbols that almost never exist as labels — so the user gets an
-   unresolved-symbol error pointing at a register/condition name, rather than an
-   assembler-level "this is not a valid branch target" message that would point them at `br`.
-2. **Silent mis-targeting if a same-named symbol exists.** If a label `x0:` (or `eq:`, `sy:`)
-   *does* exist in the translation unit, `b x0` silently becomes a branch to that label rather
-   than an error that the intended operand was a register. The encoding is then "valid" but the
-   programmer's intent (register branch) is lost with no diagnostic.
+**Input:** `b x0`
 
-The `get_symbol` comment claims these branches are a parser-misclassification workaround for
-symbol names colliding with register/condition/barrier names. That justification does not hold
-for `encode_branch`: a `B` target is *always* a label, so a `Reg`/`Cond`/`Barrier` operand here
-can only have come from (a) a typo for `br`/`b.<cond>`/`dsb`, or (b) using a reserved name as a
-label — both of which an assembler should diagnose, not silently encode as a relocation.
+**Expected:** `Err` — operand must be a branch target (symbol/label), not a register
 
-## Repro
+**Actual:** `Ok(WordWithReloc { word: 0x1400_0000, reloc: Jump26 { symbol: "x0", addend: 0 } })`
 
-```bash
-cargo test --lib backend::arm::assembler::encoder::compare_branch::prop_encode_branch_tests::prop_symbol_forwarding_all_accepted_kinds -- --nocapture
+**Minimal failing input:** `encode_branch(&[Operand::Reg("x0".into())])`
+
+## Impact
+
+Two concrete harms:
+1. **Misleading link-time failure**: relocation emitted against symbol `"x0"`/`"eq"` etc. that rarely exist as labels, giving an unresolved-symbol error at a register/condition name rather than an assembler-level diagnostic pointing to `br`
+2. **Silent mis-targeting if same-named symbol exists**: if a label `x0:` exists, `b x0` silently branches there instead of diagnosing the register operand
+
+## Suggested Fix
+
+Reject operand kinds that are not genuine branch targets before constructing the relocation:
+
+```rust
+fn get_symbol_strict(operands: &[Operand]) -> Result<SymbolWithOffset, String> {
+    match operands.get(0) {
+        Some(Operand::Label(_) | Operand::Symbol(_) | Operand::SymbolOffset(_) |
+                Operand::Modifier { .. } | Operand::ModifierOffset { .. }) => Ok(...),
+        Some(Operand::Reg(_) | Operand::Cond(_) | Operand::Barrier(_) | Operand::Imm(_) | Operand::Mem { .. }) => {
+            Err("branch target must be a symbol or label, not a register/condition/barrier".into())
+        }
+        _ => Err("branch target expected".into()),
+    }
+}
 ```
-That property passes *because* of the defect — it asserts `b x0`/`b eq`/`b sy` each yield a
-`Jump26` relocation carrying the register/condition/barrier name as the symbol. The evidence
-lines above were captured from a temporary probe calling `encode_branch` directly.
 
-## Suggested fix
-
-In `encode_branch` (and the other direct branch encoders `encode_bl`, `encode_cond_branch`,
-`encode_cbz`, `encode_tbz`), reject operand kinds that are not genuine branch targets before
-constructing the relocation — e.g. a `get_symbol_strict` that accepts only `Symbol`/`Label`/
-`SymbolOffset`/`Modifier{}`/`ModifierOffset{}` and returns `Err` for `Reg`/`Cond`/`Barrier`/
-`Imm`/`Mem*`/etc. The label-collision workaround, if still needed, should be scoped to the
-parser (so a label `x0:` is classified as `Symbol`, not `Reg`) rather than papered over at
-encode time for every branch instruction.
-
-## Root cause
-
-Shared helper `get_symbol` (`encoder/mod.rs`) accepts `Operand::Reg`/`Operand::Cond`/
-`Operand::Barrier` and forwards their inner string as the relocation symbol. `encode_branch`
-calls it unconditionally, so all three operand kinds are silently treated as branch targets.
-The same root cause affects `encode_bl`, `encode_cond_branch`, `encode_cbz`, `encode_tbz`, but
-this report is scoped to `encode_branch` per per-function filing.
-
-## Regression property
+## Regression Property
 
 Failing property: `prop_symbol_forwarding_all_accepted_kinds`
 
 ```rust
 prop_assert!(!matches!(encode_branch(&[Operand::Reg("x0".into())]), Ok(EncodeResult::Jump26(_))));
 ```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/19
