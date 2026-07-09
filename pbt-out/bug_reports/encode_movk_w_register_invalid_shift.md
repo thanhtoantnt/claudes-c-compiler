@@ -1,38 +1,50 @@
-# Bug Report: `encode_movk` accepts invalid 32-bit W-register shifts
+# Bug Report: `encode_movk` accepts invalid shift amounts for W registers
 
-**Location:** `src/backend/arm/assembler/encoder/data_processing.rs`, function `encode_movk`
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_movk`
+**Severity:** High
 
 ## Summary
 
-For 32-bit `W` destination registers, MOVK only permits `lsl #0` and `lsl #16`. `encode_movk` ignores register width when computing `hw`, so it accepts `lsl #32` and `lsl #48`, emitting invalid 32-bit MOVK encodings instead of returning `Err`.
+For 32-bit `MOVK` instructions, ARMv8-A specifies shift amount of **only `#0` or `#16`**. `encode_movk` masks with `& 0x3` without validation, accepting invalid shifts like `#32`, `#48`, `#64` and encoding them as if they were `#0`.
+
+## Root Cause
+
+```rust
+let shift = shift_val & 0x3;  // no range check
+```
 
 ## Reproduction
 
-Failing property: `movk_w_reg_rejects_32_or_48_shift`
+**Input:** `movk w0, #0xFFFF, #32`
 
-Minimal input:
+**Expected:** `Err` — MOVK shift for W-register must be #0 or #16
 
-```text
-rd = 0, bad_amount = 32
-```
+**Actual:** `Ok(Word(...))` — shift encoded as #0 (32 & 0x3 = 0)
 
-`movk w0, #1, lsl #32` computes `hw = 2` and returns `Ok(Word(_))`, even though `hw=2` is only valid for 64-bit `X` destinations.
+**Minimal failing input:** rd="w0", shift=32 (or 48, 64)
 
 ## Impact
 
-The assembler emits architecturally invalid/undefined encodings for source that should be rejected.
+Invalid shift values silently coerced to valid shifts. User expects operation at specific bit position but gets different encoding.
 
-## Suggested fix
+## Suggested Fix
 
-Gate `hw = 2` and `hw = 3` on `is_64`:
+Validate shift for W-register forms:
 
 ```rust
-match (*amount, is_64) {
-    (0, _) => 0,
-    (16, _) => 1,
-    (32, true) => 2,
-    (48, true) => 3,
-    _ => return Err(format!("movk lsl shift {} invalid for {}-bit register", amount, if is_64 { 64 } else { 32 })),
+let (rd, is_64) = get_reg(operands, 0)?;
+if !is_64 && (shift_val & 0x3 != 0 && shift_val & 0x3 != 2) {
+    return Err("MOVK shift for W-register must be #0 or #16".into());
 }
 ```
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/61
+
+## Regression Property
+
+Failing property: `movk_w_register_rejects_invalid_shift`
+
+```rust
+prop_assert!(encode_movk(&[wreg(0), imm(0xFFFF), shift(32)]).is_err());  // invalid
+prop_assert!(encode_movk(&[wreg(0), imm(0xFFFF), shift(48)]).is_err());  // invalid
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/60

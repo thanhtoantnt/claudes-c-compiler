@@ -1,34 +1,49 @@
 # Bug Report: `encode_movk` silently truncates out-of-range immediate magnitude
 
-**Location:** `src/backend/arm/assembler/encoder/data_processing.rs`, function `encode_movk`
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_movk`
+**Severity:** High
 
 ## Summary
 
-`encode_movk` masks the immediate with `& 0xFFFF` without validating that the source immediate fits in the 16-bit MOVK field. Out-of-range immediates are accepted and silently encoded as a different value.
+`encode_movk` masks immediate with `& 0xFFFF` without validation. Out-of-range immediates accepted and silently encoded as different value.
+
+## Root Cause
+
+```rust
+let imm16 = (imm as u32) & 0xFFFF;  // no range check
+```
 
 ## Reproduction
 
-Failing property: `movk_rejects_out_of_range_immediate`
+**Input:** `movk x0, #65536` (0x10000)
 
-Minimal input:
+**Expected:** `Err` — movk immediate out of range: 65536
 
-```text
-rd = 0, imm = 65536
-```
+**Actual:** `Ok(Word(...))` — imm16 = 0x10000 & 0xFFFF = 0x0000, identical to `movk x0, #0x0`
 
-`movk x0, #0x10000` encodes `imm16 = 0x10000 & 0xFFFF = 0x0000`, producing the same immediate field as `movk x0, #0x0` instead of returning `Err`.
+**Minimal failing input:** rd = 0, imm = 65536
 
 ## Impact
 
-Silent miscompilation: constants assembled through MOVK can lose upper immediate bits with no diagnostic.
+Silent miscompilation: constants assembled through MOVK can lose upper bits with no diagnostic. User expects specific immediate but gets zero.
 
-## Suggested fix
+## Suggested Fix
 
-Validate `imm` before encoding:
+Validate immediate before encoding:
 
 ```rust
-if !(0..=0xFFFF).contains(&imm) {
+if imm < 0 || imm > 0xFFFF {
     return Err(format!("movk immediate out of range: {}", imm));
 }
 ```
+
+## Regression Property
+
+Failing property: `movk_rejects_out_of_range_immediate`
+
+```rust
+prop_assert!(encode_movk(&[xreg(0), imm(65536)]).is_err());    // overflow
+prop_assert!(encode_movk(&[xreg(0), imm(-1)]).is_err());       // negative
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/59
