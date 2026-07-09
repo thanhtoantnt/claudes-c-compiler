@@ -1,57 +1,54 @@
-# Bug — `encode_add_sub` extended-register shift silently truncated (`& 0x7`)
+# Bug Report: `encode_add_sub` extended-register shift silently truncated (`& 0x7`)
 
-**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` →
-`encode_add_sub`, the `Operand::Extend { .. }` branch (covers UXTX and all
-extends).
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_add_sub` (extend branch)
+**Severity:** Medium
 
 ## Summary
 
-The optional additional shift for the ADD/SUB extended-register form
-(`imm3`, bits 12:10) is masked with `& 0x7` instead of being range-checked.
-The ARMv8 ARM restricts this shift to **0..=4**; values 5–7 are
-UNDEFINED, yet the encoder silently accepts them (and any amount ≥8 whose
-masked value lands in 0–7).
+The optional shift for ADD/SUB extended-register form (`imm3`, bits 12:10) is masked with `& 0x7` instead of range-checking. ARMv8 ARM restricts shift to **0..=4**; values 5–7 are UNDEFINED, yet encoder silently accepts them.
 
-## Relevant code
+## Root Cause
 
 ```rust
 if let Some(Operand::Extend { kind, amount }) = operands.get(3) {
     let option = match kind.as_str() { /* ... */ };
     let imm3 = *amount & 0x7;                       // <-- silently truncates
-    let word = ((sf << 31) | (op << 30) | (s_bit << 29) | (0b01011 << 24))
-             | (1 << 21) | (rm << 16) | (option << 13) | (imm3 << 10)
-             | (rn << 5) | rd;
+    let word = ... | (imm3 << 10) | ...;
     return Ok(EncodeResult::Word(word));
 }
 ```
 
-## Differential check (clang `--target=aarch64`)
+## Reproduction
 
+**Input:** `add x0, x1, x2, uxtx #5`
+
+**Expected:** `Err` — shift amount must be in range [0, 4]
+
+**Actual:** `Ok(Word(...))` — silently truncates to `imm3 = 1`
+
+**Minimal failing input:** amount = 5
+
+## Impact
+
+Silent acceptance of undefined shift values. Values 5–7 (and any amount ≥8 whose masked value lands in 0–7) accepted without diagnostic.
+
+## Suggested Fix
+
+Validate range before encoding:
+
+```rust
+if *amount > 4 {
+    return Err(format!("add/sub extended shift amount {} must be in range [0, 4]", amount));
+}
+let imm3 = *amount;
 ```
-$ echo 'add x0, x1, x2, uxtx #5' | clang --target=aarch64-linux-gnu -c -o /dev/null -
-error: expected 'sxtx' 'uxtx' or 'lsl' with optional integer in range [0, 4]
+
+## Regression Property
+
+Failing property: `add_uxtx_shift_above_4_must_be_rejected`
+
+```rust
+prop_assert!(encode_add_sub_extended(&[xreg(0), xreg(1), xreg(2)], "uxtx", 5).is_err());
 ```
 
-## Property test (EXPECTED FAIL)
-
-`add_uxtx_shift_above_4_must_be_rejected` — for `amount in 5u32..=7u32`,
-`encode_add_sub(...).is_err()`. Minimal failing input: `amount = 5`.
-
-## Fix
-
-Validate `amount ∈ 0..=4` and return `Err` otherwise, instead of
-`let imm3 = *amount & 0x7;`.
-
-## Positive coverage that still passes (core UXTX encoding is correct)
-
-- `add_uxtx_reference_encoding` — full word == `0x8B206000 | rm<<16 | rn<<5 | rd`
-  (clang: `add x0,x1,x2,uxtx` → `0x8b226020`).
-- `add_uxtx_shift_round_trips` — imm3 round-trips for valid 0..=4.
-- `add_uxtx_op_and_flags_propagate` — op/S bits track inputs, UXTX option preserved.
-
-## Reproduce
-
-```
-cargo test --lib data_processing::tests::add_uxtx_shift_above_4_must_be_rejected
-```
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/124
