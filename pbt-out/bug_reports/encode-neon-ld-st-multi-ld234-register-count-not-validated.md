@@ -56,3 +56,5 @@ currently a `TODO` in the sibling `encode_neon_ld_st_single`.
 `cargo test --lib neon_ld_st_multi -- --ignored` → this witness fails with the
 shrunk input above. Absolute correctness is pinned by an 18-case golden table
 captured from `llvm-mc-18`.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/257

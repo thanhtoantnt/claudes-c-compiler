@@ -64,4 +64,5 @@ Failing property: `adc_rejects_sp_wsp_in_any_position`
 prop_assert!(encode_adc(&[Operand::Reg("x0".into()), Operand::Reg("sp".into()), Operand::Reg("x1".into())], false).is_err());
 ```
 
-**GitHub Issue:** (none)
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/262

@@ -43,3 +43,5 @@ if rmode > 0b11 {
     return Err(format!("rmode {} out of range (0..=3)", rmode));
 }
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/270

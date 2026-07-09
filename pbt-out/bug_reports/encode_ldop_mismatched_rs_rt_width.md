@@ -67,3 +67,5 @@ prop_assert!(encode_ldop("ldadd", &[wreg(0), xreg(0), mem(0, 0)]).is_err());
 | `prop_mismatched_width_size_follows_rs` | PASS (documents the mechanism) |
 | `prop_mismatched_width_rejected` | ignored → **FAIL** under `--ignored` |
 | `golden_encodings_match_reference` | PASS |
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/274

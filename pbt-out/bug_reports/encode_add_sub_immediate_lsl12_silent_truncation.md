@@ -102,3 +102,5 @@ This is the same root-cause site surfaced through different entry points:
 
 This report is filed for the **affected function itself** (`encode_add_sub`), per
 one-report-per-affected-function.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/263

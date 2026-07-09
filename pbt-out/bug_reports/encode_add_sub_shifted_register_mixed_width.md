@@ -113,3 +113,5 @@ cargo test --lib data_processing_addsub_div_bitmask_pbt::addsub_shifted_reg_reje
 
 This report is filed for the **affected function itself** (`encode_add_sub`), per
 one-report-per-affected-function.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/264

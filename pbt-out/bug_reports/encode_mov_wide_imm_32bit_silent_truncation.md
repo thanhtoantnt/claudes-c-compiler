@@ -58,3 +58,5 @@ if !is_64 && imm > 0xFFFF_FFFF {
     return Err(format!("32-bit mov immediate 0x{:x} exceeds 32 bits", imm));
 }
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/280

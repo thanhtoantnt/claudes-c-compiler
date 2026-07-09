@@ -86,3 +86,5 @@ against `llvm-mc-18`. (Notably, MLS shares opcode `10010` with MLA and differs
 only in the U-bit; MUL is the sibling with opcode `10011`.) The
 mismatched-arrangement acceptance above is the genuine defect; the
 opcode/u-bit/register placement are not.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/260

@@ -131,4 +131,5 @@ guards. (A softer, separate finding — the lane operand's `elem_size` is never
 validated against the arrangement — is recorded by the `elem_size_mismatch_accepted`
 witness in the same file.)
 
-**GitHub Issue:** <none>
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/256

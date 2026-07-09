@@ -21,3 +21,5 @@ instead of exact equality.
 containing no DC substring) are correctly rejected.
 **Oracle verification:** clang-14 rejects `dc xcvacx, x0`
 (*"invalid operand for DC instruction"*).
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/267

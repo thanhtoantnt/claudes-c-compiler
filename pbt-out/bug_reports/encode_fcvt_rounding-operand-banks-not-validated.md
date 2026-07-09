@@ -63,3 +63,5 @@ if !is_fp_reg(&match &operands[1] { Operand::Reg(n) => n.clone(), _ => String::n
     return Err("fcvt*: source must be an FP register (S/D)".to_string());
 }
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/269

@@ -13,3 +13,5 @@ No cross-validation between GP register width and FP register precision in the G
 
 ## Severity
 MEDIUM — silent misencoding; produces UNALLOCATED or wrong instruction.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/271

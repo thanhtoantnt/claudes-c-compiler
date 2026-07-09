@@ -65,3 +65,5 @@ prop_assert!(encode_ldop("ldadd", &[xreg(0), xreg(1), mem(2, -1)]).is_err());
 | `prop_offset_is_silently_dropped` | PASS (documents the mechanism) |
 | `prop_nonzero_offset_rejected` | ignored → **FAIL** under `--ignored` |
 | `golden_encodings_match_reference` | PASS |
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/273

@@ -206,6 +206,10 @@ mod data_processing_adc_sbc_neg_negs_pbt;
 mod data_processing_mul_madd_msub_umaddl_umull_pbt;
 #[cfg(test)]
 mod fp_scalar_bank_precision_pbt;
+#[cfg(test)]
+mod data_processing_smull_smaddl_smulh_mneg_fpsimd_sp_pbt;
+#[cfg(test)]
+mod div_tst_cbz_regclass_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;

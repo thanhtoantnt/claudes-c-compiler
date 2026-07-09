@@ -74,3 +74,5 @@ fn prop_adrp_rejects_32bit_register(n in 0u32..=30u32, sym in arb_sym()) {
 ```
 
 Minimal failing input today: `n = 0, sym = "A"`.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/265

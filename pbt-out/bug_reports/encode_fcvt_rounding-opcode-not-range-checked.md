@@ -43,3 +43,5 @@ if opcode > 0b111 {
     return Err(format!("opcode {} out of range (0..=7)", opcode));
 }
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/268

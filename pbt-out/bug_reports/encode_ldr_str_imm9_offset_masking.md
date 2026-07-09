@@ -86,3 +86,5 @@ cargo test --lib load_store_ldr_str -- --ignored         # 3 failed  (witnesses 
 ```
 The three ignored witnesses all fail on the minimal input above, confirming
 the defect is real and reproducible.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/275

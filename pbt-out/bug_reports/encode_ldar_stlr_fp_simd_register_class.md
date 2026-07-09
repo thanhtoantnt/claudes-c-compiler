@@ -107,4 +107,5 @@ The companion mechanism property
 also `#[ignore]`. Once the guard is added, both flip to passing and can be
 un-ignored.
 
-**GitHub Issue:** (to be filed)
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/272

@@ -121,3 +121,5 @@ those concern `encode_movz/movk/movn` *directly*; this one concerns the
 (`movz x0, #-1` → `imm16=0xffff`) is already covered by
 `encode_movz_immediate_truncation.md` (whose regression property includes
 `imm(-1)`) and is intentionally not re-reported here.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/279

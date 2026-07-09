@@ -118,5 +118,6 @@ let ops = vec![xreg(0), xreg(1), xreg(2),
 prop_assert!(encode_logical(&ops, 0).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/54
 (also https://github.com/thanhtoantnt/claudes-c-compiler/issues/55)
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/277

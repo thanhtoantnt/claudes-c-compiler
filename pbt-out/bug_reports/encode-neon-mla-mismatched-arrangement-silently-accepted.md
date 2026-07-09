@@ -83,3 +83,5 @@ For reference, the register-field placement, opcode (`10010`), and `U`-bit
 (`0`) were verified **correct** for valid inputs via a differential oracle
 against `llvm-mc-18`. The mismatched-arrangement acceptance above is the
 genuine defect; the opcode/u-bit/register placement are not.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/259

@@ -133,4 +133,5 @@ The companion mechanism property `prop_ldxr_fp_simd_aliases_w` documents the
 aliasing smoking gun and is also `#[ignore]`. Once the guards are added, all
 three flip to passing and can be un-ignored.
 
-**GitHub Issue:** (to be filed)
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/276
