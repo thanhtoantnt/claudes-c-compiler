@@ -150,6 +150,10 @@ mod load_store_prfm_prop_tests;
 mod prop_adrp_cbz_tbz;
 #[cfg(test)]
 mod system_msr_mrs_pbt;
+#[cfg(test)]
+mod system_barriers_hints_pbt;
+#[cfg(test)]
+mod data_processing_mneg_smaddl_smulh_umulh_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
