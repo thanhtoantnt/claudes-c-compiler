@@ -93,5 +93,13 @@ Added `mod umulh_props` with 5 property-based tests in
 | P2 | `umulh_field_placement` — `sf=1`, Rm/Rn/Rd field placement | PASS |
 | P3 | `umulh_rejects_too_few_operands` — negative contract | PASS |
 | P4 | `umulh_rejects_non_register_operands` — negative contract | PASS |
-| P5 | `umulh_rejects_wrong_width_operands` — spec: `W` → `Err` | **FAIL (this bug)** |
+
+## Regression Property
+
+Failing property: `umulh_rejects_wrong_width_operands` (P5)
+
+```rust
+prop_assert!(encode_umulh(&[wreg(0), wreg(1), wreg(2)]).is_err());  // W operands
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/107

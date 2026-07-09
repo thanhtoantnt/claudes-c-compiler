@@ -98,4 +98,14 @@ fn require_x_reg(operands: &[Operand], idx: usize) -> Result<u32, String> {
 After the fix, `umulh_rejects_fp_simd_register_in_any_position` should pass; the
 pinning property `umulh_sp_operand_silently_becomes_xzr` should be revisited
 together with the broader SP-as-XZR handling.
+## Regression Property
+
+Failing property: `umulh_rejects_fp_simd_register_in_any_position`
+
+```rust
+prop_assert!(encode_umulh(&[dreg(0), xreg(1), xreg(2)]).is_err());  // FP dest
+prop_assert!(encode_umulh(&[xreg(0), sreg(1), xreg(2)]).is_err());  // FP source
+prop_assert!(encode_umulh(&[xreg(0), xreg(1), vreg_arr(2, "8b")]).is_err());  // NEON
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/108
