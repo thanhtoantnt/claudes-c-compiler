@@ -48,6 +48,10 @@ mod neon_mvni_pbt;
 mod neon_two_misc_pbt;
 #[cfg(test)]
 mod neon_zip_uzp_pbt;
+#[cfg(test)]
+mod neon_eor3_pbt;
+#[cfg(test)]
+mod neon_scalar_three_same_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
