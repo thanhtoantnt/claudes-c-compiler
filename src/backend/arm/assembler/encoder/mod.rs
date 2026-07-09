@@ -52,6 +52,8 @@ mod neon_zip_uzp_pbt;
 mod neon_eor3_pbt;
 #[cfg(test)]
 mod neon_scalar_three_same_pbt;
+#[cfg(test)]
+mod neon_three_diff_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
