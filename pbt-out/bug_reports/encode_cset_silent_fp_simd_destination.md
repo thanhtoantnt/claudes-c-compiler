@@ -1,41 +1,55 @@
 # Bug Report: `encode_cset` silently accepts FP/SIMD destination registers
 
-**Location:** `src/backend/arm/assembler/encoder/compare_branch.rs`, function `encode_cset`
+**Target:** `src/backend/arm/assembler/encoder/compare_branch.rs` → `encode_cset`
+**Severity:** Medium
 
 ## Summary
 
-`encode_cset` uses the shared generic register parser, which accepts FP/SIMD register names (`d`, `s`, `q`, `v`, `h`, `b`) and returns only their numeric index. CSET is a GP-register instruction, so FP/SIMD destination operands must be rejected. Instead, the encoder silently reinterprets the numeric index as a GP register.
+`encode_cset` uses shared generic register parser accepting FP/SIMD names (`d`, `s`, `q`, `v`, `h`, `b`) and returning only numeric index. CSET is GP-register instruction; FP/SIMD destinations must be rejected.
+
+## Root Cause
+
+Shared `get_reg` accepts any register prefix, no bank validation. Destination numeric index reinterpreted as GP register.
 
 ## Reproduction
 
-Failing property: `prop_rejects_fp_simd_registers`
+**Input:** `cset d0, eq`
 
-Minimal input from the run:
+**Expected:** `Err` — expected integer register, got d0
 
-```text
-cset d0, eq
-```
+**Actual:** `Ok(Word(...))` — FP register silently reinterpreted as GP
 
-Actual behavior: returns `Ok(Word(_))` instead of `Err`.
-
-`llvm-mc-18` rejects the same input with an invalid-operand diagnostic.
+**Minimal failing input:** dest = "d0" (or any `s`/`q`/`v`/`h`/`b`)
 
 ## Impact
 
-Invalid FP/SIMD-register source is accepted and assembled into a GP-register instruction with the same numeric register index, emitting an instruction the programmer did not write.
+Invalid FP/SIMD source accepted, assembled into GP-register instruction with same numeric index. Programmer's instruction silently corrupted.
 
-## Suggested fix
+## Suggested Fix
 
-Use a GP-only register parser for CSET and the conditional-select alias family:
+Use GP-only register parser for conditional-select alias family:
 
 ```rust
 fn get_gp_reg(operands: &[Operand], idx: usize) -> Result<(u32, bool), String> {
-    let (reg, is_64) = get_reg(operands, idx)?;
-    let name = get_reg_name(operands, idx)?;
-    if is_fp_reg(&name) {
+    let name = match &operands[idx] {
+        Operand::Reg(r) => r.to_lowercase(),
+        _ => return Err("expected register".to_string()),
+    };
+    if !matches!(name.chars().next(), Some('w') | Some('x')) {
         return Err(format!("expected integer register, got {}", name));
     }
-    Ok((reg, is_64))
+    get_reg(operands, idx)
 }
 ```
+
+## Regression Property
+
+Failing property: `prop_rejects_fp_simd_registers`
+
+```rust
+prop_assert!(encode_cset(&[dreg(0), cond("eq")]).is_err());  // FP dest
+prop_assert!(encode_cset(&[sreg(0), cond("eq")]).is_err());
+prop_assert!(encode_cset(&[vreg_arr(0, "8b"), cond("eq")]).is_err());
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/30
