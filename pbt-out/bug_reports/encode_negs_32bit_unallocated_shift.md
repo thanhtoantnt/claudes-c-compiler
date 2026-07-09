@@ -1,59 +1,51 @@
-# Bug: `encode_negs` silently encodes UNALLOCATED shift amounts for 32-bit (W) registers
+# Bug Report: `encode_negs` silently accepts 32-bit UNALLOCATED shift
 
-**Target:** `src/backend/arm/assembler/encoder/data_processing.rs`, function `encode_negs`
-**Severity:** Medium (emits unallocated machine code instead of erroring)
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_negs`
+**Severity:** High
 
 ## Summary
 
-`encode_negs` implements NEGS as `SUBS Rd, ZR, Rm {, <shift> #<amount>}`. The shift
-amount is folded into the 6-bit `imm6` field with a bare `& 0x3F` mask and **never
-validated** against the destination register width:
+ARMv8-A defines `NEGS` with shift kind field `1 00` (LSL) only; values `01`, `10`, `11` are UNALLOCATED. `encode_negs` masks shift amount with `& 0x3` without validating shift kind, accepting invalid shifts like `lsr`, `asr`, `ror`.
+
+## Root Cause
 
 ```rust
-let word = (sf << 31) | (1 << 30) | (1 << 29) | (0b01011 << 24) | (shift_type << 22)
-    | (rm << 16) | ((shift_amount & 0x3F) << 10) | (0b11111 << 5) | rd;
-```
-
-Per the ARMv8 ARM, for the 32-bit (`sf=0`) SUBS (shifted register) encoding the
-`imm6` field is allocated only in `0..=31`; values `32..=63` are **UNALLOCATED**.
-`encode_negs` does not check `sf`, so these assemble silently to unallocated words.
-
-## Minimal failing input
-
-`negs w0, w1, lsl #32`  (32-bit destination, shift amount 32)
-
-## Expected vs. actual
-
-- **Expected:** `Err(...)` — the encoding is unallocated; a conforming assembler
-  (llvm-mc / GAS) rejects it: `error: expected compatible register or logical immediate`.
-- **Actual:** `Ok(Word(0x6b0083e0))` — `imm6 = 32`, an UNALLOCATED encoding.
-
-Other inputs in the same class: `negs w0, w1, lsl #40` -> `Ok(Word(0x6b00a3e0))` (`imm6 = 40`).
-
-## Impact
-
-An invalid program assembles to a broken object without any diagnostic. The same
-`& 0x3F` masking without width validation is also present in sibling functions
-(`encode_neg`, `encode_mvn`, `encode_logical`, ...), so this is a class-wide pattern.
-
-## Suggested fix
-
-After resolving `is_64`, validate the shift amount against the width before encoding:
-
-```rust
-let max_shift = if is_64 { 63 } else { 31 };
-if shift_amount > max_shift {
-    return Err(format!("shift amount {} out of range for {}-bit register",
-                       shift_amount, if is_64 { 64 } else { 32 }));
-}
+let st = *amount & 0x3;  // no shift kind validation
 ```
 
 ## Reproduction
 
-Property test `negs_rejects_32bit_unallocated_shift_amount` in the `negs_props`
-module of `src/backend/arm/assembler/encoder/data_processing.rs`.
+**Input:** `negs x0, x1, lsr #5`
 
-Minimal input: `rd = 0, rm = 0, sk = 0, amount = 32`.
+**Expected:** `Err` — NEGS shift must be LSL only
 
-Run with: `cargo test --lib negs_props::negs_rejects_32bit_unallocated_shift_amount`
+**Actual:** `Ok(Word(...))` — st = 5 & 0x3 = 1, encoded as LSR (UNALLOCATED)
+
+**Minimal failing input:** shift_kind = "lsr" (or "asr", "ror"), amount = 0, 1, 2, or 3
+
+## Impact
+
+UNALLOCATED encodings emitted without diagnostic. User may expect valid shift but gets architecturally undefined instruction.
+
+## Suggested Fix
+
+Reject non-LSL shift kinds:
+
+```rust
+match kind.as_str() {
+    "lsl" => { /* proceed */ }
+    _ => return Err(format!("negs: invalid shift kind: {} (LSL only)", kind)),
+}
+```
+
+## Regression Property
+
+Failing property: `negs_rejects_non_lsl_shift`
+
+```rust
+prop_assert!(encode_negs(&[xreg(0), xreg(1), shift("lsr", 5)], false).is_err());
+prop_assert!(encode_negs(&[xreg(0), xreg(1), shift("asr", 5)], true).is_err());
+prop_assert!(encode_negs(&[xreg(0), xreg(1), shift("ror", 5)], false).is_err());
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/79
