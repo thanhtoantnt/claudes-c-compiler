@@ -40,7 +40,7 @@ if (exponent < 0x3881) {
 }
 ```
 
-**Regression Property**
+## Regression Property
 
 Failing property: `f64_to_f128_subnormal_roundtrip`
 

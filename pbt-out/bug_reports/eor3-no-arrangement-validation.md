@@ -78,9 +78,13 @@ for (i, op) in operands.iter().enumerate().take(4) {
 }
 ```
 
-## Verification
+## Regression Property
 
-After the fix, `rejects_non_canonical_arrangements` must pass while the other
-five properties (golden table, reference-encoder differential, register-field
-round-trip, fixed-bits invariant, operand-count error contract) continue to
-pass.
+Failing property: `rejects_non_canonical_arrangements`
+
+```rust
+prop_assert!(encode_neon_eor3(&[neon_reg(0, "8b"), neon_reg(1, "8b"), neon_reg(2, "8b"), neon_reg(3, "8b")]).is_err());
+prop_assert!(encode_neon_eor3(&[neon_reg(0, "4s"), neon_reg(1, "4s"), neon_reg(2, "4s"), neon_reg(3, "4s")]).is_err());
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/189
