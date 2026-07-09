@@ -98,6 +98,10 @@ mod neon_xtl_pbt;
 mod neon_fcvtl_pbt;
 #[cfg(test)]
 mod neon_sri_pbt;
+#[cfg(test)]
+mod neon_sshr_pbt;
+#[cfg(test)]
+mod neon_ushr_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
