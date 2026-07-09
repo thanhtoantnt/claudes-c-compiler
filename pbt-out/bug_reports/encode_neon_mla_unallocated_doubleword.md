@@ -1,69 +1,49 @@
-# Bug Report: `encode_neon_mla` emits unallocated doubleword encoding
+# Bug Report: `encode_neon_mla` accepts UNALLOCATED doubleword arrangements
 
-**Location:** `src/backend/arm/assembler/encoder/neon.rs`, function `encode_neon_mla`
+**Target:** `src/backend/arm/assembler/encoder/neon.rs` → `encode_neon_mla`
+**Severity:** Medium
 
 ## Summary
 
-`encode_neon_mla` accepts the `.1d` arrangement (element size `size = 0b11`)
-and emits a 32-bit instruction word, but that encoding is **UNALLOCATED** for
-the `MLA` (vector) instruction. It should return `Err`.
+`encode_neon_mla` accepts doubleword arrangements (`.2d`) via `neon_arr_to_q_size` without validation. ARMv8-A NEON MLA has no `.2d` form — valid arrangements are `.8b`, `.16b`, `.4h`, `.8h`, `.2s`, `.4s`. UNALLOCATED encodings emitted without diagnostic.
 
-The ARMv8-A ARM (ARM DDI 0487, "Advanced SIMD three same") defines `MLA`
-(vector) only for the integer multiply element sizes
-(`T = 8B, 16B, 4H, 8H, 2S, 4S`); the `size == 0b11` row is UNALLOCATED, so `MLA`
-performs no doubleword multiply.
-
-## Root cause
+## Root Cause
 
 ```rust
-pub(crate) fn encode_neon_mla(operands: &[Operand]) -> Result<EncodeResult, String> {
-    let (rd, arr_d) = get_neon_reg(operands, 0)?;
-    let (rn, _) = get_neon_reg(operands, 1)?;
-    let (rm, _) = get_neon_reg(operands, 2)?;
-    let (q, size) = neon_arr_to_q_size(&arr_d)?;   // <-- accepts .1d (size=0b11)
-    // MLA: 0 Q 0 01110 size 1 Rm 10010 1 Rn Rd
-    let word = (q << 30) | (0b001110 << 24) | (size << 22) | (1 << 21)
-        | (rm << 16) | (0b100101 << 10) | (rn << 5) | rd;
-    Ok(EncodeResult::Word(word))
-}
+let (q, size) = neon_arr_to_q_size(&arr_d)?;  // maps "2d" → (1, 0b11) with no rejection
 ```
 
-`neon_arr_to_q_size` maps `1d`→`(0, 0b11)`, so `size = 0b11` flows straight into
-the word. There is no guard rejecting the unallocated element size.
+## Reproduction
 
-## Minimal input
+**Input:** `mla v0.2d, v1.2d, v2.2d`
 
-```
-mla v0.1d, v1.1d, v2.1d
-```
+**Expected:** `Err` — MLA arrangement not supported: 2d (valid: 8b, 16b, 4h, 8h, 2s, 4s)
 
-- **Expected:** `Err` (`.1d` ⇒ `size = 0b11` is UNALLOCATED for MLA)
-- **Actual:** `Ok(EncodeResult::Word(0x0EE29420))` — `size` field (bits 23-22) = `0b11`
-- **Reproduce:** `cargo test --lib -- --ignored neon_mla_pbt::mla_rejects_doubleword`
-  (fails: `expected Err but got Ok(0x0EE29420)`)
+**Actual:** `Ok(Word(...))` — accepted with size=0b11, UNALLOCATED encoding
+
+**Minimal failing input:** arr_d="2d", arr_n="2d", arr_m="2d"
 
 ## Impact
 
-A NEON `MLA` written with the `.1d` arrangement silently assembles into an
-UNALLOCATED instruction word. No conforming AArch64 core decodes it as
-multiply-accumulate — it raises an exception at runtime. The defect is silent:
-the assembler returns `Ok`, so it cannot be caught without an external reference
-assembler.
+Invalid `.2d` arrangements accepted, producing UNALLOCATED encodings. Reference assemblers reject this.
 
-## Suggested fix
+## Suggested Fix
 
-Reject `size == 0b11` before building the word:
+Reject doubleword arrangements:
 
 ```rust
-let (q, size) = neon_arr_to_q_size(&arr_d)?;
-if size == 0b11 {
-    return Err(format!("mla: unsupported arrangement {} (no doubleword multiply)", arr_d));
+let valid_arrangements = ["8b", "16b", "4h", "8h", "2s", "4s"];
+if !valid_arrangements.contains(&arr_d.as_str()) {
+    return Err(format!("MLA arrangement not supported: {} (valid: 8b, 16b, 4h, 8h, 2s, 4s)", arr_d));
 }
 ```
 
-## Validation
+## Regression Property
 
-Properties in `src/backend/arm/assembler/encoder/neon_mla_pbt.rs`
-(`cargo test --lib neon_mla_pbt`): 5 passing properties plus the
-`#[ignore]`d `mla_rejects_doubleword` reproducer, which fails as shown above
-(confirmed: `expected Err but got Ok(0x0EE29420)`).
+Failing property: `neon_mla_rejects_doubleword`
+
+```rust
+prop_assert!(encode_neon_mla(&[neon_reg(0, "2d"), neon_reg(1, "2d"), neon_reg(2, "2d")]).is_err());
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/88
