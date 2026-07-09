@@ -1,89 +1,51 @@
-# Bug Report — `encode_neon_movi` silently truncates out-of-range immediates
+# Bug Report: `encode_neon_movi` silently truncates out-of-range immediates
 
-**File:** `src/backend/arm/assembler/encoder/neon.rs` — `encode_neon_movi`
-**Severity:** Medium (incorrect codegen, silent — no diagnostic emitted)
+**Target:** `src/backend/arm/assembler/encoder/neon.rs` → `encode_neon_movi`
+**Severity:** Medium
 
 ## Summary
 
-For the byte / 32-bit / 16-bit element forms (`.8b`, `.16b`, `.2s`, `.4s`, `.4h`,
-`.8h`), `encode_neon_movi` masks the immediate with `imm as u32 & 0xFF` and emits
-a valid word for any input, instead of rejecting immediates that fall outside the
-8-bit field the instruction actually encodes.
+For byte/32-bit/16-bit element forms (`.8b`, `.16b`, `.2s`, `.4s`, `.4h`, `.8h`), `encode_neon_movi` masks immediate with `imm & 0xFF` and emits valid word for any input. ARMv8-A MOVI immediate is 8-bit (0..=255). Values outside range silently truncated.
 
-Per the A64 ISA, the MOVI immediate for these forms is an 8-bit value
-(`imm8`, range `0..=255`). Real assemblers (GAS / LLVM-MC) reject out-of-range
-values:
-
-```
-MOVI V0.8B, #256
-error: immediate must be an integer in range [0, 255]
-```
-
-The encoder accepts it and silently encodes `#256` as `#0` (because `256 & 0xFF == 0`).
-This is also inconsistent with the `.2d` branch in the **same function**, which
-*does* validate strictly (each byte must be `0x00`/`0xFF`, otherwise `Err`) — so the
-author clearly knows how to reject invalid immediates, but omitted the check on the
-other four branches.
-
-## Root cause
+## Root Cause
 
 ```rust
-// .8b / .16b branch (same pattern in .2s/.4s and .4h/.8h):
-let imm8 = imm as u32 & 0xFF;   // <-- masks silently; no range check / no Err
+// .8b / .16b branch
+let imm8 = imm as u32 & 0xFF;   // masks silently; no range check
 ```
-
-Negative immediates are mishandled too: `imm = -1i64` becomes `0xFFFFFFFFu32`, then
-`& 0xFF == 0xFF`, so `MOVI V0.8B, #-1` silently encodes as `MOVI V0.8B, #0xFF`.
-
-`.2d` is correct and rejects e.g. `imm = 1` (byte `0x01` is neither `0x00` nor
-`0xFF`).
 
 ## Reproduction
 
-Property `out_of_range_immediate_must_be_rejected` in
-`mod neon_movi_props` (`neon.rs`) fails on the minimal case:
+**Input:** `movi v0.8b, #256`
 
-```
-arr = "8b", imm = 256
-MOVI "8b" #256 is out of 8-bit range and must be rejected,
-got Ok(Word(251716608))
-```
+**Expected:** `Err` — MOVI immediate out of range (0-255): 256
 
-`251716608 == 0x0F00E400`, which is exactly `MOVI V0.8B, #0`.
+**Actual:** `Ok(Word(251716608))` — 256 & 0xFF = 0, encodes as `movi v0.8b, #0`
 
-```bash
-cargo test --lib neon_movi_props::out_of_range_immediate_must_be_rejected
-```
+**Other failing inputs:** `movi v0.8b, #-1` → encodes as `movi v0.8b, #255` (-1 wraps)
 
-## Suggested fix
+## Impact
 
-Validate the immediate range before masking, mirroring the `.2d` branch:
+Out-of-range immediates silently truncated. Inconsistent with `.2d` branch which validates strictly. LLVM-MC rejects these inputs.
+
+## Suggested Fix
+
+Validate range before masking:
 
 ```rust
-// for .8b/.16b/.2s/.4s/.4h/.8h:
-if !(0..=255).contains(&imm) {
-    return Err(format!("movi {}: immediate {} out of range [0,255]", arr_d, imm));
+if imm < 0 || imm > 255 {
+    return Err(format!("MOVI immediate out of range (0-255): {}", imm));
 }
-let imm8 = imm as u32 & 0xFF;
+let imm8 = imm as u32;
 ```
 
-## Test coverage added
+## Regression Property
 
-8 property-based tests in `mod neon_movi_props` (`proptest`):
+Failing property: `out_of_range_immediate_must_be_rejected`
 
-| Test | Oracle | Result |
-|------|--------|--------|
-| `byte_form_field_layout` | reference layout (every field of the word) | PASS |
-| `field_independence` | algebraic (Rd/imm bits don't cross-contaminate) | PASS |
-| `cmode_per_form` | cmode selection per arrangement | PASS |
-| `shift_selects_cmode` | LSL shift → cmode 0000/0010/0100/0110 | PASS |
-| `unsupported_arrangement_rejected` | negative contract | PASS |
-| `unsupported_shift_rejected` | negative contract | PASS |
-| `d2_form_strict_byte_validation` | reference/negative (.2d is strict) | PASS |
-| `out_of_range_immediate_must_be_rejected` | negative contract | **FAIL** |
+```rust
+prop_assert!(encode_neon_movi(&[neon_reg(0, "8b"), 256]).is_err());    // overflow
+prop_assert!(encode_neon_movi(&[neon_reg(0, "8b"), -1]).is_err());    // negative
+```
 
-No cross-assembler (llvm-mc / aarch64 `as`) was available in this environment for
-differential validation, so the reference oracle is derived directly from the
-AdvSIMD modified-immediate bit layout (independently re-derived, not copied from
-the implementation).
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/181
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/183
