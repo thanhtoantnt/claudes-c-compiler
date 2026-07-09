@@ -71,3 +71,5 @@ All 7 active properties pass:
 - `narrow_q_depends_only_on_is_high` — Q driven solely by `is_high` (narrowing family) ✓
 - `narrow_rejects_invalid_inputs` — unsupported source arrangements & too-few operands → Err ✓
 - `rejects_too_few_operands` — 0/1/2 operands → Err ✓
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/36

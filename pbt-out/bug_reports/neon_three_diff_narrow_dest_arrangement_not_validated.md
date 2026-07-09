@@ -67,3 +67,5 @@ After computing `size`/`Q` from the source, assert the destination arrangement
 is the expected narrow type for the family (e.g. `.8b`/`.16b` for `.8h` source,
 `.4h`/`.8h` for `.4s` source, `.2s`/`.4s` for `.2d` source), and require a
 non-empty arrangement; return `Err` otherwise.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/10
