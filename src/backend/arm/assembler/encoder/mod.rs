@@ -36,6 +36,10 @@ mod neon_cmp_zero_pbt;
 mod neon_cnt_pbt;
 #[cfg(test)]
 mod neon_rev64_pbt;
+#[cfg(test)]
+mod neon_pmull_pbt;
+#[cfg(test)]
+mod neon_faddp_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
