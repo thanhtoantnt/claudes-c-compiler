@@ -24,6 +24,10 @@ mod neon_mla_pbt;
 mod neon_mls_pbt;
 #[cfg(test)]
 mod neon_umov_pbt;
+#[cfg(test)]
+mod neon_pmul_pbt;
+#[cfg(test)]
+mod neon_addv_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
