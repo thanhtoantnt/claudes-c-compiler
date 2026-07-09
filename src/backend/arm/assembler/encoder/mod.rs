@@ -188,6 +188,8 @@ mod neon_logical_pbt;
 mod neon_eor_rev_pbt;
 #[cfg(test)]
 mod neon_ins_shl_addv_pbt;
+#[cfg(test)]
+mod neon_mla_mls_fields_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
