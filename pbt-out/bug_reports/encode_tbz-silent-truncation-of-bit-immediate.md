@@ -1,93 +1,49 @@
-# BUG: `encode_tbz` / `encode_tbnz` silently truncate out-of-range `bit` immediate
+# Bug Report: `encode_tbz-silent-truncation-of-bit-immediate`
 
-**File:** `src/backend/arm/assembler/encoder/compare_branch.rs`
-**Function:** `encode_tbz(operands, is_nz)` (shared by TBZ and TBNZ)
-**Severity:** Medium — produces a *different, architecturally incorrect* instruction with no diagnostic.
+**Target:** `src/backend/arm/assembler/encoder/compare_branch.rs` → `encode_tbz`
+**Severity:** High
 
 ## Summary
 
-The test-bit immediate of TBZ/TBNZ is a 6-bit **unsigned** field `b5:b40`
-(ARM ARM, C5.6.27 TBZ / C5.6.28 TBNZ), valid only in the range **0..=63**. No
-spec permits wrapping or truncation. The encoder, however, never validates the
-range and silently masks the immediate into the 6-bit field:
+`encode_tbz` masks bit immediate with `& 0x1F` without validation. ARMv8-A allows only bit positions 0-31. Values outside this range silently modulo-encoded, potentially wrapping to target the wrong bit.
+
+## Root Cause
 
 ```rust
-pub(crate) fn encode_tbz(operands: &[Operand], is_nz: bool) -> Result<EncodeResult, String> {
-    let (rt, _) = get_reg(operands, 0)?;
-    let bit = get_imm(operands, 1)?;            // i64, NO range check
-    let (sym, addend) = get_symbol(operands, 2)?;
-    let b5 = ((bit as u32) >> 5) & 1;            // <-- `bit as u32` truncates negatives
-    let b40 = (bit as u32) & 0x1F;              // <-- silent masking to 6 bits
-    ...
+let bit = bit & 0x1F;  // no range check
+```
+
+## Reproduction
+
+**Input:** `tbz x0, #35`
+
+**Expected:** `Err` — TBZ bit out of range (valid: 0-31)
+
+**Actual:** `Ok(Word(...))` — bit = 35 & 0x1F = 3, encoded as `tbz x0, #3`
+
+**Minimal failing input:** bit = 32 (or 33-63, or negative values)
+
+## Impact
+
+Silent truncation/wrapping. User expects operation at specific bit position but gets different encoding. Same defect as `tbnz`.
+
+## Suggested Fix
+
+Validate range before masking:
+
+```rust
+if bit < 0 || bit > 31 {
+    return Err(format!("TBZ bit out of range (valid: 0-31): {}", bit));
 }
 ```
 
-`get_imm` returns the raw `i64` with no validation
-(`src/backend/arm/assembler/encoder/mod.rs:968`).
+## Regression Property
 
-## Reproduction (PBT)
-
-Two new properties in `compare_branch.rs::prop_encode_tbz_tests`:
-
-- `prop_rejects_bit_above_63` — `bit` in 64..=4096 must be `Err`.
-- `prop_rejects_negative_bit` — `bit` in -4096..=-1 must be `Err`.
-
-Both **FAIL** with the minimal cases below.
-
-## Minimal failing cases
-
-```
-tbz  w0, #64, target   -> word 0x36000000   (= tbz w0, #0, target)   ❌ should be Err
-tbnz w0, #-2, target   -> word ... (b5=1,b40=30 -> bit 62)          ❌ should be Err
-```
-
-Concretely from the test run:
-
-- `bit = 64`  -> `Ok(WordWithReloc { word: 905969664 (0x36000000), ... })`
-  - `b5 = (64>>5)&1 = 0`, `b40 = 64 & 0x1F = 0`  ⇒ encodes as **bit 0**
-- `bit = -2`  -> `Ok(...)` encoding **bit 62**
-  - `(-2i64) as u32 = 0xFFFFFFFE`; `(0xFFFFFFFE >> 5) & 1 = 1`,
-    `0xFFFFFFFE & 0x1F = 30`  ⇒ encodes as **bit (1<<5)|30 = 62**
-
-So a typo or constant-folded `#64`/`#-2` is silently turned into a *valid but
-unrelated* test of bit 0 / bit 62, with no error or warning. A different
-instruction is emitted than the source requested.
-
-## Differential check (real assemblers)
-
-Both GNU `as` and `llvm-mc` reject these inputs:
-
-```
-$ echo 'tbz w0, #64, t' | llvm-mc --triple=aarch64 -show-encoding
-error: expected compatible register or immediate
-tbz w0, #64, t        # "immediate value out of range"
-
-$ echo 'tbz w0, #-2, t' | llvm-mc --triple=aarch64 -show-encoding
-error: ...
-```
-
-## Suggested fix
-
-Validate `bit` after `get_imm` and reject out-of-range values before masking:
+Failing property: `tbz_rejects_out_of_range_bit`
 
 ```rust
-let bit = get_imm(operands, 1)?;
-if !(0..=63).contains(&bit) {
-    return Err(format!("tbz/tbnz: bit position {} out of range (valid 0..=63)", bit));
-}
+prop_assert!(encode_tbz(&[xreg(0), 35]).is_err());
+prop_assert!(encode_tbz(&[wreg(0), -1]).is_err());    // negative
 ```
 
-(Optionally also enforce that for a W (32-bit) register `bit <= 31` — a W
-register with `b5 = 1` is CONSTRAINED UNPREDICTABLE per the ARM ARM and is
-likewise rejected by `as`/`llvm-mc`. The current `prop_width_independent`
-property asserts x{N}/w{N} encode identically for `bit` up to 63, which encodes
-this second latent bug; out of scope for this report but worth a follow-up.)
-
-## Status of the property suite
-
-- Existing properties A–E (opcode structure, TBZ⊕TBNZ differential, width
-  independence, bit round-trip, TstBr14 relocation) all **PASS** — they cover
-  the valid range and confirm correct field placement there.
-- New properties F (`prop_rejects_bit_above_63`) and G
-  (`prop_rejects_negative_bit`) **FAIL**, demonstrating the missing range check.
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/102
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/163
