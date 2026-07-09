@@ -1,51 +1,50 @@
-# Bug Report: `encode_movz` accepts invalid 32-bit W-register shifts
+# Bug Report: `encode_movz` accepts invalid shift amounts for W registers
 
-**Location:** `src/backend/arm/assembler/encoder/data_processing.rs`, function `encode_movz`
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_movz`
+**Severity:** High
 
 ## Summary
 
-`encode_movz` ignores the destination register width when validating the MOVZ halfword selector. For 32-bit `W` registers, only `lsl #0` and `lsl #16` are valid. The encoder accepts `lsl #32` and `lsl #48`, emitting architecturally UNDEFINED encodings (`hw = 2` / `hw = 3`) instead of returning `Err`.
+For 32-bit `MOVZ` instructions, ARMv8-A specifies shift amount of **only `#0` or `#16`**. `encode_movz` masks with `& 0x3` without validation, accepting invalid shifts like `#32`, `#48`, `#64` and encoding them as if they were `#0`.
+
+## Root Cause
+
+```rust
+let shift = shift_val & 0x3;  // no range check
+```
 
 ## Reproduction
 
-Failing property: `movz_w_reg_rejects_32_or_48_shift`
+**Input:** `movz w0, #0xFFFF, #32`
 
-Minimal input:
+**Expected:** `Err` — MOVZ shift for W-register must be #0 or #16
 
-```text
-rd = 0, bad_amount = 32
-```
+**Actual:** `Ok(Word(...))` — shift encoded as #0 (32 & 0x3 = 0)
 
-`movz w0, #1, lsl #32` computes `hw = 32 / 16 = 2` and encodes that value. The `hw` computation never checks `is_64`.
-
-Relevant source:
-
-```rust
-let rd_name = get_reg_name(operands, 0)?;
-let is_64 = rd_name.starts_with('x');
-...
-if kind == "lsl" {
-    *amount / 16
-}
-```
+**Minimal failing input:** rd="w0", shift=32 (or 48, 64)
 
 ## Impact
 
-The assembler emits UNDEFINED encodings for invalid 32-bit MOVZ forms, rather than rejecting source code that a reference AArch64 assembler would diagnose.
+Invalid shift values silently coerced to valid shifts.
 
-## Suggested fix
+## Suggested Fix
 
-Gate `hw = 2` and `hw = 3` on `is_64`:
+Validate shift for W-register forms:
 
 ```rust
-match (*amount, is_64) {
-    (0, _) => 0,
-    (16, _) => 1,
-    (32, true) => 2,
-    (48, true) => 3,
-    _ => return Err(format!("movz lsl shift {} invalid for {}-bit register", amount, if is_64 { 64 } else { 32 })),
+let (rd, is_64) = get_reg(operands, 0)?;
+if !is_64 && (shift_val & 0x3 != 0 && shift_val & 0x3 != 2) {
+    return Err("MOVZ shift for W-register must be #0 or #16".into());
 }
 ```
 
-Apply the same width gate to `encode_movk` and `encode_movn`.
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/67
+## Regression Property
+
+Failing property: `movz_w_register_rejects_invalid_shift`
+
+```rust
+prop_assert!(encode_movz(&[wreg(0), imm(0xFFFF), shift(32)]).is_err());  // invalid
+prop_assert!(encode_movz(&[wreg(0), imm(0xFFFF), shift(48)]).is_err());  // invalid
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/64

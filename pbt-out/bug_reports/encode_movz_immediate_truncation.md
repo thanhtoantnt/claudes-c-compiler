@@ -1,45 +1,49 @@
 # Bug Report: `encode_movz` silently truncates out-of-range immediate magnitude
 
-**Location:** `src/backend/arm/assembler/encoder/data_processing.rs`, function `encode_movz`
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_movz`
+**Severity:** High
 
 ## Summary
 
-`encode_movz` masks the immediate with `& 0xFFFF` without first validating that the source immediate fits in the 16-bit MOVZ field. Out-of-range immediates are accepted and silently encoded as a different value.
+`encode_movz` masks immediate with `& 0xFFFF` without validation. Out-of-range immediates accepted and silently encoded as different value.
+
+## Root Cause
+
+```rust
+let imm16 = (imm as u32) & 0xFFFF;  // no range check
+```
 
 ## Reproduction
 
-Failing property: `movz_rejects_out_of_range_immediate`
+**Input:** `movz x0, #65536` (0x10000)
 
-Minimal input:
+**Expected:** `Err` — movz immediate out of range: 65536
 
-```text
-rd = 0, imm = 65536
-```
+**Actual:** `Ok(Word(...))` — imm16 = 0x10000 & 0xFFFF = 0x0000, identical to `movz x0, #0x0`
 
-`movz x0, #0x10000` encodes `imm16 = 0x10000 & 0xFFFF = 0x0000`, producing the same word as `movz x0, #0x0` instead of returning `Err`.
-
-Relevant source:
-
-```rust
-let imm = get_imm(operands, 1)?;
-...
-let word = (sf << 31) | (0b10100101 << 23) | (hw << 21)
-         | (((imm as u32) & 0xFFFF) << 5) | rd;
-```
+**Minimal failing input:** rd = 0, imm = 65536
 
 ## Impact
 
-Silent miscompilation: constants that appear to assemble cleanly execute with the wrong value, e.g. `0x10001` becomes `0x0001`.
+Silent miscompilation: constants assembled through MOVZ can lose upper bits with no diagnostic.
 
-## Suggested fix
+## Suggested Fix
 
-Validate `imm` before encoding:
+Validate immediate before encoding:
 
 ```rust
-if !(0..=0xFFFF).contains(&imm) {
+if imm < 0 || imm > 0xFFFF {
     return Err(format!("movz immediate out of range: {}", imm));
 }
 ```
 
-The same validation pattern should be applied to `encode_movk` and `encode_movn`, which duplicate the masking pattern.
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/65
+## Regression Property
+
+Failing property: `movz_rejects_out_of_range_immediate`
+
+```rust
+prop_assert!(encode_movz(&[xreg(0), imm(65536)]).is_err());    // overflow
+prop_assert!(encode_movz(&[xreg(0), imm(-1)]).is_err());       // negative
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/63
