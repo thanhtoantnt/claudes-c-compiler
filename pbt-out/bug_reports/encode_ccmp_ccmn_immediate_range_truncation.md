@@ -1,71 +1,54 @@
 # Bug Report: `encode_ccmp_ccmn` silently truncates out-of-range `imm5` and `nzcv`
 
-**Location:** `src/backend/arm/assembler/encoder/compare_branch.rs`, function `encode_ccmp_ccmn`
+**Target:** `src/backend/arm/assembler/encoder/compare_branch.rs` → `encode_ccmp_ccmn`
+**Severity:** High
 
 ## Summary
 
-In the immediate form (`CCMP/CCMN Rn, #imm5, #nzcv, cond`) the encoder masks the
-operands with `& 0x1F` and `& 0xF` respectively, without first validating that
-they fit their fields. Out-of-range and negative immediates are accepted and
-silently encoded as a *different* value, with no diagnostic.
+`CCMP/CCMN` immediate form masks operands with `& 0x1F` and `& 0xF` without validation. ARM ARM requires `imm5` in range `0..=31` and `nzcv` in range `0..=15`. Out-of-range and negative immediates silently truncated.
 
-Per the ARM ARM (Conditional compare, immediate form):
-- `imm5` is a **5-bit unsigned** immediate — valid range `0..=31`.
-- `nzcv` is a **4-bit** field (one bit per N/Z/C/V flag) — valid range `0..=15`.
-
-No cited spec permits wrapping for either field, so out-of-range inputs are
-architecturally invalid and must be rejected.
-
-The relevant source:
+## Root Cause
 
 ```rust
-let word = (sf << 31) | op | (1 << 29) | (0b11010010 << 21)
-    | ((*imm5 as u32 & 0x1F) << 16) | (cond_val << 12) | (1 << 11)
-    | (rn << 5) | (*nzcv as u32 & 0xF);
+let word = ... | ((*imm5 as u32 & 0x1F) << 16) | ... | (*nzcv as u32 & 0xF);
 ```
+
+No range checks before masking.
 
 ## Reproduction
 
-Failing property: `prop_ccmp_ccmn_tests::prop_rejects_out_of_range_immediates`
+**Input:** `ccmn w0, #32, #16, eq`
 
-Minimal failing input (proptest-shrunk):
+**Expected:** `Err` — ccmp/ccmn immediate out of range (0..=31): 32
 
-```text
-rn = w0, imm5 = 32, nzcv = 16, cond = eq, is_ccmp = false
-```
+**Actual:** `Ok(Word(0x3A400000))` — same as `ccmn w0, #0, #0, eq` (32→0, 16→0)
 
-i.e. `ccmn w0, #32, #16, eq`.
-
-The encoder returns `Ok(Word(0x3A400000))` — the same encoding as
-`ccmn w0, #0, #0, eq` — instead of returning `Err`.
-
-Concretely:
-- `imm5 = 32` (0x20) is truncated to `0x20 & 0x1F = 0` (loss of the high bit).
-- `nzcv = 16` (0x10) is truncated to `0x10 & 0xF = 0`.
-- A *negative* `imm5` such as `-1` is accepted too: `-1i64 as u32 & 0x1F = 31`,
-  so `ccmp x0, #-1, #0, eq` silently becomes `ccmp x0, #31, #0, eq`.
+**Other failing inputs:** `ccmp x0, #-1, #0, eq` → encodes as `ccmp x0, #31, #0, eq`
 
 ## Impact
 
-Silent miscompilation / wrong code generation. An out-of-range immediate that
-should be a hard assembler error is instead assembled into a plausible but
-incorrect instruction, masking typos and bad codegen in upstream consumers with
-no diagnostic.
+Silent miscompilation: out-of-range immediates assembled into incorrect instructions, masking typos/bad codegen with no diagnostic.
 
-## Suggested fix
+## Suggested Fix
 
-Validate both operands before encoding, for both the `ccmp` and `ccmn` paths
-(they share the same masking code):
+Validate before encoding:
 
 ```rust
-if !(*imm5 >= 0 && *imm5 <= 31) {
+if *imm5 < 0 || *imm5 > 31 {
     return Err(format!("ccmp/ccmn immediate out of range (0..=31): {}", imm5));
 }
-if !(*nzcv >= 0 && *nzcv <= 15) {
+if *nzcv < 0 || *nzcv > 15 {
     return Err(format!("ccmp/ccmn nzcv out of range (0..=15): {}", nzcv));
 }
 ```
 
-The masked writes (`& 0x1F`, `& 0xF`) can then be left in place as a defensive
-no-op or removed once range validation guarantees they are identity.
+## Regression Property
+
+Failing property: `prop_rejects_out_of_range_immediates`
+
+```rust
+prop_assert!(encode_ccmp_ccmn(&[wreg(0), imm(32), imm(16), cond("eq")], false).is_err());
+prop_assert!(encode_ccmp_ccmn(&[xreg(0), imm(-1), imm(0), cond("eq")], true).is_err());
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/21
