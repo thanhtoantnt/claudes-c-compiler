@@ -114,6 +114,10 @@ mod neon_sqshrun_pbt;
 mod neon_not_pbt;
 #[cfg(test)]
 mod neon_tbx_pbt;
+#[cfg(test)]
+mod neon_add_sub_pbt;
+#[cfg(test)]
+mod neon_mul_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
