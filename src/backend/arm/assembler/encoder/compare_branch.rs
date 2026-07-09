@@ -2019,6 +2019,101 @@ mod prop_encode_csinc_tests {
                 "encode_csinc should reject case {} (got {:?})", case, result
             );
         }
+
+        // Property F — negative contract: MIXED-WIDTH validation (the focus).
+        // CSINC's single sf bit applies to the WHOLE instruction, so Rd, Rn,
+        // and Rm MUST all share one register width (ARM ARM C4.1.66,
+        // "Conditional select (increment)"). GAS and LLVM-MC reject e.g.
+        // `csinc w0, x1, x2, eq` with "operand size mismatch". The encoder
+        // derives sf from Rd (operand 0) and DISCARDS the widths of Rn/Rm
+        // (`let (rn, _) = get_reg(...)` / `let (rm, _) = get_reg(...)`), so it
+        // silently coerces a mixed-width input instead of returning Err.
+        // No cited spec permits this silent coercion.
+        #[test]
+        fn prop_rejects_mixed_width_registers(
+            n in 0u32..=30u32,
+            rd64 in any::<bool>(),
+            rn64 in any::<bool>(),
+            rm64 in any::<bool>(),
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            // Skip the all-uniform case (covered by Property G): we want a
+            // genuine mix of widths across Rd/Rn/Rm.
+            prop_assume!(!(rd64 == rn64 && rn64 == rm64));
+            let cond_name = COND_TABLE[cond_idx].0;
+            let mk = |is64: bool| if is64 { format!("x{}", n) } else { format!("w{}", n) };
+            let ops = vec![
+                Operand::Reg(mk(rd64)),
+                Operand::Reg(mk(rn64)),
+                Operand::Reg(mk(rm64)),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            prop_assert!(
+                encode_csinc(&ops).is_err(),
+                "mixed-width CSINC {:?} must be rejected: Rd/Rn/Rm MUST share \
+                 one width (ARM ARM C4.1.66); GAS/LLVM-MC reject this with \
+                 'operand size mismatch'. Got {:?}",
+                ops, encode_csinc(&ops)
+            );
+        }
+
+        // Property G — positive control for the width contract.
+        // When all three registers share ONE width, encode_csinc MUST succeed
+        // and the sf bit MUST equal that shared width. This anchors the
+        // invariant that Property F exercises negatively.
+        #[test]
+        fn prop_uniform_widths_always_succeed(
+            n in 0u32..=30u32,
+            is64 in any::<bool>(),
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let cond_name = COND_TABLE[cond_idx].0;
+            let reg = if is64 { format!("x{}", n) } else { format!("w{}", n) };
+            let ops = vec![
+                Operand::Reg(reg.clone()),
+                Operand::Reg(reg.clone()),
+                Operand::Reg(reg),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            let r = encode_csinc(&ops);
+            prop_assert!(r.is_ok(), "uniform-width CSINC must encode, got {:?}", r);
+            let word = word_of(r);
+            let expected_sf = if is64 { 1u32 } else { 0u32 };
+            prop_assert_eq!((word >> 31) & 1, expected_sf);
+        }
+
+        // Property H — negative contract: mixed-width validation extends to
+        // the zero register aliases. XZR (64-bit) and WZR (32-bit) are valid
+        // CSINC operands, but they still carry a width, so pairing an XZR with
+        // a W-register (or WZR with an X-register) is a width mismatch and
+        // MUST be rejected, not silently coerced to Rd's width.
+        #[test]
+        fn prop_rejects_zr_width_mismatch(
+            n in 0u32..=30u32,
+            zr_first in any::<bool>(),
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let cond_name = COND_TABLE[cond_idx].0;
+            // Rd = XZR (64-bit) but Rn = W<n> (32-bit) -> mismatch; or
+            // Rd = WZR (32-bit) but Rn = X<n> (64-bit) -> mismatch.
+            let (rd, rn) = if zr_first {
+                ("xzr".to_string(), format!("w{}", n))
+            } else {
+                ("wzr".to_string(), format!("x{}", n))
+            };
+            let ops = vec![
+                Operand::Reg(rd),
+                Operand::Reg(rn),
+                Operand::Reg("x2".into()),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            prop_assert!(
+                encode_csinc(&ops).is_err(),
+                "mixed-width CSINC with zr {:?} must be rejected (width applies \
+                 to the whole instruction). Got {:?}",
+                ops, encode_csinc(&ops)
+            );
+        }
     }
 }
 

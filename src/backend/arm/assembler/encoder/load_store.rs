@@ -776,6 +776,156 @@ pub(crate) fn encode_ldxp_stxp(operands: &[Operand], is_load: bool, acquire_rele
     }
 }
 
+#[cfg(test)]
+mod prop_encode_ldxp_stxp_offset_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: spec-conformance / negative contract — OFFSET VALIDATION.
+    //
+    // Target: `encode_ldxp_stxp` (LDXP/LDAXP/STXP/STLXP — Load/Store
+    // Exclusive Pair, ARM ARM §C6.2.139 / §C6.2.292).
+    //
+    // Per the ARM ARM the ONLY permitted assembler syntax is:
+    //
+    //     LDXP  <Xt1>, <Xt2>, [<Xn|SP>]
+    //     STXP  <Ws>, <Xt1>, <Xt2>, [<Xn|SP>]
+    //
+    // The encoding carries NO immediate-offset / scaled-immediate field —
+    // the effective address is exactly the base register:
+    //
+    //     LDXP/LDAXP: 1 sz 001000 0 1 1 11111 o0 Rt2 Rn Rt   (no imm field)
+    //     STXP/STLXP: 1 sz 001000 0 0 1 Rs   o0 Rt2 Rn Rt    (no imm field)
+    //
+    // OFFSET-VALIDATION consequence: a non-zero immediate offset is
+    // *unrepresentable*. `ldxp x0,x1,[x2,#8]` cannot be encoded and must be
+    // rejected with Err. Register-field placement (Rt=[4:0], Rn=[9:5],
+    // Rt2=[14:10], Rs=[20:16] for STXP) is independent of any (illegal)
+    // offset. This is the same silent-drop defect already documented for the
+    // sibling `encode_ldxr_stxr`.
+
+    fn gp_reg(width: char, num: u32) -> Operand {
+        Operand::Reg(format!("{}{}", width, num))
+    }
+    fn mem_op(base_num: u32, offset: i64) -> Operand {
+        Operand::Mem { base: format!("x{}", base_num), offset }
+    }
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+    /// LDXP/LDAXP operand list: Rt, Rt2, [Rn, #off].
+    fn load_ops(rt_w: char, rt: u32, rt2: u32, base: u32, off: i64) -> Vec<Operand> {
+        vec![gp_reg(rt_w, rt), gp_reg(rt_w, rt2), mem_op(base, off)]
+    }
+    /// STXP/STLXP operand list: Ws, Rt, Rt2, [Rn, #off].
+    fn store_ops(ws: u32, rt_w: char, rt: u32, rt2: u32, base: u32, off: i64) -> Vec<Operand> {
+        vec![gp_reg('w', ws), gp_reg(rt_w, rt), gp_reg(rt_w, rt2), mem_op(base, off)]
+    }
+
+    proptest! {
+        // ── Property 1: the offset is silently discarded (BUG MECHANISM). ──
+        // The ARM ARM gives LDXP/STXP no offset field, yet the encoder
+        // matches `Operand::Mem { base, .. }` and never inspects `offset`.
+        // Hence any two offsets — including a non-zero, unrepresentable one —
+        // must encode to the SAME word. PASSES today; documents the drop.
+        #[test]
+        fn prop_offset_does_not_affect_word(
+            is_load in any::<bool>(),
+            acquire_release in any::<bool>(),
+            rt_num in 0u32..=31u32,
+            rt2_num in 0u32..=31u32,
+            base_num in 0u32..=31u32,
+            ws_num in 0u32..=31u32,
+            o1 in any::<i64>(),
+            o2 in any::<i64>(),
+        ) {
+            let w1 = if is_load {
+                word(encode_ldxp_stxp(&load_ops('x', rt_num, rt2_num, base_num, o1), true, acquire_release))
+            } else {
+                word(encode_ldxp_stxp(&store_ops(ws_num, 'x', rt_num, rt2_num, base_num, o1), false, acquire_release))
+            };
+            let w2 = if is_load {
+                word(encode_ldxp_stxp(&load_ops('x', rt_num, rt2_num, base_num, o2), true, acquire_release))
+            } else {
+                word(encode_ldxp_stxp(&store_ops(ws_num, 'x', rt_num, rt2_num, base_num, o2), false, acquire_release))
+            };
+            prop_assert_eq!(w1, w2, "offset must not change the word (it is dropped)");
+        }
+
+        // ── Property 2: NEGATIVE CONTRACT — non-zero offset must be Err. ──
+        // The exclusive pair load/store group has no immediate-offset form,
+        // so a non-zero offset is unrepresentable and MUST be rejected rather
+        // than silently encoded as `[Rn]`.
+        //
+        // EXPECTED TO FAIL against current code: it accepts the offset and
+        // drops it. This failure IS the bug being reported.
+        #[test]
+        fn prop_nonzero_offset_rejected(
+            is_load in any::<bool>(),
+            acquire_release in any::<bool>(),
+            rt_num in 0u32..=31u32,
+            rt2_num in 0u32..=31u32,
+            base_num in 0u32..=31u32,
+            ws_num in 0u32..=31u32,
+            off in (-32768i64..32767i64).prop_filter("non-zero", |o| *o != 0),
+        ) {
+            let res = if is_load {
+                encode_ldxp_stxp(&load_ops('x', rt_num, rt2_num, base_num, off), true, acquire_release)
+            } else {
+                encode_ldxp_stxp(&store_ops(ws_num, 'x', rt_num, rt2_num, base_num, off), false, acquire_release)
+            };
+            prop_assert!(res.is_err(),
+                "non-zero offset {} on LDXP/STXP must be rejected (no offset field in encoding); got {:?}",
+                off, res);
+        }
+
+        // ── Property 3: the only legal form (offset == 0) is accepted. ──
+        #[test]
+        fn prop_zero_offset_accepted(
+            is_load in any::<bool>(),
+            acquire_release in any::<bool>(),
+            rt_num in 0u32..=31u32,
+            rt2_num in 0u32..=31u32,
+            base_num in 0u32..=31u32,
+            ws_num in 0u32..=31u32,
+        ) {
+            let res = if is_load {
+                encode_ldxp_stxp(&load_ops('x', rt_num, rt2_num, base_num, 0), true, acquire_release)
+            } else {
+                encode_ldxp_stxp(&store_ops(ws_num, 'x', rt_num, rt2_num, base_num, 0), false, acquire_release)
+            };
+            prop_assert!(res.is_ok(), "offset 0 is the only legal form; got {:?}", res);
+        }
+
+        // ── Property 4: NEGATIVE CONTRACT — common programmer offsets. ──
+        // Concrete regression anchor for the offsets a human is most likely
+        // to actually write on an exclusive pair load/store (positive,
+        // negative, aligned, 8/16-byte pair-sized). All are unrepresentable
+        // (no offset field) and MUST be rejected. EXPECTED TO FAIL today.
+        #[test]
+        fn prop_common_offsets_rejected(
+            is_load in any::<bool>(),
+            acquire_release in any::<bool>(),
+            off_idx in 0usize..8usize,
+        ) {
+            let offsets = [1i64, -1, 8, 16, 32, -8, 4096, 0x10000];
+            let off = offsets[off_idx];
+            let res = if is_load {
+                encode_ldxp_stxp(&load_ops('x', 0, 1, 2, off), true, acquire_release)
+            } else {
+                encode_ldxp_stxp(&store_ops(0, 'x', 0, 1, 2, off), false, acquire_release)
+            };
+            prop_assert!(res.is_err(),
+                "ldxp/stxp offset {} is unrepresentable (no offset field) and must be Err; got {:?}",
+                off, res);
+        }
+    }
+}
+
 /// Encode LDAR/STLR and byte/halfword variants.
 pub(crate) fn encode_ldar_stlr(operands: &[Operand], is_load: bool, forced_size: Option<u32>) -> Result<EncodeResult, String> {
     let (rt, is_64) = get_reg(operands, 0)?;
