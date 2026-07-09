@@ -1337,6 +1337,40 @@ mod tests {
             prop_assert_eq!(itf_opcode_of(w_unsigned), 0b011u32);
         }
 
+        // Oracle: ground-truth reference (ARMv8-A literal encodings for the
+        // Rn=Rd=0 case). Unlike the self-derived `expected` formula above —
+        // which re-implements the encoder's own bit math and thus cannot
+        // detect a bug shared between encoder and test — this pins each
+        // (sf, ftype, signedness) corner to an externally verified 32-bit word.
+        // Canonical SCVTF/UCVTF layout: sf 0 0 1 1 1 1 0 ftype 1 00 opcode 000000 Rn Rd.
+        //   SCVTF S0,W0=0x1E220000  SCVTF D0,W0=0x1E620000
+        //   SCVTF S0,X0=0x9E220000  SCVTF D0,X0=0x9E620000
+        //   UCVTF S0,W0=0x1E230000  UCVTF D0,W0=0x1E630000
+        //   UCVTF S0,X0=0x9E230000  UCVTF D0,X0=0x9E630000
+        // NOTE: the source comment lists 0x9E260000 (SCVTF Dd,Xn) and
+        // 0x1E270000 (UCVTF Dd,Wn) — both are WRONG; the encoder emits the
+        // correct values asserted here. See BUGS_int_to_float.md.
+        #[test]
+        fn prop_int_to_float_matches_armv8_ground_truth(
+            dbl_dst in any::<bool>(), src64 in any::<bool>(), signed in any::<bool>(),
+        ) {
+            let dst = if dbl_dst { "d0" } else { "s0" };
+            let src = if src64  { "x0" } else { "w0" };
+            let ops = vec![Operand::Reg(dst.into()), Operand::Reg(src.into())];
+            let w = expect_word(encode_int_to_float(&ops, signed));
+            let expected = match (dbl_dst, src64, signed) {
+                (false, false, true)  => 0x1E220000u32, // SCVTF S0,W0
+                (true,  false, true)  => 0x1E620000u32, // SCVTF D0,W0
+                (false, true,  true)  => 0x9E220000u32, // SCVTF S0,X0
+                (true,  true,  true)  => 0x9E620000u32, // SCVTF D0,X0
+                (false, false, false) => 0x1E230000u32, // UCVTF S0,W0
+                (true,  false, false) => 0x1E630000u32, // UCVTF D0,W0
+                (false, true,  false) => 0x9E230000u32, // UCVTF S0,X0
+                (true,  true,  false) => 0x9E630000u32, // UCVTF D0,X0
+            };
+            prop_assert_eq!(w, expected);
+        }
+
         // Negative contract (validated, PASSES): out-of-range register numbers
         // (>= 32) MUST be rejected by get_reg (parse_reg_num caps at 31), not
         // masked into 5 bits; too-few operands and non-register dests rejected.
