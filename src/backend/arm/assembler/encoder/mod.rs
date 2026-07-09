@@ -54,6 +54,8 @@ mod neon_eor3_pbt;
 mod neon_scalar_three_same_pbt;
 #[cfg(test)]
 mod neon_three_diff_pbt;
+#[cfg(test)]
+mod neon_elem_long_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
