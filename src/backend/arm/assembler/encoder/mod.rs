@@ -94,6 +94,10 @@ mod neon_dup_pbt;
 mod neon_tbl_pbt;
 #[cfg(test)]
 mod neon_xtl_pbt;
+#[cfg(test)]
+mod neon_fcvtl_pbt;
+#[cfg(test)]
+mod neon_sri_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
