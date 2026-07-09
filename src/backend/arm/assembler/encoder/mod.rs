@@ -118,6 +118,10 @@ mod neon_tbx_pbt;
 mod neon_add_sub_pbt;
 #[cfg(test)]
 mod neon_mul_pbt;
+#[cfg(test)]
+mod neon_bic_pbt;
+#[cfg(test)]
+mod neon_bitwise_insert_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
