@@ -112,3 +112,5 @@ Any program emitting LDRSB/LDRSH with a post-indexed, pre-indexed, or unscaled
 offset outside [-256, 255] will assemble without error but compute the wrong
 effective address at runtime. This is a silent correctness defect in the
 generated machine code — the worst failure mode for an assembler.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/177
