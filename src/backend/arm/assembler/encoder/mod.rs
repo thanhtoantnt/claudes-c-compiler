@@ -166,6 +166,10 @@ mod data_processing_extend_pbt;
 mod bitfield_cls_clz_crc_rev_pbt;
 #[cfg(test)]
 mod fp_scalar_fneg_fabs_fsqrt_fcvt_pbt;
+#[cfg(test)]
+mod load_store_ldst_stop_pbt;
+#[cfg(test)]
+mod load_store_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
