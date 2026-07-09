@@ -1,30 +1,53 @@
-# `encode_neon_ext` silently truncates EXT immediate indexes above 15
+# Bug Report: `encode_neon_ext` silently truncates 4-bit immediate index
 
-**Target:** `src/backend/arm/assembler/encoder/neon.rs`, function `encode_neon_ext`
+**Target:** `src/backend/arm/assembler/encoder/neon.rs` → `encode_neon_ext`
+**Severity:** High
 
 ## Summary
 
-`EXT` has a 4-bit immediate field. The encoder masks the parsed index with `index & 0xF`, so out-of-range indexes such as `#16` and `#17` are silently re-encoded as `#0` and `#1` instead of returning `Err`.
+`encode_neon_ext` masks immediate index with `& 0xF` without range validation. Immediate field is 3 bits for most arrangements, 1 bit for `.8b`. Out-of-range indices accepted and silently truncated.
+
+## Root Cause
+
+```rust
+let imm4 = imm & 0xF;  // no arrangement-specific validation
+```
 
 ## Reproduction
 
-Failing property: `ext_range_pbt_tests::out_of_range_imm4_must_be_rejected`
+**Input:** `ext v0.8b, v1.8b, #2`
 
-Minimal failing input:
+**Expected:** `Err` — EXT index for .8b must be 0 or 1 (1-bit field)
 
-```text
-ext v0.16b, v1.16b, v2.16b, #16
-```
+**Actual:** `Ok(Word(...))` — imm4 = 2 & 0xF = 2, encoded as `#2` (UNALLOCATED)
 
-Expected: `Err`, because the EXT immediate must be in `0..=15`.
-
-Actual: `Ok(Word(_))`; the immediate is masked to zero.
+**Minimal failing input:** arr_d="8b", imm = 2 (or 8, 16, etc.)
 
 ## Impact
 
-A typo or codegen bug changes the selected byte offset without diagnostic, producing wrong vector data.
+Invalid indices silently truncated. UNALLOCATED encodings emitted without diagnostic.
 
-## Suggested fix
+## Suggested Fix
 
-Validate the immediate before encoding: reject values outside `0..=15` and remove the masking-as-validation behavior.
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/177
+Validate against arrangement-specific max before masking:
+
+```rust
+let max = match arr_d.as_str() {
+    "8b" => 1, "16b" => 3, "4h" => 7, "8h" => 15, "2s" => 31, "4s" => 63,
+    _ => return Err(format!("unsupported arrangement: {}", arr_d)),
+};
+if imm > max {
+    return Err(format!("EXT index {} out of range for {}", imm, arr_d));
+}
+```
+
+## Regression Property
+
+Failing property: `neon_ext_index_range_checked`
+
+```rust
+prop_assert!(encode_neon_ext(&[neon_reg(0, "8b"), neon_reg(1, "8b"), 2]).is_err());  // 8b: 0-1
+prop_assert!(encode_neon_ext(&[neon_reg(0, "4s"), neon_reg(1, "4s"), 64]).is_err());  // 4s: 0-63
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/85
