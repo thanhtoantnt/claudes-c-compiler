@@ -90,6 +90,10 @@ mod neon_across_long_pbt;
 mod neon_shift_imm_pbt;
 #[cfg(test)]
 mod neon_dup_pbt;
+#[cfg(test)]
+mod neon_tbl_pbt;
+#[cfg(test)]
+mod neon_xtl_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
