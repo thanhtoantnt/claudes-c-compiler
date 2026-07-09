@@ -110,6 +110,10 @@ mod neon_shrn_pbt;
 mod neon_ext_pbt;
 #[cfg(test)]
 mod neon_sqshrun_pbt;
+#[cfg(test)]
+mod neon_not_pbt;
+#[cfg(test)]
+mod neon_tbx_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
