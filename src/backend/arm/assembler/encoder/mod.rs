@@ -130,6 +130,10 @@ mod load_store_ldop_pbt;
 mod load_store_ldr_str_pbt;
 #[cfg(test)]
 mod data_processing_shift_pbt;
+#[cfg(test)]
+mod encode_logical_pbt;
+#[cfg(test)]
+mod fp_scalar_fmov_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
