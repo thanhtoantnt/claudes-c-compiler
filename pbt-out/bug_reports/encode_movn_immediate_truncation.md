@@ -1,34 +1,49 @@
 # Bug Report: `encode_movn` silently truncates out-of-range immediate magnitude
 
-**Location:** `src/backend/arm/assembler/encoder/data_processing.rs`, function `encode_movn`
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_movn`
+**Severity:** High
 
 ## Summary
 
-`encode_movn` masks the immediate with `& 0xFFFF` without validating that the source immediate fits in the 16-bit MOVN field. Out-of-range immediates are accepted and silently encoded as a different value.
+`encode_movn` masks immediate with `& 0xFFFF` without validation. Out-of-range immediates accepted and silently encoded as different value.
+
+## Root Cause
+
+```rust
+let imm16 = (imm as u32) & 0xFFFF;  // no range check
+```
 
 ## Reproduction
 
-Failing property: `movn_rejects_out_of_range_immediate`
+**Input:** `movn x0, #65536` (0x10000)
 
-Minimal input:
+**Expected:** `Err` — movn immediate out of range: 65536
 
-```text
-rd = 0, imm = 65536
-```
+**Actual:** `Ok(Word(...))` — imm16 = 0x10000 & 0xFFFF = 0x0000, identical to `movn x0, #0x0`
 
-`movn x0, #0x10000` encodes `imm16 = 0x10000 & 0xFFFF = 0x0000`, producing the same immediate field as `movn x0, #0x0` instead of returning `Err`.
+**Minimal failing input:** rd = 0, imm = 65536
 
 ## Impact
 
-Silent miscompilation: MOVN constants can lose upper immediate bits with no diagnostic.
+Silent miscompilation: constants assembled through MOVN can lose upper bits with no diagnostic.
 
-## Suggested fix
+## Suggested Fix
 
-Validate `imm` before encoding:
+Validate immediate before encoding:
 
 ```rust
-if !(0..=0xFFFF).contains(&imm) {
+if imm < 0 || imm > 0xFFFF {
     return Err(format!("movn immediate out of range: {}", imm));
 }
 ```
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/62
+
+## Regression Property
+
+Failing property: `movn_rejects_out_of_range_immediate`
+
+```rust
+prop_assert!(encode_movn(&[xreg(0), imm(65536)]).is_err());    // overflow
+prop_assert!(encode_movn(&[xreg(0), imm(-1)]).is_err());       // negative
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/61
