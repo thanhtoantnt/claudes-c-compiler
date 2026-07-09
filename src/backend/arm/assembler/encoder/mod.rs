@@ -138,6 +138,14 @@ mod fp_scalar_fmov_pbt;
 mod data_processing_mov_wide_imm_pbt;
 #[cfg(test)]
 mod fp_scalar_fcvt_rounding_pbt;
+#[cfg(test)]
+mod fp_scalar_fmadd_fmsub_pbt;
+#[cfg(test)]
+mod fp_scalar_int_to_float_pbt;
+#[cfg(test)]
+mod load_store_ldp_stp_pbt;
+#[cfg(test)]
+mod load_store_prfm_prop_tests;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
