@@ -48,4 +48,12 @@ if !rd64 || !rn64 || !rm64 {
 }
 ```
 
+## Regression Property
+
+Failing property: `smulh_rejects_32bit_w_registers`
+
+```rust
+prop_assert!(encode_smulh(&[wreg(0), wreg(1), wreg(2)]).is_err());  // W operands
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/122

@@ -87,5 +87,13 @@ if !matches!(src_name.chars().next(), Some('w') | Some('x')) {
 }
 ```
 
-This same defect affects `encode_ucvtf` (same helper) and is reflected in the
-existing finding test `prop_int_to_float_rejects_wrong_operand_banks`.
+## Regression Property
+
+Failing property: `prop_scvtf_rejects_wrong_operand_banks`
+
+```rust
+prop_assert!(encode_scvtf(&[wreg(0), wreg(0)]).is_err());  // GP dest
+prop_assert!(encode_scvtf(&[dreg(0), dreg(0)]).is_err());  // FP source
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/150

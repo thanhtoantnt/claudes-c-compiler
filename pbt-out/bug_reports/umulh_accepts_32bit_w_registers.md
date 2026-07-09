@@ -118,4 +118,13 @@ input like `umulh x0, x1, x2, x3` is accepted and encoded as `umulh x0, x1, x2`
 (instead of erroring on the unexpected 4th operand). This is consistent with the
 rest of the encoder module (which uniformly lacks max-arity validation) and is
 recorded here as a characterization, not a regression target.
+## Regression Property
+
+Failing property: `umulh_rejects_32bit_w_registers`
+
+```rust
+prop_assert!(encode_umulh(&[wreg(0), wreg(1), wreg(2)]).is_err());  // W operands
+prop_assert!(encode_umulh(&[wreg(0), xreg(1), xreg(2)]).is_err());  // mixed W/X
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/123
