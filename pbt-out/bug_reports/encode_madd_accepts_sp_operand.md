@@ -1,28 +1,53 @@
-# Bug Report: `encode_madd` silently accepts SP/WSP as accumulator operand
+# Bug Report: `encode_madd` silently accepts `sp` / `wsp` as accumulators
 
-**Target:** `src/backend/arm/assembler/encoder/data_processing.rs`, function `encode_madd`
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_madd`
+**Severity:** High
 
 ## Summary
 
-`encode_madd` resolves the accumulator operand through the shared generic register parser, which maps `sp`/`wsp` to register number 31. In the data-processing (3-source) encoding class, register 31 is the zero register, not SP, so `sp` is not a valid accumulator operand for MADD. The encoder accepts it and silently re-encodes it as XZR/WZR.
+`parse_reg_num` maps both `sp`/`wsp` and `xzr`/`wzr` to register number 31. MADD encoding reserves `Ra = 31` for **XZR/WZR** (zero accumulator), not SP. `madd x0, x1, x2, sp` accepted and encoded as `madd x0, x1, x2, xzr`.
+
+## Root Cause
+
+```rust
+let (ra, _) = get_reg(operands, 3)?;   // sp/wsp → 31, treated as XZR/WZR
+```
+
+`parse_reg_num` accepts `sp`/`wsp` with no SP-form validation in `encode_madd`.
 
 ## Reproduction
 
-Failing property: `madd_rejects_sp_operand`
+**Input:** `madd x0, x1, x2, sp`
 
-Minimal input:
+**Expected:** `Err` — MADD Ra must not be SP (use XZR/WZR for zero accumulator)
 
-```text
-madd x0, x1, x2, sp
-```
+**Actual:** `Ok(Word(...))` — encoded as `madd x0, x1, x2, xzr`
 
-Actual behavior: returns `Ok(Word(_))` and encodes it as if the accumulator were `xzr`.
+**Minimal failing input:** rd=0, rn=1, rm=2, ra="sp"
 
 ## Impact
 
-A source typo that names `sp` instead of `xzr` is accepted without diagnostic, changing the meaning of the instruction.
+SP operand silently replaced by XZR, producing multiply-add with zero accumulator instead of using SP. No diagnostic, silently wrong operation.
 
-## Suggested fix
+## Suggested Fix
 
-Reject `sp`/`wsp` in the accumulator position for MADD/MSUB-style data-processing (3-source) encoders before converting the token to a register number.
+Reject SP/WSP for Ra:
+
+```rust
+let (ra, _) = get_reg(operands, 3)?;
+let ra_name = match &operands[3] { Operand::Reg(r) => r.to_lowercase(), _ => String::new() };
+if ra_name == "sp" || ra_name == "wsp" {
+    return Err("MADD Ra must not be SP (use XZR/WZR for zero accumulator)".into());
+}
+```
+
+## Regression Property
+
+Failing property: `madd_rejects_sp_operand`
+
+```rust
+prop_assert!(encode_madd(&[xreg(0), xreg(1), xreg(2)], sp()).is_err());
+prop_assert!(encode_madd(&[wreg(0), wreg(1), wreg(2)], wsp()).is_err());
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/57
