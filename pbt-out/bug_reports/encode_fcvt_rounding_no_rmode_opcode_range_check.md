@@ -1,61 +1,38 @@
-# BUG: `encode_fcvt_rounding` performs no range validation on `rmode` / `opcode`
+# Bug Report: `encode_fcvt_rounding` performs no range validation on `rmode` / `opcode`
 
-- **File:** `src/backend/arm/assembler/encoder/fp_scalar.rs`
-- **Function:** `encode_fcvt_rounding(operands, rmode, opcode)`
-- **Severity:** Medium (silent encoding corruption — produces architecturally
-  invalid instructions instead of an error)
-- **Test that exposes it:** `prop_fcvt_rounding_rejects_oversized_rmode_and_opcode`
-  (FAILS). The four companion properties (field placement, sf/ftype derivation,
-  determinism, out-of-range register / arity rejection) PASS.
+**Target:** `src/backend/arm/assembler/encoder/fp_scalar.rs` → `encode_fcvt_rounding`
+**Severity:** Medium
 
 ## Summary
 
-`encode_fcvt_rounding` ORs `rmode` and `opcode` into fixed-width instruction
-fields with **no range check**:
+`encode_fcvt_rounding` ORs `rmode` and `opcode` into fixed-width instruction fields with **no range check**. Per ARMv8-A, `rmode` is a **2-bit** field at bits [20:19] (legal values 0–3) and `opcode` is a **3-bit** field at bits [18:16] (legal values 0–7). Values outside these ranges are not masked or rejected; they spill into neighbouring fields, corrupting `ftype` and `rmode`.
+
+## Root Cause
 
 ```rust
 let word = ((sf << 31) | (0b11110 << 24) | (ftype << 22)
     | (1 << 21) | (rmode << 19) | (opcode << 16)) | (rn << 5) | rd;
 ```
 
-Per the ARMv8-A "Floating-point<->integer conversions" encoding
-(`sf 00 11110 ftype 1 rmode opcode 000000 Rn Rd`), `rmode` is a **2-bit** field
-at bits [20:19] (legal values 0–3) and `opcode` is a **3-bit** field at bits
-[18:16] (legal values 0–7). Values outside these ranges are not masked or
-rejected; they spill into the neighbouring fields:
+No validation that `rmode <= 0b11` or `opcode <= 0b111` before encoding.
 
-- `rmode >= 4` (e.g. `rmode = 8`) sets bit 22, **flipping `ftype`** — a single-
-  precision source (`ftype = 00`) is silently re-encoded as double precision
-  (`ftype = 01`). It also touches the fixed bit 21 (coincidentally already `1`,
-  but only by luck).
-- `opcode >= 8` (e.g. `opcode = 8`) sets bit 19, **corrupting the `rmode`
-  field**.
+## Reproduction
 
-## Concrete corruption (computed)
+**Input:** `encode_fcvt_rounding([w0,s0], 8, 0)` (rmode=8 exceeds 2-bit field)
 
-For `w0, s0` operands (sf=0, ftype=00), `rmode=0`, `opcode=0`:
+**Expected:** `Err` — rmode exceeds 2-bit field [20:19]
 
-| call                                  | encoded word | ftype[23:22] | rmode[20:19] | note |
-|---------------------------------------|--------------|--------------|--------------|------|
-| `encode_fcvt_rounding([w0,s0], 0, 0)` | `0x1E200000` | 00 (single)  | 00           | correct |
-| `encode_fcvt_rounding([w0,s0], 8, 0)` | `0x1E600000` | **01 (double!)** | 00       | single→double silently |
+**Actual:** `Ok(Word(0x1E600000))` — silently corrupts ftype (single→double)
 
-So passing `rmode = 8` (a 4-bit value into a 2-bit field) rewrites the source-
-precision selector and emits `0x1E600000`, which the CPU decodes as a
-**double-precision** conversion — a different instruction from the one the
-caller asked for. No `Err` is returned.
+**Minimal failing input:** rmode = 4 or opcode = 8
 
 ## Impact
 
-The function is called for the FCVT family (FCVTNS/NU/PS/PU/MS/MU/ZS/ZU/AS/AU).
-The only thing keeping the fields legal today is the caller passing in-range
-constants. Any caller bug, typo, or future addition that supplies an oversized
-`rmode`/`opcode` produces a valid-looking but semantically wrong machine word,
-with no diagnostic.
+`rmode >= 4` corrupts `ftype`, silently re-encoding single-precision as double. `opcode >= 8` corrupts `rmode`. No diagnostic — produces architecturally invalid instructions instead of error.
 
-## Suggested fix
+## Suggested Fix
 
-Validate the field widths before encoding and return `Err` otherwise:
+Validate field widths before encoding:
 
 ```rust
 if rmode > 0b11 {
@@ -66,7 +43,13 @@ if opcode > 0b111 {
 }
 ```
 
-(Optionally also assert the destination is a GP register (W/X) and the source is
-an FP register (S/D), since `encode_fcvt_rounding` currently derives `sf`/`ftype`
-without verifying operand banks.)
+## Regression Property
+
+Failing property: `prop_fcvt_rounding_rejects_oversized_rmode_and_opcode`
+
+```rust
+prop_assert!(encode_fcvt_rounding(&[wreg(0), sreg(0)], 4, 0).is_err());
+prop_assert!(encode_fcvt_rounding(&[wreg(0), sreg(0)], 0, 8).is_err());
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/127
