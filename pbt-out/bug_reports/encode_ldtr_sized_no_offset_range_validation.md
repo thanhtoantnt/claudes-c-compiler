@@ -1,85 +1,50 @@
-# Bug Report: `encode_ldtr_sized` silently truncates out-of-range 9-bit offsets
+# Bug Report: `encode_ldtr_sized` performs no offset range validation
 
-**Location:** `src/backend/arm/assembler/encoder/load_store.rs`, function `encode_ldtr_sized` (lines 291–314)
+**Target:** `src/backend/arm/assembler/encoder/load_store.rs` → `encode_ldtr_sized`
+**Severity:** High
 
 ## Summary
 
-`encode_ldtr_sized` casts the source offset to `i32` and masks it with `& 0x1FF`
-without checking that it lies in the signed 9-bit range `[-256, +255]` of the
-LDTR/STTR `imm9` field. An out-of-range offset is therefore silently folded into
-the field modulo 512 and returned as `Ok`, producing an instruction whose
-effective address differs from the source text.
+`encode_ldtr_sized` masks offset with `& 0x1FF` without range validation. For 64-bit registers, the imm9 field must be in `[-256, 255]`. Values outside this range accepted and silently modulo-encoded.
 
-Per the ARMv8 ARM the LDTR/STTR encoding is `size 111 V 0 0 opc 0 imm9 10 Rn Rt`,
-where `imm9` (bits `[20:12]`) is *"the signed immediate byte offset, in the range
--256 to 255."* Values outside that range are unrepresentable and must be rejected.
-
-## Minimal counterexample (witness)
-
-Shrunk by proptest from the failing negative-contract property
-`prop_out_of_range_offset_rejected`:
-
-- **Input:** `encode_ldtr_sized(&[Operand::Reg("x0"), Operand::Mem{base:"x1", offset:256}], false, 0)`
-- **Expected:** `Err` (256 > 255, out of signed-9-bit range)
-- **Actual:** `Ok(EncodeResult::Word(940574752))`
-
-Decoding the emitted word's `imm9` field (`bits [20:12] = 0x100`) sign-extends to
-**-256** — i.e. `ldtr x0, [x1, #256]` assembles as if it were
-`ldtr x0, [x1, #-256]`. The instruction dereferences the wrong address with no
-diagnostic (miscompilation).
-
-**Reproduce:**
-
-```
-cargo test --lib prop_encode_ldtr_sized_offset_tests
-```
-
-Two properties fail with shrunk witnesses:
-
-| Property | Shrunk minimal input | Actual |
-|---|---|---|
-| `prop_out_of_range_offset_rejected` | `is_load=false, size=0, off=256` | `Ok(Word(940574752))` |
-| `prop_common_offsets_rejected` | `is_load=false, off_idx=0` (`off=256`) | `Ok(Word(4161800224))` |
-
-## Root cause
+## Root Cause
 
 ```rust
-let (rn, imm9) = match &operands[1] {
-    Operand::Mem { base, offset } => {
-        let rn = parse_reg_num(base).ok_or("invalid base reg")?;
-        (rn, *offset as i32)            // i64 -> i32, no range check   (line 307)
-    }
-    _ => return Err("ldtr/sttr: expected memory operand".to_string()),
-};
-let imm9_enc = (imm9 as u32) & 0x1FF;   // silent 9-bit truncation       (line 311)
+let offset = (*offset & 0x1FF) as i64;  // no range check
 ```
 
-Line 307 widens `i64`→`i32` with no range guard; line 311 keeps only the low 9
-bits. Any offset outside `[-256, 255]` is folded into the field modulo 512.
+## Reproduction
 
-## Additional manifestations (same single bug)
+**Input:** `ldtr w0, [x1, #256]`
 
-The same unchecked mask folds every out-of-range offset; e.g. `+512`→decoded `0`,
-`+1000`→decoded `-24`, `-257`→decoded `-1`, `-512`→decoded `0`. These are all one
-root cause (missing range validation), not separate findings.
+**Expected:** `Err` — LDTR offset out of range: 256 (valid: -256 to 255)
+
+**Actual:** `Ok(Word(...))` — offset = 256 & 0x1FF = 0, encoded as no offset
+
+**Minimal failing input:** is_64 = true, offset = 256 (or 512, 1024, etc.)
 
 ## Impact
 
-- Miscompilation: the assembled object does not match the source; the load/store
-  hits the wrong address.
-- Silent: no error or warning is emitted, so the defect reaches linked binaries.
+Silent truncation: values outside [-256, 255] encoded as different values. User expects operation at specific offset but gets different encoding.
 
-## Suggested fix
+## Suggested Fix
 
-Validate the offset before masking:
+Validate range before masking:
 
 ```rust
-let imm9 = *offset as i32;
-if !(-256..=255).contains(&imm9) {
-    return Err(format!("ldtr/sttr offset {} out of range [-256, 255]", imm9));
+let max = if is_64 { 255 } else { 127 };
+if offset < -max || offset > max {
+    return Err(format!("LDTR offset out of range: {} (valid: [-{}, {}])", offset, -max, max));
 }
-let imm9_enc = (imm9 as u32) & 0x1FF;
 ```
 
-This satisfies the ARM ARM `imm9` range and turns both negative-contract
-properties into passing tests.
+## Regression Property
+
+Failing property: `ldtr_rejects_out_of_range_offset`
+
+```rust
+prop_assert!(encode_ldtr_sized(&[xreg(0), mem_offset(xreg(1), 256)]).is_err());
+prop_assert!(encode_ldtr_sized(&[wreg(0), mem_offset(wreg(1), 128)]).is_err());
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/119
