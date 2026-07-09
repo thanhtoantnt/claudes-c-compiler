@@ -1982,3 +1982,267 @@ mod tests {
         }
     }
 }
+
+// ─── Property-based tests for `div_by_const_function` ───────────────────────
+//
+// Oracle: DIFFERENTIAL. We build a minimal IrFunction containing a single
+// `dest = x <op> <const>` BinOp, run `div_by_const_function` on it, then
+// evaluate the resulting straight-line IR with a small type-aware interpreter
+// for a chosen input `x`. The interpreted result must equal Rust's native
+// `<op>` (which uses the same truncation-toward-zero semantics as C).
+//
+// This exercises the real entry point (not just the magic-number helpers):
+// the dispatcher, the is_known_u32/is_known_i32 gating, every expand_* path
+// (32-bit, 64-bit, I64-promoted, negative divisor, power-of-2, add-fixup),
+// and the modulo = x - (x/d)*d lowering.
+#[cfg(test)]
+mod pbt_tests {
+    use super::div_by_const_function;
+    use crate::common::types::IrType;
+    use crate::ir::reexports::{
+        BasicBlock, BlockId, Instruction, IrBinOp, IrConst, IrFunction, Operand, Terminator, Value,
+    };
+    use proptest::prelude::*;
+    use std::collections::HashMap;
+
+    // ---- type-aware straight-line IR evaluator ----
+
+    fn width(ty: IrType) -> u32 {
+        (ty.size() as u32) * 8
+    }
+
+    fn mask(w: u32) -> u128 {
+        if w >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << w) - 1
+        }
+    }
+
+    /// Reinterpret the low `w` bits of `bits` as a signed integer of width `w`.
+    fn as_signed(bits: u128, w: u32) -> i128 {
+        let m = mask(w);
+        let b = bits & m;
+        let sign_bit = 1u128 << (w - 1);
+        if b & sign_bit != 0 {
+            (b | !m) as i128
+        } else {
+            b as i128
+        }
+    }
+
+    fn const_bits(c: IrConst, ty: IrType) -> u128 {
+        let m = mask(width(ty));
+        match c {
+            IrConst::I8(v) => (v as u8 as u128) & m,
+            IrConst::I16(v) => (v as u16 as u128) & m,
+            IrConst::I32(v) => (v as u32 as u128) & m,
+            IrConst::I64(v) => (v as u64 as u128) & m,
+            IrConst::I128(v) => (v as u128) & m,
+            IrConst::Zero => 0,
+            _ => 0,
+        }
+    }
+
+    fn read_op(vals: &HashMap<u32, u128>, op: &Operand, ty: IrType) -> u128 {
+        let m = mask(width(ty));
+        match op {
+            Operand::Value(v) => *vals.get(&v.0).unwrap_or(&0) & m,
+            Operand::Const(c) => const_bits(*c, ty),
+        }
+    }
+
+    /// Evaluate every instruction in `block` in order, returning a map of
+    /// destination Value id -> value bit-pattern. `inputs` seeds input Values.
+    fn eval_block(
+        block: &BasicBlock,
+        inputs: &HashMap<u32, u128>,
+    ) -> HashMap<u32, u128> {
+        let mut vals = inputs.clone();
+        for inst in &block.instructions {
+            match inst {
+                Instruction::BinOp { dest, op, lhs, rhs, ty } => {
+                    let w = width(*ty);
+                    let m = mask(w);
+                    let l = read_op(&vals, lhs, *ty);
+                    let r = read_op(&vals, rhs, *ty);
+                    let res: u128 = match op {
+                        IrBinOp::Add => l.wrapping_add(r) & m,
+                        IrBinOp::Sub => l.wrapping_sub(r) & m,
+                        IrBinOp::Mul => l.wrapping_mul(r) & m,
+                        IrBinOp::And => (l & r) & m,
+                        IrBinOp::Or => (l | r) & m,
+                        IrBinOp::Xor => (l ^ r) & m,
+                        IrBinOp::Shl => {
+                            if r >= w.into() { 0 } else { (l << (r as u32)) & m }
+                        }
+                        IrBinOp::LShr => {
+                            let s = (r % u128::from(w.max(1))) as u32;
+                            (l >> s) & m
+                        }
+                        IrBinOp::AShr => {
+                            let s = (r % u128::from(w.max(1))) as u32;
+                            ((as_signed(l, w) >> s) as u128) & m
+                        }
+                        IrBinOp::UDiv => {
+                            if r == 0 { 0 } else { (l / r) & m }
+                        }
+                        IrBinOp::URem => {
+                            if r == 0 { 0 } else { (l % r) & m }
+                        }
+                        IrBinOp::SDiv => {
+                            let ls = as_signed(l, w);
+                            let rs = as_signed(r, w);
+                            let min_val = -(1i128 << (w - 1));
+                            if rs == 0 {
+                                0
+                            } else if rs == -1 && ls == min_val {
+                                // overflow (UB in C); hardware yields MIN
+                                min_val as u128 & m
+                            } else {
+                                (ls / rs) as u128 & m
+                            }
+                        }
+                        IrBinOp::SRem => {
+                            let ls = as_signed(l, w);
+                            let rs = as_signed(r, w);
+                            let min_val = -(1i128 << (w - 1));
+                            if rs == 0 || (rs == -1 && ls == min_val) {
+                                0
+                            } else {
+                                (ls % rs) as u128 & m
+                            }
+                        }
+                    };
+                    vals.insert(dest.0, res);
+                }
+                Instruction::Cast { dest, src, from_ty, to_ty } => {
+                    let from_w = width(*from_ty);
+                    let to_w = width(*to_ty);
+                    let sval = read_op(&vals, src, *from_ty) & mask(from_w);
+                    // Recover the mathematical value: sign-extend if the source
+                    // is signed, zero-extend otherwise; then truncate/widen.
+                    let val: u128 = if from_ty.is_signed() {
+                        as_signed(sval, from_w) as u128
+                    } else {
+                        sval
+                    };
+                    vals.insert(dest.0, val & mask(to_w));
+                }
+                Instruction::Copy { dest, src } => {
+                    let sval = match src {
+                        Operand::Value(v) => *vals.get(&v.0).unwrap_or(&0),
+                        Operand::Const(c) => const_bits(*c, IrType::I64),
+                    };
+                    vals.insert(dest.0, sval);
+                }
+                _ => {}
+            }
+        }
+        vals
+    }
+
+    /// Build `dest = x <op> const`, run `div_by_const_function`, evaluate the
+    /// resulting IR for input `x_bits`, and return the resulting bit-pattern.
+    fn run_div_op(op: IrBinOp, ty: IrType, divisor: i64, x_bits: u128) -> u128 {
+        let x = Value(1);
+        let dest = Value(2);
+        let binop = Instruction::BinOp {
+            dest,
+            op,
+            lhs: Operand::Value(x),
+            rhs: Operand::Const(IrConst::from_i64(divisor, ty)),
+            ty,
+        };
+        let mut func = IrFunction::new("f".to_string(), IrType::Void, vec![], false);
+        func.next_value_id = 0;
+        func.blocks.push(BasicBlock {
+            label: BlockId(0),
+            instructions: vec![binop],
+            terminator: Terminator::Return(None),
+            source_spans: vec![],
+        });
+        let _ = div_by_const_function(&mut func);
+
+        let mut inputs = HashMap::new();
+        inputs.insert(1u32, x_bits);
+        let vals = eval_block(&func.blocks[0], &inputs);
+        *vals.get(&2).unwrap_or(&0)
+    }
+
+    proptest! {
+        // U32 unsigned division: native 32-bit path (expand_udiv32),
+        // including add-fixup divisors and powers of two.
+        #[test]
+        fn prop_udiv_u32(x in any::<u32>(), d in 2u32..=u32::MAX) {
+            let expected = x / d;
+            let actual = run_div_op(IrBinOp::UDiv, IrType::U32, d as i64, x as u128) as u32;
+            prop_assert_eq!(expected, actual);
+        }
+
+        // I32 signed division: positive, negative divisor (expand_sdiv_neg),
+        // and powers of two. Skip UB (div by 0; INT_MIN / -1).
+        #[test]
+        fn prop_sdiv_i32(x in any::<i32>(), d in any::<i32>()) {
+            if d == 0 { return Ok(()); }
+            if d == -1 && x == i32::MIN { return Ok(()); }
+            let expected = x / d;
+            let actual = run_div_op(IrBinOp::SDiv, IrType::I32, d as i64, x as u32 as u128) as i32;
+            prop_assert_eq!(expected, actual);
+        }
+
+        // U64 unsigned division: full 64-bit path (expand_udiv64, 128-bit mul).
+        // lhs is not marked is_known_u32, so the 64-bit expansion is selected.
+        #[test]
+        fn prop_udiv_u64(x in any::<u64>(), d in 2u64..=u64::MAX) {
+            let expected = x / d;
+            let actual = run_div_op(IrBinOp::UDiv, IrType::U64, d as i64, x as u128) as u64;
+            prop_assert_eq!(expected, actual);
+        }
+
+        // I64 signed division: full 64-bit signed path (expand_sdiv64,
+        // expand_sdiv64_neg). Skip UB (div by 0; INT64_MIN / -1).
+        #[test]
+        fn prop_sdiv_i64(x in any::<i64>(), d in any::<i64>()) {
+            if d == 0 { return Ok(()); }
+            if d == -1 && x == i64::MIN { return Ok(()); }
+            let expected = x / d;
+            let actual = run_div_op(IrBinOp::SDiv, IrType::I64, d, x as u64 as u128) as i64;
+            prop_assert_eq!(expected, actual);
+        }
+
+        // Modulo = x - (x/d)*d across all four (type, signedness) paths.
+        #[test]
+        fn prop_modulo(
+            xu in any::<u32>(), du in 2u32..=u32::MAX,
+            xs in any::<i32>(), ds in any::<i32>(),
+            xu64 in any::<u64>(), du64 in 2u64..=u64::MAX,
+            xs64 in any::<i64>(), ds64 in any::<i64>(),
+        ) {
+            // U32 URem (expand_urem32)
+            prop_assert_eq!(
+                xu % du,
+                run_div_op(IrBinOp::URem, IrType::U32, du as i64, xu as u128) as u32
+            );
+            // I32 SRem (expand_srem32; negative divisor -> x % |d|)
+            if ds != 0 && !(ds == -1 && xs == i32::MIN) {
+                prop_assert_eq!(
+                    xs % ds,
+                    run_div_op(IrBinOp::SRem, IrType::I32, ds as i64, xs as u32 as u128) as i32
+                );
+            }
+            // U64 URem (expand_urem64)
+            prop_assert_eq!(
+                xu64 % du64,
+                run_div_op(IrBinOp::URem, IrType::U64, du64 as i64, xu64 as u128) as u64
+            );
+            // I64 SRem (expand_srem64)
+            if ds64 != 0 && !(ds64 == -1 && xs64 == i64::MIN) {
+                prop_assert_eq!(
+                    xs64 % ds64,
+                    run_div_op(IrBinOp::SRem, IrType::I64, ds64, xs64 as u64 as u128) as i64
+                );
+            }
+        }
+    }
+}

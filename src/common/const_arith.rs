@@ -860,3 +860,160 @@ mod truncate_and_extend_bits_pbt {
         }
     }
 }
+
+#[cfg(test)]
+mod eval_const_binop_pbt {
+    use super::eval_const_binop;
+    use crate::frontend::parser::ast::BinOp;
+    use crate::ir::reexports::IrConst;
+    use proptest::prelude::*;
+
+    // IrConst does not derive PartialEq, so normalize integer results into a
+    // (variant-tag, value) tuple for structural comparison.
+    fn classify_int(c: Option<IrConst>) -> (u8, i64) {
+        match c.expect("integer binop returned None") {
+            IrConst::I64(v) => (0, v),
+            IrConst::I32(v) => (1, v as i64),
+            IrConst::I128(v) => (2, v as i64),
+            IrConst::I8(v) => (3, v as i64),
+            IrConst::I16(v) => (4, v as i64),
+            IrConst::Zero => (5, 0),
+            other => panic!("unexpected non-integer result: {:?}", other),
+        }
+    }
+
+    proptest! {
+        // Negative contract: integer Div/Mod by zero must return None for every
+        // integer operand variant, width, and signedness. (C: division by zero is
+        // undefined; the compiler must signal it rather than produce a value.)
+        #[test]
+        fn integer_div_mod_by_zero_return_none(
+            variant in 0u8..5,
+            value in any::<i64>(),
+            is_32bit in any::<bool>(),
+            is_unsigned in any::<bool>(),
+            is_div in any::<bool>(),
+        ) {
+            let lhs = match variant {
+                0 => IrConst::I8(value as i8),
+                1 => IrConst::I16(value as i16),
+                2 => IrConst::I32(value as i32),
+                3 => IrConst::I64(value),
+                _ => IrConst::Zero,
+            };
+            let op = if is_div { BinOp::Div } else { BinOp::Mod };
+            let result = eval_const_binop(&op, &lhs, &IrConst::I64(0), is_32bit, is_unsigned, false, false);
+            prop_assert!(
+                result.is_none(),
+                "integer div/mod by zero must be None, got {:?}",
+                result
+            );
+        }
+
+        // Differential oracle (64-bit int path): for the ops where signedness is
+        // irrelevant at 64-bit width, the result must equal native wrapping i64
+        // arithmetic, always emitted as I64.
+        #[test]
+        fn sixtyfour_bit_arithmetic_matches_wrapping_reference(
+            op_idx in 0u8..6,
+            l in any::<i64>(),
+            r in any::<i64>(),
+            is_unsigned in any::<bool>(),
+        ) {
+            let expected: i64 = match op_idx {
+                0 => l.wrapping_add(r),
+                1 => l.wrapping_sub(r),
+                2 => l.wrapping_mul(r),
+                3 => l & r,
+                4 => l | r,
+                _ => l ^ r,
+            };
+            let op = match op_idx {
+                0 => BinOp::Add, 1 => BinOp::Sub, 2 => BinOp::Mul,
+                3 => BinOp::BitAnd, 4 => BinOp::BitOr, _ => BinOp::BitXor,
+            };
+            let got = eval_const_binop(&op, &IrConst::I64(l), &IrConst::I64(r), false, is_unsigned, false, false);
+            prop_assert_eq!(classify_int(got), (0u8, expected));
+        }
+
+        // Differential oracle (64-bit division): signedness must drive the
+        // semantics — signed div/rem truncate toward zero with the dividend's
+        // sign, unsigned div/rem operate on the bit pattern as u64. Result is
+        // always I64 on the 64-bit path.
+        #[test]
+        fn sixtyfour_bit_division_respects_signedness(
+            is_div in any::<bool>(),
+            is_unsigned in any::<bool>(),
+            l in any::<i64>(),
+            r in any::<i64>(),
+        ) {
+            prop_assume!(r != 0);
+            let expected: i64 = if is_unsigned {
+                let lu = l as u64;
+                let ru = r as u64;
+                (if is_div { lu.wrapping_div(ru) } else { lu.wrapping_rem(ru) }) as i64
+            } else {
+                if is_div { l.wrapping_div(r) } else { l.wrapping_rem(r) }
+            };
+            let op = if is_div { BinOp::Div } else { BinOp::Mod };
+            let got = eval_const_binop(&op, &IrConst::I64(l), &IrConst::I64(r), false, is_unsigned, false, false);
+            prop_assert_eq!(classify_int(got), (0u8, expected));
+        }
+
+        // Differential oracle (32-bit truncation): Add/Sub/Mul results must be
+        // the low 32 bits of the wrapping op. Signed results land in I32
+        // (sign-extended); unsigned results land in I64 zero-extended per the
+        // documented width-preservation rule.
+        #[test]
+        fn thirtytwo_bit_results_truncate_to_width(
+            op_idx in 0u8..3,
+            is_unsigned in any::<bool>(),
+            l in any::<i64>(),
+            r in any::<i64>(),
+        ) {
+            let raw: u64 = match op_idx {
+                0 => (l as u64).wrapping_add(r as u64),
+                1 => (l as u64).wrapping_sub(r as u64),
+                _ => (l as u64).wrapping_mul(r as u64),
+            };
+            let op = match op_idx { 0 => BinOp::Add, 1 => BinOp::Sub, _ => BinOp::Mul };
+            let got = eval_const_binop(&op, &IrConst::I64(l), &IrConst::I64(r), true, is_unsigned, is_unsigned, is_unsigned);
+            if is_unsigned {
+                // zero-extended low 32 bits, stored as I64
+                prop_assert_eq!(classify_int(got), (0u8, (raw as u32) as i64));
+            } else {
+                // sign-extended low 32 bits, stored as I32
+                prop_assert_eq!(classify_int(got), (1u8, (raw as i32) as i64));
+            }
+        }
+
+        // Dispatch oracle: an I128 operand routes to native i128 arithmetic
+        // (no truncation), and an F64 operand routes to native f64 arithmetic.
+        #[test]
+        fn non_integer_paths_dispatch_correctly(
+            mode in 0u8..2,
+            l in any::<i64>(),
+            r in any::<i64>(),
+        ) {
+            if mode == 0 {
+                // i128 path: full 128-bit wrapping add, emitted as I128
+                let li = l as i128;
+                let ri = r as i128;
+                let got = eval_const_binop(&BinOp::Add, &IrConst::I128(li), &IrConst::I128(ri), false, false, false, false);
+                match got {
+                    Some(IrConst::I128(v)) => prop_assert_eq!(v, li.wrapping_add(ri)),
+                    other => prop_assert!(false, "i128 add must yield I128, got {:?}", other),
+                }
+            } else {
+                // float path: native f64 add, emitted as F64
+                let lf = l as f64;
+                let rf = r as f64;
+                let got = eval_const_binop(&BinOp::Add, &IrConst::F64(lf), &IrConst::F64(rf), false, false, false, false);
+                match got {
+                    Some(IrConst::F64(v)) => prop_assert_eq!(v.to_bits(), (lf + rf).to_bits()),
+                    other => prop_assert!(false, "f64 add must yield F64, got {:?}", other),
+                }
+            }
+        }
+    }
+}
