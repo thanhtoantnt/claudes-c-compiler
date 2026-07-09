@@ -1,104 +1,66 @@
-# Bug Report — `encode_bfm` accepts out-of-range `immr`/`imms` and silently corrupts the opcode
+# Bug Report: `encode_bfm` accepts out-of-range `immr`/`imms` and silently corrupts the opcode
 
-**File:** `src/backend/arm/assembler/encoder/bitfield.rs`
-**Function:** `encode_bfm` (Bitfield Move — `BFM`)
-**Severity:** High (silent miscompilation: emits an instruction with a corrupted `N` / opcode field instead of failing at assembly time)
-**Status:** Confirmed by property-based test (expected-fail).
+**Target:** `src/backend/arm/assembler/encoder/bitfield.rs` → `encode_bfm`
+**Severity:** High
 
 ## Summary
 
-`encode_bfm` casts the parsed immediates with `as u32` and ORs them directly into
-the 32-bit instruction word without any range validation:
+`encode_bfm` casts parsed immediates with `as u32` and ORs directly into instruction word without range validation. Overflow bits spill into adjacent fixed/structural fields: `immr = 64` sets bit 22 (`N`), violating `N == sf`; `imms = 64` sets bit 16 (low bit of `immr`).
+
+## Root Cause
 
 ```rust
-pub(crate) fn encode_bfm(operands: &[Operand]) -> Result<EncodeResult, String> {
-    let (rd, is_64) = get_reg(operands, 0)?;
-    let (rn, _) = get_reg(operands, 1)?;
-    let immr = get_imm(operands, 2)? as u32;   // ← no range check
-    let imms = get_imm(operands, 3)? as u32;   // ← no range check
-    let sf = sf_bit(is_64);
-    let n = if is_64 { 1u32 } else { 0u32 };
-    // BFM: sf 01 100110 N immr imms Rn Rd
-    let word = (sf << 31) | (0b01 << 29) | (0b100110 << 23) | (n << 22)
-             | (immr << 16) | (imms << 10) | (rn << 5) | rd;
-    Ok(EncodeResult::Word(word))
-}
+let immr = get_imm(operands, 2)? as u32;   // no range check
+let imms = get_imm(operands, 3)? as u32;   // no range check
+let word = (sf << 31) | (0b01 << 29) | (0b100110 << 23) | (n << 22)
+         | (immr << 16) | (imms << 10) | (rn << 5) | rd;
 ```
-
-## Why it is a bug
-
-Per the ARM Architecture Reference Manual (Bitfield encoding, `BFM`/`UBFM`/`SBFM`):
-
-```
-sf  opc[30:29]  100110  N[22]  immr[21:16]  imms[15:10]  Rn[9:5]  Rd[4:0]
-```
-
-- `immr` and `imms` are **6-bit fields** — architecturally `0..=63`.
-- The encoding is **CONSTRAINED**: `N == sf`.
-- An out-of-range immediate does not simply "truncate the field"; the
-  overflow bits spill into **adjacent fixed/structural fields**:
-  - `immr = 64` → `64 << 16 = 0x0040_0000` sets **bit 22 = `N`**, violating
-    `N == sf` and producing a structurally UNDEFINED / UNALLOCATED encoding.
-  - `imms = 64` → `64 << 10 = 0x0001_0000` sets bit 16 (the low bit of the
-    `immr` field), corrupting the field value.
-  - A negative immediate (e.g. `-1`) wraps via `as u32` to `0xFFFF_FFFF`,
-    which ORs `1`s across `sf`, `opc`, the fixed `100110`, `N`, `immr`,
-    `imms`, `Rn`, and `Rd` simultaneously — total opcode corruption.
-
-A correct assembler must reject these inputs with `Err`, not emit a silently
-mangled word. The same defect exists in the sibling functions
-`encode_ubfm` and `encode_sbfm` (and the alias encoders derived from them).
 
 ## Reproduction
 
-Property test added in `src/backend/arm/assembler/encoder/bitfield.rs`,
-module `prop_encode_bfm_tests::prop_rejects_out_of_range_immediates`
-(expected to fail — documents the contract violation):
+**Input:** `bfm x0, x0, #64, #0`
 
-```
-cargo test --lib prop_encode_bfm
-```
+**Expected:** `Err` — immr 64 out of range [0,63]
 
-Minimal failing input (proptest-shrunk):
+**Actual:** `Ok(Word(0xB3400000))` — N silently flipped to 1 (violates N==sf for 32-bit)
 
-```
-immr = 64   →  Ok(Word(3007316000))   ; expected Err
-             word = 0xB340_0000 = sf=1 opc=01 100110 N=1 immr=0 ...   (N silently flipped)
-```
+**Minimal failing input:** immr = 64, imms = 0, is_64 = true
 
-For a 64-bit register (`sf=1`, so `N` *should* be 1) the corruption is
-invisible at the `N` bit, but `imms=64` and any `immr`/`imms` ≥ 64 still
-produce a word whose decoded `immr`/`imms` no longer match the assembler
-input — i.e. the encoded instruction does not do what the source says. For a
-32-bit register (`sf=0`, `N` *should* be 0), `immr=64` flips `N` to 1,
-yielding an **unallocated** encoding.
+## Impact
 
-## Properties written for `encode_bfm`
+Silent opcode corruption. For 32-bit registers (`sf=0`, N should be 0), `immr=64` flips N to 1 → unallocated encoding. `as u32` on negative immediates wraps to `0xFFFF_FFFF`, ORing 1s across all fields. Same defect in `encode_ubfm`, `encode_sbfm`, and alias encoders.
 
-| # | Property | Oracle | Result |
-|---|----------|--------|--------|
-| A | `prop_bfm_field_placement` | structural (field positions, opc=01, N==sf) | ✅ pass |
-| B | `prop_bfm_xor_siblings` | differential vs UBFM/SBFM (only opc[30:29] differs) | ✅ pass |
-| C | `prop_bfm_equals_bfxil_alias` | differential vs `BFXIL` alias | ✅ pass |
-| D | `prop_width_changes_only_sf_and_n` | register-width differential | ✅ pass |
-| E | `prop_rejects_out_of_range_immediates` | **negative / error contract** | ❌ **FAIL (this bug)** |
-| F | `prop_rejects_malformed_operands` | negative / error contract (missing/wrong types) | ✅ pass |
+## Suggested Fix
 
-## Suggested fix
-
-Validate `immr` and `imms` before encoding (and enforce `N == sf`):
+Validate immediates before encoding:
 
 ```rust
-if immr > 63 {
+if immr < 0 || immr > 63 {
     return Err(format!("BFM: immr {} out of range [0,63]", immr));
 }
-if imms > 63 {
+if imms < 0 || imms > 63 {
     return Err(format!("BFM: imms {} out of range [0,63]", imms));
 }
 ```
 
-`get_imm` returns an `i64`; reject negatives there (or here) before the
-`as u32` cast. Apply the same guard to `encode_ubfm`, `encode_sbfm`, and the
-alias encoders (`encode_ubfx`, `encode_sbfx`, `encode_bfi`, `encode_bfxil`,
-`encode_sbfiz`, `encode_ubfiz`).
+## Regression Property
+
+Failing property: `prop_rejects_out_of_range_immediates`
+
+```rust
+prop_assert!(encode_bfm(&[xreg(0), xreg(0), imm(64), imm(0)]).is_err());
+prop_assert!(encode_bfm(&[xreg(0), xreg(0), imm(-1), imm(0)]).is_err());
+```
+
+## PBT Results (module `prop_encode_bfm_tests`)
+
+| Property | Result |
+|---|---|
+| `prop_bfm_field_placement` | PASS |
+| `prop_bfm_xor_siblings` | PASS |
+| `prop_bfm_equals_bfxil_alias` | PASS |
+| `prop_width_changes_only_sf_and_n` | PASS |
+| `prop_rejects_out_of_range_immediates` | **FAIL** |
+| `prop_rejects_malformed_operands` | PASS |
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/158
