@@ -69,9 +69,7 @@ mod neon_float_three_same_pbt;
 #[cfg(test)]
 mod neon_ld1r_pbt;
 #[cfg(test)]
-mod neon_float_two_misc_pbt;
-#[cfg(test)]
-mod neon_ldnr_pbt;
+mod neon_qshrn_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
