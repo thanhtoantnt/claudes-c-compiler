@@ -1,95 +1,53 @@
-# Bug Report: `encode_msub` silently accepts SP (encodes it as XZR)
+# Bug Report: `encode_msub` silently accepts `sp` / `wsp` as accumulators
 
-**Location:** `src/backend/arm/assembler/encoder/data_processing.rs`, function `encode_msub`
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_msub`
+**Severity:** High
 
 ## Summary
 
-`encode_msub` resolves every operand through the shared `get_reg` helper, which
-maps the stack-pointer name `"sp"` (and `"wsp"`) to register number **31** — the
-encoding slot for the **zero register (XZR/WZR)**. For the data-processing
-(3-source) class, ARMv8 defines register 31 as XZR, *not* SP. As a result,
-`msub` instructions that name SP in any operand are accepted and silently
-re-encoded as the zero register, producing a **different instruction** with no
-diagnostic.
+`parse_reg_num` maps both `sp`/`wsp` and `xzr`/`wzr` to register number 31. MSUB encoding reserves `Ra = 31` for **XZR/WZR** (zero accumulator), not SP. `msub x0, x1, x2, sp` accepted and encoded as `msub x0, x1, x2, xzr`.
 
-This is the same root cause already characterized (but not fixed) for the
-sibling encoders `encode_mul` / `encode_madd` in this same file.
+## Root Cause
+
+```rust
+let (ra, _) = get_reg(operands, 3)?;   // sp/wsp → 31, treated as XZR/WZR
+```
+
+No SP-form validation in `encode_msub`.
 
 ## Reproduction
 
-No PBT property fails — the field-placement, differential-vs-MADD, width,
-determinism, and error-contract properties all pass (`PROPTEST_CASES=2000`).
-The finding was surfaced by code analysis of `get_reg`:
+**Input:** `msub x0, x1, x2, sp`
 
-```rust
-pub fn parse_reg_num(name: &str) -> Option<u32> {
-    let name = name.to_lowercase();
-    match name.as_str() {
-        "sp" | "wsp" => Some(31),   // <-- SP and XZR share slot 31
-        ...
-```
+**Expected:** `Err` — MSUB Ra must not be SP (use XZR/WZR for zero accumulator)
 
-```rust
-pub(crate) fn encode_msub(operands: &[Operand]) -> Result<EncodeResult, String> {
-    let (rd, is_64) = get_reg(operands, 0)?;
-    let (rn, _) = get_reg(operands, 1)?;
-    let (rm, _) = get_reg(operands, 2)?;
-    let (ra, _) = get_reg(operands, 3)?;   // no SP rejection anywhere
-    ...
-```
+**Actual:** `Ok(Word(...))` — encoded as `msub x0, x1, x2, xzr`
 
-Minimal input:
-
-```text
-msub x0, x1, x2, sp
-```
-
-This is encoded as `msub x0, x1, x2, xzr`, i.e. the *alias* `mneg x0, x1, x2`
-(`Rd = -Rn*Rm` instead of `Rd = SP - Rn*Rm`). The SP operand is lost. The same
-applies to SP in Rd, Rn, or Rm.
+**Minimal failing input:** rd=0, rn=1, rm=2, ra="sp"
 
 ## Impact
 
-Silent miscompilation with a register-class error. An assembler that should
-reject `msub ..., sp` (ARMv8: such encodings are UNPREDICTABLE/CONSTRAINED
-UNPREDICTABLE for this instruction class) instead emits a semantically
-distinct instruction. This is especially dangerous because MSUB with Ra=SP is
-a plausible hand-written idiom for subtracting a product from the stack
-pointer.
+SP operand silently replaced by XZR, producing multiply-subtract with zero accumulator instead of using SP. No diagnostic, silently wrong operation.
 
-## Suggested fix
+## Suggested Fix
 
-The data-processing (3-source) instructions permit only X0–X30 or XZR in
-every operand position. Reject SP/WSP in `encode_msub` (and consistently in
-`encode_madd`, `encode_mneg`, `encode_smaddl`, `encode_umaddl`, `encode_mul`,
-`encode_smull`, `encode_umull`, `encode_smulh`, `encode_umulh`):
+Reject SP/WSP for Ra:
 
 ```rust
-fn reject_sp(operands: &[Operand]) -> Result<(), String> {
-    for (i, o) in operands.iter().enumerate() {
-        if let Operand::Reg(n) = o {
-            let lo = n.to_lowercase();
-            if lo == "sp" || lo == "wsp" {
-                return Err(format!("SP not permitted in operand {} of msub", i));
-            }
-        }
-    }
-    Ok(())
+let (ra, _) = get_reg(operands, 3)?;
+let ra_name = match &operands[3] { Operand::Reg(r) => r.to_lowercase(), _ => String::new() };
+if ra_name == "sp" || ra_name == "wsp" {
+    return Err("MSUB Ra must not be SP (use XZR/WZR for zero accumulator)".into());
 }
 ```
 
-Call it at the top of `encode_msub` before `get_reg`.
+## Regression Property
 
-## Test coverage added
+Failing property: `msub_rejects_sp_operand`
 
-Five `proptest!` properties added to the `tests` module of
-`data_processing.rs` (all passing):
+```rust
+prop_assert!(encode_msub(&[xreg(0), xreg(1), xreg(2)], sp()).is_err());
+prop_assert!(encode_msub(&[wreg(0), wreg(1), wreg(2)], wsp()).is_err());
+```
 
-| Property | Oracle |
-|---|---|
-| `msub_full_field_placement` | Reference (ARMv8 fixed-format field layout, 0..=31) |
-| `msub_differs_from_madd_only_in_bit15` | Differential vs `encode_madd` |
-| `msub_sf_tracks_rd_width` | Width contract (sf bit) |
-| `msub_is_deterministic` | Purity |
-| `msub_missing_operands_return_err` | Negative/error contract (< 4 operands → Err) |
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/69
