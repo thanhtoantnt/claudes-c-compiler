@@ -93,4 +93,4 @@ fn mvni_rejects_invalid_shift_kind() {
 }
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/197
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/196

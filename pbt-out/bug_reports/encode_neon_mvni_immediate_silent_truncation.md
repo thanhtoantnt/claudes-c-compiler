@@ -79,4 +79,4 @@ fn mvni_rejects_out_of_range_immediate() {
 }
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/196
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/195

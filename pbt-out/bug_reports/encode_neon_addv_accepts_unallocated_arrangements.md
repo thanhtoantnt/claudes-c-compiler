@@ -97,4 +97,4 @@ fn addv_rejects_unallocated_arrangements() {
 }
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/191
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/190

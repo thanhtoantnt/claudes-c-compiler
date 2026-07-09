@@ -51,4 +51,4 @@ prop_assert!(encode_neon_pmull(&[neon_reg(0, "8b"), neon_reg(1, "8b"), neon_reg(
 prop_assert!(encode_neon_pmull(&[neon_reg(0, "2s"), neon_reg(1, "2s"), neon_reg(2, "2s")], false).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/187
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/186

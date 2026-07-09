@@ -47,4 +47,4 @@ prop_assert!(encode_neon_cmp_zero("cmeq", &[neon_reg(0, "2d"), neon_reg(1, "2d")
 prop_assert!(encode_neon_cmp_zero("cmge", &[neon_reg(0, "1d"), neon_reg(1, "1d")]).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/185
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/184

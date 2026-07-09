@@ -42,4 +42,4 @@ Failing property: `zip_uzp_rejects_unallocated_1d_arrangements`
 prop_assert!(encode_neon_zip_uzp(&[neon_reg(0, "1d"), neon_reg(1, "1d"), neon_reg(2, "1d")], 0b001, false).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/188
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/187

@@ -45,4 +45,4 @@ prop_assert!(encode_neon_rev64(&[neon_reg(0, "1d"), neon_reg(1, "1d")]).is_err()
 prop_assert!(encode_neon_rev64(&[neon_reg(0, "2d"), neon_reg(1, "2d")]).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/186
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/185

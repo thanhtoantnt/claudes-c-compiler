@@ -50,4 +50,4 @@ prop_assert!(encode_neon_scalar_three_same(&[dreg(0), dreg(1), dreg(2)], 0, 0, 4
 prop_assert!(encode_neon_scalar_three_same(&[dreg(0), dreg(1), dreg(2)], 0, 32, 0).is_err()); // opcode
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/190
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/189

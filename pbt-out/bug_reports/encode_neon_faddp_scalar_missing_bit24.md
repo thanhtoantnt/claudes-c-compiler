@@ -130,4 +130,4 @@ fn scalar_missing_bit24() {
 }
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/194
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/193
