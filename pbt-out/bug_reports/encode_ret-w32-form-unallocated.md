@@ -1,80 +1,53 @@
-# Bug — `encode_ret`: 32-bit W-form register wrongly accepted
+# Bug Report: `encode_ret` silently accepts W32 form (UNALLOCATED)
 
-**Target:** `src/backend/arm/assembler/encoder/compare_branch.rs`, function `encode_ret`
+**Target:** `src/backend/arm/assembler/encoder/compare_branch.rs` → `encode_ret`
+**Severity:** Medium
+
+## Summary
+
+`encode_ret` accepts `w`-register operands. `RET` is defined only with `<Xn>` (64-bit). There is no `<Wn>` form. `ret w0` accepted and encodes as `ret x0` — UNALLOCATED.
+
+## Root Cause
 
 ```rust
-pub(crate) fn encode_ret(operands: &[Operand]) -> Result<EncodeResult, String> {
-    let rn = if operands.is_empty() {
-        30 // default to x30 (LR)
-    } else {
-        get_reg(operands, 0)?.0          // <-- discards the is_64 flag
-    };
-    let word = 0xd65f0000 | (rn << 5);
-    Ok(EncodeResult::Word(word))
-}
+let (rn, _) = get_reg(operands, 0)?;   // is_64 discarded
+let word = 0xd65f0000 | (rn << 5);
 ```
 
-## The bug
+No width validation.
 
-`get_reg` returns `(num, is_64)`, but `encode_ret` binds only `.0` and throws away
-the width. The `RET` instruction's operand is a 64-bit **general-purpose** register
-`<Xn>` (ARM ARM C5.6.20); the 32-bit `W` form is **unallocated** and a conforming
-assembler rejects it:
+## Reproduction
 
-```
-$ echo "ret w0" | clang --target=aarch64 -c -x assembler - -o /dev/null
--:1:5: error: invalid operand for instruction
-```
+**Input:** `ret w0`
 
-Because the width is ignored, `ret w0` and `ret x0` emit byte-identical words.
+**Expected:** `Err` — RET requires 64-bit (X) register
 
-## Minimal input
+**Actual:** `Ok(Word(0xD65F0020))` — encodes as `ret x0` (W0 number used as X0)
 
-| Mnemonic | Encoded word | Reference (clang) | Expected here |
-|---|---|---|---|
-| `ret w0` | `0xD65F0000` (== `ret x0`) | error: invalid operand | `Err` |
-| `ret w30` | `0xD65F0000 \| (30<<5)` (== `ret x30`) | error | `Err` |
-
-## Actual behavior (observed failure)
-
-`encode_ret(&[Operand::Reg("w0".into())])` returns
-`Ok(EncodeResult::Word(3596550144))` — `3596550144 == 0xD65F0000`, bit-identical to
-`encode_ret(&[Operand::Reg("x0".into())])`. Confirmed by a **failing** proptest:
-
-```
-prop_rejects_32bit_w_form
-  panicked: ret w0 must be rejected (32-bit form is unallocated per ARM ARM C5.6.20),
-            got Ok(Word(3596550144))
-  minimal failing input: n = 0
-```
+**Minimal failing input:** rn = "w0"
 
 ## Impact
 
-Silent mis-assembly of an architecturally unallocated instruction with no
-diagnostic. The same width-discard defect affects the sibling `encode_br` and
-`encode_blr` (documented separately) and any other encoder that binds
-`(rn, _) = get_reg(...).0`.
+32-bit register operands accepted and encoded as 64-bit, producing wrong encodings.
 
-## Property that locks it (FAILING — bug confirmed)
+## Suggested Fix
 
-`prop_encode_ret_tests::prop_rejects_32bit_w_form` (in `compare_branch.rs`) is a
-**negative-contract** property asserting `encode_ret(&[Reg("wN")]).is_err()` for
-`N in 0..=30`. It **FAILS** against the current implementation. Once validation is
-added it passes unchanged.
-
-## Fix
-
-Reject the `W` form by inspecting `is_64`:
+Validate width:
 
 ```rust
-let rn = if operands.is_empty() {
-    30
-} else {
-    let (num, is_64) = get_reg(operands, 0)?;
-    if !is_64 {
-        return Err("ret requires a 64-bit register (Xn)".into());
-    }
-    num
-};
+let (rn, is_64) = get_reg(operands, 0)?;
+if !is_64 {
+    return Err("RET requires 64-bit (X) register".into());
+}
 ```
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/91
+
+## Regression Property
+
+Failing property: `prop_rejects_w32_form`
+
+```rust
+prop_assert!(encode_ret(&[Operand::Reg("w0".into())]).is_err());
+prop_assert!(encode_ret(&[Operand::Reg("w30".into())]).is_err());
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/156

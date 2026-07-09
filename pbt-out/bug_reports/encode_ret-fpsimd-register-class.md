@@ -1,95 +1,57 @@
-# Bug — `encode_ret`: FP/SIMD register class wrongly accepted
+# Bug Report: `encode_ret` silently accepts FP/SIMD register class
 
-**Target:** `src/backend/arm/assembler/encoder/compare_branch.rs`, function `encode_ret`
+**Target:** `src/backend/arm/assembler/encoder/compare_branch.rs` → `encode_ret`
+**Severity:** Medium
 
-```rust
-pub(crate) fn encode_ret(operands: &[Operand]) -> Result<EncodeResult, String> {
-    let rn = if operands.is_empty() {
-        30 // default to x30 (LR)
-    } else {
-        get_reg(operands, 0)?.0
-    };
-    let word = 0xd65f0000 | (rn << 5);
-    Ok(EncodeResult::Word(word))
-}
-```
+## Summary
 
-## The bug
+`parse_reg_num` accepts FP/SIMD register prefixes (`d`, `s`, `q`, `v`, `h`, `b`) as if they were GP registers. `RET` operand must be GP `<Xn>`. FP/SIMD register numbers silently reused as GP register numbers.
 
-The shared helper `parse_reg_num` (in `encoder/mod.rs`) accepts the FP/SIMD
-register prefixes as if they were general-purpose:
+## Root Cause
 
 ```rust
+// parse_reg_num accepts all prefixes including FP/SIMD
 'x' | 'w' | 'd' | 's' | 'q' | 'v' | 'h' | 'b' => {
     let num: u32 = name[1..].parse().ok()?;
     if num <= 31 { Some(num) } else { None }
 }
 ```
 
-So `ret d0`, `ret s3`, `ret q7`, `ret v5`, `ret h15`, `ret b2`, etc. are parsed and
-emit `ret x{n}` — the FP/SIMD register number is **silently reused** as a
-general-purpose register number. `RET`'s operand is a **general-purpose** `<Xn>`
-register (ARM ARM C5.6.20); FP/SIMD operands are the **wrong register class** and
-are unallocated encodings a conforming assembler must reject:
+No GP-only validation in `encode_ret`.
 
-```
-$ echo "ret d0"  | clang --target=aarch64 -c -x assembler - -o /dev/null
--:1:5: error: invalid operand for instruction
-$ echo "ret v5"  | clang --target=aarch64 -c -x assembler - -o /dev/null
--:1:5: error: invalid operand for instruction
-$ echo "ret q31" | clang --target=aarch64 -c -x assembler - -o /dev/null
--:1:5: error: invalid operand for instruction
-```
+## Reproduction
 
-## Minimal input
+**Input:** `ret d0`
 
-| Mnemonic | Encoded word | Reference (clang) | Expected here |
-|---|---|---|---|
-| `ret d0`  | `0xD65F0000` (== `ret x0`) | error: invalid operand | `Err` |
-| `ret v5`  | `0xD65F0000 \| (5<<5)` (== `ret x5`) | error | `Err` |
-| `ret q31` | `0xD65F0000 \| (31<<5)` (== `ret xzr`) | error | `Err` |
+**Expected:** `Err` — invalid operand for RET (expected GP register)
 
-## Actual behavior (observed failure)
+**Actual:** `Ok(Word(0xD65F0000))` — `ret d0` encodes as `ret x0`
 
-`encode_ret(&[Operand::Reg("d0".into())])` returns
-`Ok(EncodeResult::Word(3596550144))` — `3596550144 == 0xD65F0000`, bit-identical to
-`encode_ret(&[Operand::Reg("x0".into())])`. The FP/SIMD register is silently
-reinterpreted as a GP register of the same number; no diagnostic. Confirmed by a
-**failing** proptest:
-
-```
-prop_rejects_fp_simd_registers
-  panicked: ret d0 must be rejected (FP/SIMD register; RET requires a GP register),
-            got Ok(Word(3596550144))
-  minimal failing input: prefix_idx = 0, n = 0   (3596550144 == 0xD65F0000)
-```
+**Other failing inputs:** `ret v5` → `ret x5`, `ret q31` → `ret xzr`
 
 ## Impact
 
-Silent mis-assembly producing semantically wrong code with no assembler error. Any
-toolchain consumer that validates by "the assembler accepted it" is misled into
-thinking a GP register was used. The identical defect affects the sibling
-`encode_br`, `encode_blr`, and every other encoder that consumes `parse_reg_num`
-without re-checking the register class.
+FP/SIMD register numbers silently reused as GP registers. Typos or parser bugs produce wrong control flow.
 
-## Property that locks it (FAILING — bug confirmed)
+## Suggested Fix
 
-`prop_encode_ret_tests::prop_rejects_fp_simd_registers` (in `compare_branch.rs`)
-is a **negative-contract** property asserting
-`encode_ret({d,s,q,v,h,b}N).is_err()`. It **FAILS** against the current
-implementation (`ret d0 → Ok(0xD65F0000)`). Once validation is added the property
-passes; no assertion changes are needed.
-
-## Fix
-
-Reject FP/SIMD register names before/inside the operand parse:
+Validate GP register class:
 
 ```rust
-if let Some(Operand::Reg(name)) = operands.get(0) {
-    let c = name.chars().next().unwrap_or(' ').to_ascii_lowercase();
-    if matches!(c, 'd' | 's' | 'q' | 'v' | 'h' | 'b') {
-        return Err("ret requires a general-purpose register (Xn)".into());
-    }
+let rn_name = match &operands[0] { Operand::Reg(r) => r.to_lowercase(), _ => return Err(...) };
+if !matches!(rn_name.chars().next(), Some('x') | Some('w')) {
+    return Err(format!("RET requires GP register, got {}", rn_name));
 }
 ```
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/89
+
+## Regression Property
+
+Failing property: `prop_rejects_fp_simd_register_class`
+
+```rust
+prop_assert!(encode_ret(&[Operand::Reg("d0".into())]).is_err());
+prop_assert!(encode_ret(&[Operand::Reg("v5".into())]).is_err());
+prop_assert!(encode_ret(&[Operand::Reg("q31".into())]).is_err());
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/155
