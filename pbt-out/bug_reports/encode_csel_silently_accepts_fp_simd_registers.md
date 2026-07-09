@@ -7,14 +7,7 @@
 
 `encode_csel` validates only that operands 0–2 are `Operand::Reg`; it performs **no register-class check**. Because `get_reg` → `parse_reg_num` happily maps FP/SIMD register names (`b0`, `d1`, `s2`, `q3`, `h4`, `v5`) to a 5-bit number, any FP/SIMD register is silently accepted and emitted as if it were a general-purpose (X/W) register. The result is an AArch64 word that is **architecturally unallocated** for CSEL (and, depending on the exact field values, may alias a different instruction).
 
-Per the ARM ARM (C4.1.64, *Conditional Select*), `CSEL` is defined **only** on general-purpose registers (`Rd`, `Rn`, `Rm` ∈ X/W). Reference assemblers reject FP operands:
-
-```
-$ llvm-mc -triple=aarch64 -show-encoding <<< 'csel b0, x1, x2, eq'
-error: operand 0 must be an integer register, ...
-```
-
-This also affects the entire conditional-select / compare family that shares `get_reg` (`encode_csinc`, `encode_csinv`, `encode_csneg`, `encode_cset`, `encode_csetm`, `encode_ccmp_ccmn`).
+Per the ARM ARM (C4.1.64, *Conditional Select*), `CSEL` is defined **only** on general-purpose registers (`Rd`, `Rn`, `Rm` ∈ X/W). This also affects the entire conditional-select / compare family that shares `get_reg`.
 
 ## Root Cause
 
