@@ -76,6 +76,8 @@ mod neon_ldnr_pbt;
 mod neon_qshrn_pbt;
 #[cfg(test)]
 mod neon_shift_left_imm_pbt;
+#[cfg(test)]
+mod neon_shll_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
