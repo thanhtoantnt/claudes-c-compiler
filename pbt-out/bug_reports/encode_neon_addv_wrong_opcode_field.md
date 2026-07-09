@@ -120,3 +120,5 @@ that are not architecturally valid for ADDV, without returning `Err`. This
 matches the pre-existing pattern documented for `encode_neon_mla`
 (`encode_neon_mla_unallocated_doubleword.md`) and is a separate
 negative-contract gap.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/192

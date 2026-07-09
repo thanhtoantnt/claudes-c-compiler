@@ -78,3 +78,5 @@ fn mvni_rejects_out_of_range_immediate() {
         "MVNI immediate 256 is out of range [0,255]; expected Err");
 }
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/196

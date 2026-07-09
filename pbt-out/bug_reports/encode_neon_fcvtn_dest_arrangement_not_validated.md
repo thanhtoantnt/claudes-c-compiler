@@ -125,3 +125,5 @@ prop_assert!(encode_neon_fcvtn(&ops, false).is_err());
 | `golden_fcvtn_matches_arm_reference` | PASS |
 | `rejects_too_few_operands` | PASS |
 | `prop_fcvtn_rejects_mismatched_dest_arrangement` | **FAIL** (regression marker) |
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/195

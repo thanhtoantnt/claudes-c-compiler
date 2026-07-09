@@ -83,3 +83,5 @@ fn mvni_rejects_msl_on_16bit() {
     }
 }
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/198

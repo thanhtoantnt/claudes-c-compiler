@@ -122,3 +122,5 @@ fn pmul_rejects_non_byte() {
     }
 }
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/199
