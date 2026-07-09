@@ -1,74 +1,57 @@
-# Bug — `encode_shift` immediate form lacks shift-amount range validation
+# Bug Report: `encode_shift` immediate form lacks shift-amount range validation
 
 **Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_shift`
+**Severity:** High
 
-## One-sentence summary
-The immediate-shift branch of `encode_shift` never validates the `#imm` amount, so an
-out-of-range amount (e.g. `lsl w0, w1, #32`) **panics in debug builds** via integer
-underflow instead of returning `Err` — the same root cause also lets invalid amounts for
-LSR/ASR/ROR and negative amounts be silently mis-encoded as `Ok`.
+## Summary
 
-## Legal range (AArch64 ARM), for width = 32 (W) or 64 (X)
-LSL: `0..=width-1` · LSR/ASR/ROR: `1..=width-1`. GAS and `llvm-mc` reject anything else.
+`encode_shift` immediate branch never validates `#imm` amount. Out-of-range amount like `lsl w0, w1, #32` panics in debug builds via integer underflow. Same root cause also lets invalid LSR/ASR/ROR amounts and negative amounts be silently mis-encoded.
 
-## Minimal failing input (from the property, after shrinking)
-```
-st = 0 (LSL), is_64 = false  →  width = 32,  imm = 32   (exactly the boundary)
-operands = [ w0, w1, Imm(32) ]
-```
-```
-panicked at data_processing.rs:810:28: attempt to subtract with overflow  (also :811:28)
-property verdict: "out-of-range imm=32 (width=32, st=0) PANICKED instead of returning Err"
-```
+## Root Cause
 
-## Expected vs actual
-- **Expected:** `Err("shift amount 32 out of range …")`.
-- **Actual (LSL, imm ≥ width):** debug panic from `width - 1 - imm` (line 811) /
-  `(width - imm) % width` (line 810) underflow; silent wraparound in release.
-
-## Root cause (lines 803–837)
 ```rust
-if let Some(Operand::Imm(imm)) = operands.get(2) {
-    let imm = *imm as u32;                 // no negativity / range check
-    let width = if is_64 { 64 } else { 32 };
-    0b00 => { let immr = (width - imm) % width;   // underflow if imm > width
-              let imms = width - 1 - imm;          // underflow if imm >= width
-              ... }
-    0b01 / 0b10 / 0b11 => { ... imm used unchecked ... }   // no guard either
-}
+let imm = *imm as u32;  // no range check
+let width = if is_64 { 64 } else { 32 };
+// LSL branch:
+let immr = (width - imm) % width;  // PANIC if imm > width
+let imms = width - 1 - imm;        // PANIC if imm >= width
 ```
-There is no `if imm >= width { return Err(...) }` and no `if *imm < 0` check.
+
+## Reproduction
+
+**Input:** `lsl w0, w1, #32`
+
+**Expected:** `Err` — shift amount 32 out of range for 32-bit register
+
+**Actual:** Panic: `attempt to subtract with overflow`
+
+**Minimal failing input:** st = 0, is_64 = false, imm = 32 (boundary case)
 
 ## Impact
-- Emits a word the CPU treats as UNDEFINED, or a different instruction; assembled
-  output is not equivalent to source.
-- A malformed `.s` (or typo like `lsl x0, x1, #64`) **crashes the assembler** in debug
-  instead of reporting a clean error.
-- Release builds silently mis-encode — worse than crashing.
 
-## Suggested fix
-Add the guard right after coercing the immediate, before any arithmetic:
+Debug panic aborts compiler. Release build: silent wraparound, UNDEFINED encoding. Same defect for negative `#imm` (wraps to `0xFFFF_FFFF`).
+
+## Suggested Fix
+
+Validate range before field computation:
+
 ```rust
-let imm_i = *imm as i64;
-if imm_i < 0 { return Err(format!("shift amount must be non-negative: {}", imm_i)); }
-let imm = imm_i as u32;
-let width = if is_64 { 64 } else { 32 };
-let lo = if shift_type == 0b00 { 0u32 } else { 1u32 }; // LSR/ASR/ROR need >= 1
-if !(lo..width).contains(&imm) {
-    return Err(format!("shift amount {} out of range [{}, {}] for {}-bit register",
-                       imm, lo, width - 1, width));
+if let Some(Operand::Imm(imm_val)) = operands.get(2) {
+    let lo = if shift_type == 0b00 { 0i64 } else { 1 };
+    let hi = if is_64 { 63i64 } else { 31i64 };
+    if *imm_val < lo || *imm_val > hi {
+        return Err(format!("shift amount {} out of range [{}, {}]", imm_val, lo, hi));
+    }
 }
 ```
 
-## Test status (encode_shift)
-| Property | Result |
-|----------|--------|
-| `shift_immediate_full_word_matches_arm_reference` (LSL/LSR/ASR differential) | ✅ pass |
-| `shift_ror_immediate_full_word_matches_arm_reference` (EXTR differential)     | ✅ pass |
-| `shift_register_full_word_matches_arm_reference` (2-source differential)     | ✅ pass |
-| `shift_immediate_in_range_is_ok_and_fields_bounded` (positive contract)      | ✅ pass |
-| `shift_immediate_out_of_range_never_returns_ok` (negative contract)          | ❌ fail — bug |
+## Regression Property
 
-The differential oracles confirm the *encoding formula is correct for all legal inputs*;
-the only defect is the missing range-validation guard.
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/94
+Failing property: `encode_shift_imm_rejects_out_of_range`
+
+```rust
+prop_assert!(encode_shift(&[wreg(0), wreg(1)], 0b00, imm(32)).is_err());  // LSL W #32 out of range
+prop_assert!(encode_shift(&[xreg(0), xreg(1)], 0b00, imm(-1)).is_err());  // negative imm
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/95
