@@ -1,85 +1,51 @@
-# Bug — `encode_ret`: `sp`/`wsp` silently aliased to `xzr`
+# Bug Report: `encode_ret` silently accepts SP as register target
 
-**Target:** `src/backend/arm/assembler/encoder/compare_branch.rs`, function `encode_ret`
+**Target:** `src/backend/arm/assembler/encoder/compare_branch.rs` → `encode_ret`
+**Severity:** High
 
-```rust
-pub(crate) fn encode_ret(operands: &[Operand]) -> Result<EncodeResult, String> {
-    let rn = if operands.is_empty() {
-        30 // default to x30 (LR)
-    } else {
-        get_reg(operands, 0)?.0
-    };
-    let word = 0xd65f0000 | (rn << 5);
-    Ok(EncodeResult::Word(word))
-}
-```
+## Summary
 
-## The bug
+`parse_reg_num` maps both `sp` and `xzr` to register number 31. RET encoding reserves `Xn = 31` for `XZR`. `ret sp` accepted and encoded as `ret xzr`, returning to address 0 instead of error.
 
-The shared helper `parse_reg_num` (in `encoder/mod.rs`) maps **both** `sp` and
-`xzr` to the encoding value `31`:
+## Root Cause
 
 ```rust
-"sp" | "wsp" => Some(31),
-"xzr" | "wzr" => Some(31),
+let (rn, _) = get_reg(operands, 0)?;   // sp → 31, treated as XZR
 ```
 
-`RET`'s `Rn` field value `31` denotes **XZR**; there is **no** SP-using form of
-`RET`. So `ret sp` currently succeeds and silently encodes a return to the address
-held in XZR (== `ret xzr`) instead of erroring; `ret wsp` behaves identically. A
-conforming assembler rejects both:
+No SP-form validation in `encode_ret`.
 
-```
-$ echo "ret sp"  | clang --target=aarch64 -c -x assembler - -o /dev/null
--:1:5: error: invalid operand for instruction
-$ echo "ret wsp" | clang --target=aarch64 -c -x assembler - -o /dev/null
--:1:5: error: invalid operand for instruction
-```
+## Reproduction
 
-## Minimal input
+**Input:** `ret sp`
 
-| Mnemonic | Encoded word | Reference (clang) | Expected here |
-|---|---|---|---|
-| `ret sp`  | `0xD65F03E0` (== `ret xzr`, Rn=31) | error: invalid operand | `Err` |
-| `ret wsp` | `0xD65F03E0` (== `ret xzr`, Rn=31) | error | `Err` |
+**Expected:** `Err` — RET target must not be SP (use XZR for return to zero)
 
-## Actual behavior (observed failure)
-
-`encode_ret(&[Operand::Reg("sp".into())])` returns
-`Ok(EncodeResult::Word(3596551136))` — `3596551136 == 0xD65F03E0`, i.e. Rn=31,
-bit-identical to `encode_ret(&[Operand::Reg("xzr".into())])`. Confirmed by a
-**failing** proptest:
-
-```
-prop_rejects_sp_wsp
-  panicked: ret sp must be rejected (SP/WSP is not a valid RET operand;
-            field 31 == XZR), got Ok(Word(3596551136))
-  minimal failing input: which = 0
-```
+**Actual:** `Ok(Word(0xD65F0000))` — encoded as `ret xzr` (sp silently coerced)
 
 ## Impact
 
-Silent mis-assembly: a user writing `ret sp` gets a return through XZR (address 0)
-with no diagnostic — a severe codegen bug. The identical SP→XZR aliasing defect
-affects the sibling `encode_br` and `encode_blr` (documented separately).
+SP operand silently replaced by XZR, causing return to address 0 instead of using SP. No diagnostic, silently wrong control flow.
 
-## Property that locks it (FAILING — bug confirmed)
+## Suggested Fix
 
-`prop_encode_ret_tests::prop_rejects_sp_wsp` (in `compare_branch.rs`) is a
-**negative-contract** property asserting `encode_ret(&[Reg("sp")])` and
-`encode_ret(&[Reg("wsp")])` return `Err`. It **FAILS** against the current
-implementation. Once validation is added it passes unchanged.
-
-## Fix
-
-Reject the SP/WSP spellings explicitly (they are not valid `RET` operands):
+Reject SP/WSP for return target:
 
 ```rust
-if let Some(Operand::Reg(name)) = operands.get(0) {
-    let lo = name.to_lowercase();
-    if lo == "sp" || lo == "wsp" {
-        return Err("ret does not accept SP/WSP (Rn field 31 denotes XZR)".into());
-    }
+let (rn, _) = get_reg(operands, 0)?;
+let name = match &operands[0] { Operand::Reg(r) => r.to_lowercase(), _ => return Err(...) };
+if name == "sp" || name == "wsp" {
+    return Err("RET target must not be SP (use XZR/WZR for return to zero)".into());
 }
 ```
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/90
+
+## Regression Property
+
+Failing property: `ret_rejects_sp_operand`
+
+```rust
+prop_assert!(encode_ret(&[Operand::Reg("sp".into())]).is_err());
+prop_assert!(encode_ret(&[Operand::Reg("wsp".into())]).is_err());
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/106
