@@ -1,27 +1,13 @@
-# Bug — `decode_pua_byte` panics on empty input / out-of-range `pos`
+# Bug Report: `decode_pua_byte` panics on empty input / out-of-range `pos`
 
-**File:** `src/common/encoding.rs` — `decode_pua_byte`
-**Severity:** Low (robustness; implicit contract)
+**Target:** `src/common/encoding.rs` → `decode_pua_byte`
+**Severity:** Low
 
-## Minimal input
+## Summary
 
-`decode_pua_byte(&[], 0)` — empty slice, position 0.
+`decode_pua_byte` indexes `input[pos]` unconditionally in fallback branch. Empty slice or `pos >= len` triggers panic without guard.
 
-## Expected
-
-Either a documented precondition (`pos < input.len()`) or a non-panicking return.
-
-## Actual
-
-Index-out-of-bounds panic, captured by failing proptest
-`decode_does_not_panic_at_end_position` (minimal failing input:
-`bytes = []`, `pos = 0`):
-
-```
-decode_pua_byte panicked at pos=0 of len=0
-```
-
-The fallback branch indexes `input[pos]` unconditionally:
+## Root Cause
 
 ```rust
 pub fn decode_pua_byte(input: &[u8], pos: usize) -> (u8, usize) {
@@ -30,14 +16,43 @@ pub fn decode_pua_byte(input: &[u8], pos: usize) -> (u8, usize) {
 }
 ```
 
+`pos < input.len()` is only implicit contract; caller `decode_all_pua_bytes` honours it but public function has no guard.
+
+## Reproduction
+
+**Input:** `decode_pua_byte(&[], 0)`
+
+**Expected:** Either documented precondition or non-panicking return (e.g. `Option`)
+
+**Actual:** Panic: index out of bounds
+
+**Minimal failing input:** bytes = [], pos = 0
+
 ## Impact
 
-`pos < input.len()` is only an implicit contract. The in-tree caller
-`decode_all_pua_bytes` honours it (`while pos < input.len()`), but the public
-function has no guard, so any caller that passes an empty slice or a `pos >= len`
-triggers a panic.
+Any caller passing empty slice or `pos >= len` triggers panic. In-tree caller safe, but public API unguarded.
 
-## Fix
+## Suggested Fix
 
-Add `pos < input.len()` to the guard and decide a fallback (e.g. return
-`Option<(u8, usize)>`, or document the precondition explicitly in the doc comment).
+Add guard and return `Option`:
+
+```rust
+pub fn decode_pua_byte(input: &[u8], pos: usize) -> Option<(u8, usize)> {
+    if pos >= input.len() {
+        return None;
+    }
+    if pos + 2 < input.len() && input[pos] == 0xEE { ... }
+    Some((input[pos], 1))
+}
+```
+
+## Regression Property
+
+Failing property: `decode_does_not_panic_at_end_position`
+
+```rust
+prop_assert!(decode_pua_byte(&[], 0).is_none());
+prop_assert!(decode_pua_byte(&[0x00], 1).is_none());
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/161
