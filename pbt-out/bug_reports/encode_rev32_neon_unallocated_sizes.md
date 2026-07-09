@@ -83,3 +83,4 @@ Root cause is `neon_arr_to_q_size` being a generic helper that does not encode
 per-instruction size constraints. Any NEON instruction whose valid sizes are a
 strict subset of `{00,01,10,11}` and that calls this helper without a follow-up
 check has the same class of defect. `encode_rev32` is the confirmed instance.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/152

@@ -91,3 +91,4 @@ The same `let (rn, _) = get_reg(...)` width-discarding pattern is present in
 every bit-manipulation encoder in this file (`encode_rev`, `encode_rev16`,
 `encode_rbit`, `encode_clz`, `encode_cls`, etc.), so the fix should likely be
 applied consistently — but `encode_rev` is the immediate confirmed instance.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/154

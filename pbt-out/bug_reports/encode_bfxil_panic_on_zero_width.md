@@ -66,3 +66,4 @@ minimal failing input: is_64 = false, over_lsb = 64, over_width = 65, neg = -3
 
 The property wraps the call in `std::panic::catch_unwind`, so the panic is
 reported as a contract failure rather than aborting the proptest run.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/138

@@ -73,3 +73,4 @@ if !((rn_is_d && rm_is_d) || (rn_is_s && rm_is_s)) {
 
 (The existing `encode_fmov` already does analogous bank/precision validation and can serve
 as a pattern; `encode_fp_arith` / `encode_fp_1src` share this same latent gap.)
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/131

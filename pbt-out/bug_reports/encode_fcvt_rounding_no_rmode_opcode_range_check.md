@@ -69,3 +69,4 @@ if opcode > 0b111 {
 (Optionally also assert the destination is a GP register (W/X) and the source is
 an FP register (S/D), since `encode_fcvt_rounding` currently derives `sf`/`ftype`
 without verifying operand banks.)
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/127

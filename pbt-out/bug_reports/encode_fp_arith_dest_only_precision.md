@@ -41,3 +41,4 @@ if !(prec.iter().all(|&c| c == 'd') || prec.iter().all(|&c| c == 's')) {
     return Err("fp_arith operands must share precision (all D or all S)".into());
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/147

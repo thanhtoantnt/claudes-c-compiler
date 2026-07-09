@@ -80,3 +80,4 @@ if !(src_name.starts_with('w') || src_name.starts_with('x')) {
 | `prop_int_to_float_signedness_selects_opcode` | SCVTF=010 vs UCVTF=011 | PASS |
 | `prop_int_to_float_rejects_bad_regs_and_arity` | range/arity/non-reg rejection | PASS |
 | `prop_int_to_float_rejects_wrong_operand_banks` | negative contract (bank validation) | **FAIL** (this bug) |
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/130

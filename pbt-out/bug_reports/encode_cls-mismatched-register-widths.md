@@ -98,3 +98,4 @@ The same discarded-width pattern (`let (rn, _)`) recurs across the bitfield /
 data-processing (1 source) family — `encode_clz`, `encode_cls`, `encode_rbit`
 (scalar), `encode_rev`, `encode_rev16`, `encode_rev32` — and should be fixed
 consistently.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/140

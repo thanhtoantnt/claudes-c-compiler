@@ -58,3 +58,4 @@ if opcode > 0x3F {
 
 ## Severity
 High (silent wrong-code emission on any out-of-range `opcode`).
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/129

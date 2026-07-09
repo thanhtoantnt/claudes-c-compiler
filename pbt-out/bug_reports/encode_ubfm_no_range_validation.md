@@ -101,3 +101,4 @@ let (immr, imms) = {
 
 (At minimum, mask with `& 0x3F` — but rejection is correct, since wrapping is
 *not* intentional here per the ARM ARM.)
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/162

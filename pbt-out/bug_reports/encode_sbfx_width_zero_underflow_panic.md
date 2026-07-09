@@ -88,3 +88,4 @@ if width == 0 {
 let imms = lsb.checked_add(width).and_then(|s| s.checked_sub(1))
     .ok_or("SBFX: lsb+width-1 overflow")?;
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/161

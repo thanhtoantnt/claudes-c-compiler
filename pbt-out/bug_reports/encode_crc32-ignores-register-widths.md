@@ -82,3 +82,4 @@ if rm_64 != is_x { return Err(format!("{} requires {}m register", mnemonic, if i
 ## Related (pre-existing) finding
 
 `encode_crc32` also silently accepts **unknown mnemonics** (the `_ => (0, 0b00)` match arm, combined with `mnemonic.contains("crc32c")`), e.g. `crc32`, `crc32d`, `crc32cd`, `nop`, `""`. That is documented by the pre-existing `prop_rejects_unknown_mnemonics` test and is the same class of "no validation" bug.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/142

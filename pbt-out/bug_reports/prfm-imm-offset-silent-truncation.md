@@ -59,3 +59,4 @@ let imm12 = scaled as u32;
 
 After this fix, `prop_prfm_large_offset_not_silently_truncated` passes; the other
 four PRFM properties are unaffected.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/133

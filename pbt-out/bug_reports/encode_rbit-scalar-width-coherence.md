@@ -99,3 +99,4 @@ The identical defect (single `sf` bit, `Rn` width discarded) is already
 recorded for `encode_rev` in the existing `prop_encode_rev_*` tests in the
 same file, and very likely affects the sibling scalar bit-reversal/rev
 encoders (`encode_rev16`, `encode_rev32`) too.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/149

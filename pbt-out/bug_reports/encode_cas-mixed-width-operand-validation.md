@@ -88,3 +88,4 @@ casal x0,x1,[x2] = 0xC8E0FC41
 ```
 
 The defect above is a validation gap, not an encoding error for valid input.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/139

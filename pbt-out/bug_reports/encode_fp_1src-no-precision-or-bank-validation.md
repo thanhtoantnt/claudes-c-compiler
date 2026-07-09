@@ -38,3 +38,4 @@ half-precision (`H`) to `ftype=11` rather than silently defaulting to single.
 
 ## Severity
 Medium (wrong-code on malformed operands; assembler must reject these forms).
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/128

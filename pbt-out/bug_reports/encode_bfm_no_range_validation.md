@@ -101,3 +101,4 @@ if imms > 63 {
 `as u32` cast. Apply the same guard to `encode_ubfm`, `encode_sbfm`, and the
 alias encoders (`encode_ubfx`, `encode_sbfx`, `encode_bfi`, `encode_bfxil`,
 `encode_sbfiz`, `encode_ubfiz`).
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/158

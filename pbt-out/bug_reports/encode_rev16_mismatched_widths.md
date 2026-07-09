@@ -76,3 +76,4 @@ let sf = sf_bit(rd_is_64);
 
 (Apply the same fix to the sibling `encode_rev` / `encode_rev32` scalar path,
 which exhibit the identical bug.)
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/151

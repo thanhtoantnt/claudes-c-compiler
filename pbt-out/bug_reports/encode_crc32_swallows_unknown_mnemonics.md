@@ -71,3 +71,4 @@ so `crc32x w0, w1, w2` encodes bit-identically to `crc32x x0, x1, x2` (sf=1).
 AArch64 requires `crc32x`/`crc32cx` to take `Xd` and `Xm` (with `Wn`), so
 accepting `w`-registers here is architecturally inconsistent. Documented by
 `prop_register_width_is_ignored`.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/143

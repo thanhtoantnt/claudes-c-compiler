@@ -69,3 +69,4 @@ if width == 0 || lsb + width > regsize {
     return Err(format!("UBFX: width {} out of range [1, {}]", width, regsize - lsb));
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/163

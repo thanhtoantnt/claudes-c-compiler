@@ -94,3 +94,4 @@ if width == 0 || lsb + width > regsize {
 Property `prop_rejects_out_of_range_lsb_width` in module `prop_encode_sbfx_tests`
 asserts all of the above cases must return `Err`. It fails (the `width == 0`
 case panics first; the rest return `Ok`).
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/160

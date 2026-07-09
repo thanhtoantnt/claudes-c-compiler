@@ -78,3 +78,4 @@ if is_64 != src_is_64 {
 The same discarded-width pattern (`let (rn, _)`) recurs in the sibling
 encoders `encode_cls`, `encode_rbit` (scalar), `encode_rev`, `encode_rev16`,
 `encode_rev32` and should be fixed consistently.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/141

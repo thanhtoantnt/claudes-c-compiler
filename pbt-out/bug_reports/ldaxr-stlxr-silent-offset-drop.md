@@ -74,3 +74,4 @@ The crate's `cargo test` was blocked by three test modules in
 sibling has, so they compiled into the lib build where the `proptest`
 dev-dependency is unavailable. Added the three missing `#[cfg(test)]` gates
 (no behavior change) to unblock test execution.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/157

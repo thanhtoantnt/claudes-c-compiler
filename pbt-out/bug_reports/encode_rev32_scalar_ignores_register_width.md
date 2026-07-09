@@ -112,3 +112,4 @@ Property-based test module `prop_encode_rev32_tests` in
 
 Minimal failing input reported by proptest: `is_64 = false, rd = 0, rn = 0`
 → `REV32 w0, w0`: expected `0x5AC00C00`, got `0xDAC00800`.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/153

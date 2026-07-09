@@ -45,3 +45,4 @@ if opcode > 0b1111 {
 // …or, if wrapping is ever deemed intentional, mask explicitly:
 // let opcode = opcode & 0xF;
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/148

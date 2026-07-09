@@ -89,3 +89,4 @@ if arr_d != arr_n {
 }
 let q: u32 = if arr_d == "16b" { 1 } else { 0 };
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/150

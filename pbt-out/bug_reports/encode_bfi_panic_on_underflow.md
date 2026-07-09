@@ -138,3 +138,4 @@ fn prop_rejects_out_of_range_operands(
     }
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/136

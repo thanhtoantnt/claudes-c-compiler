@@ -93,3 +93,4 @@ Apply the same guard to the sibling `encode_*` bitfield encoders.
 - `prop_ubfiz_equals_ubfm_with_converted_immediates` — PASS
 - `prop_width_changes_only_sf_n_immr` — PASS
 - `prop_rejects_out_of_range_immediates` — **FAIL** (the finding)
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/156

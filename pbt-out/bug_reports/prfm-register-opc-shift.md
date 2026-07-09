@@ -58,3 +58,4 @@ let word = (0b11 << 30) | (0b111 << 27) | (0b10 << 22) | (1 << 21)
 
 After this fix, `prop_prfm_register_offset_matches_reference` passes; the other
 four PRFM properties are unaffected.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/134

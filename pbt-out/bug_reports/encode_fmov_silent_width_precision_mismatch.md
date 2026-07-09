@@ -66,3 +66,4 @@ register round-trip with **no truncation** for `0..=31`, and rejection of
 immediates / short arity / out-of-range register numbers). The mismatch gap
 above is deliberately *not* asserted as a failing test to keep the suite green;
 it is tracked here.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/145

@@ -90,3 +90,4 @@ shared validation helper for 6-bit bitfield immediates would address all of them
 | `prop_width_changes_only_sf_and_n` (width differential) | PASS |
 | `prop_rejects_out_of_range_immediates` (negative contract) | **FAIL — this bug** |
 | `prop_rejects_malformed_operands` (negative contract) | PASS |
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/159

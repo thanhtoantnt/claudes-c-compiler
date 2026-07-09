@@ -39,3 +39,4 @@ for (i, op) in operands.iter().take(3).enumerate() {
     }
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/146

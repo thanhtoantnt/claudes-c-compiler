@@ -147,3 +147,4 @@ address all of them.
 | `prop_deterministic` (purity) | PASS |
 | `prop_rejects_malformed_operands` (negative contract) | PASS |
 | `prop_rejects_out_of_range_lsb` (negative contract) | **FAIL — this bug** |
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/144

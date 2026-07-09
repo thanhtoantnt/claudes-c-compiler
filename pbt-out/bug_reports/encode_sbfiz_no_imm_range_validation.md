@@ -105,3 +105,4 @@ validation helper for bitfield `lsb`/`width` operands would address all of them.
 | `prop_rejects_malformed_operands` | negative contract | PASS |
 
 Run: `cargo test --lib prop_encode_sbfiz` → `5 passed; 1 failed`.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/155
