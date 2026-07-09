@@ -48,3 +48,5 @@ element size before encoding:
 ```
 
 Return `Err` otherwise.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/176

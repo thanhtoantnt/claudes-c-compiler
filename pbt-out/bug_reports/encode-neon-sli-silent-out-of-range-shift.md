@@ -107,3 +107,5 @@ Minimal failing input (this bug): `arr = "8b", too_big = 0, is_negative = false`
 → shift 8 → `Ok(Word(0x2F005400))`.
 
 **GitHub Issue:** _(none created)_
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/47

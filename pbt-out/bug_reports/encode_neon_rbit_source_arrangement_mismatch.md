@@ -121,3 +121,5 @@ mismatched sources. (A companion finding, `rbit_rejects_non_vector_register_clas
 documents that GPR-class names like `x0.16b` are also accepted in SIMD operand
 position via `parse_reg_num`; it is filed separately as it stems from the shared
 `parse_reg_num`/`get_neon_reg` helper rather than this function's own logic.)
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/113

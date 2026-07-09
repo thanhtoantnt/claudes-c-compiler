@@ -76,3 +76,5 @@ if shift < 1 || shift > elem_bits as i64 {
     return Err(format!("shift {} out of range for {}-bit elements", shift, elem_bits));
 }
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/126

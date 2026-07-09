@@ -112,3 +112,5 @@ fn rbit_rejects_non_vector_register_class(
 ```
 
 After applying the fix, remove the `#[ignore]`.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/109

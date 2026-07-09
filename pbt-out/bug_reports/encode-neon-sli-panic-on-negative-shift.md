@@ -100,3 +100,5 @@ Minimal failing input (this bug): `arr = "8b", too_big = 0, is_negative = true`
 → shift = -1 → panic `attempt to add with overflow` at `neon.rs:1271`.
 
 **GitHub Issue:** _(none created)_
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/46
