@@ -1,56 +1,49 @@
-# Bug — `encode_neg` silently re-encodes `ror` shift as LSL
+# Bug Report: `encode_neg` `ror` shift silently re-encoded as LSL
 
-**File:** `src/backend/arm/assembler/encoder/data_processing.rs`
-**Function:** `encode_neg` (NEG = alias of `SUB Rd, XZR, Rm [, shift]`)
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_neg`
+**Severity:** Medium
 
-## Defect
+## Summary
 
-`encode_neg` accepts a `ror` shift operand and silently encodes it as `LSL`
-instead of rejecting it.
+`encode_neg` maps unrecognized shift kind to `lsl` via default arm of `match`. ARMv8 scalar add/sub shifted-register forms permit only `lsl`, `lsr`, `asr`; `ror` invalid and must be rejected.
 
-**Spec:** ARMv8 ARM §C4.1.66 — the add/sub shifted-register form only permits
-**LSL / LSR / ASR**. `ROR` is reserved for the logical shifted-register class
-(AND/ORR/EOR/...). Supplying `ror` to an add/sub-family mnemonic is UNDEFINED.
-
-## Code
+## Root Cause
 
 ```rust
-let st = match kind.as_str() {
-    "lsl" => 0b00u32,
-    "lsr" => 0b01,
-    "asr" => 0b10,
-    _ => 0b00,                 // ← "ror" (and any unknown kind) silently -> LSL
-};
+let st = match kind.as_str() { "lsl" => 0b00u32, "lsr" => 0b01u32, "asr" => 0b10u32, _ => 0b00u32 };
 ```
 
 ## Reproduction
 
-`cargo test --lib data_processing::tests::neg_rejects_ror_shift`
+**Input:** `neg x0, x1, ror #5`
 
-```
-minimal failing input: rd = 0, rm = 0, amount = 0, is_64 = false   (neg w0, w0, ror #0)
-assertion failed: encode_neg(&ops).is_err()
-```
+**Expected:** `Err` — neg: invalid shift kind: ror (expected lsl/lsr/asr)
 
-`neg w0, w0, ror #0` returns `Ok` with a word that encodes `lsl #0`. Expected:
-`Err`, as GAS/LLVM do. (The sibling `encode_negs` has the same fallback and the
-same defect.)
+**Actual:** `Ok` — encodes as `lsl #5`
 
 ## Impact
 
-A `neg ... ror #N` assembles without diagnostic to an instruction that does not
-perform rotation — silent semantic corruption.
+Typos or parser bugs silently produce different instruction than assembly source names.
 
-## Suggested fix
+## Suggested Fix
 
-Reject unknown shift kinds (including `ror`) instead of defaulting to LSL:
+Reject unknown shift kinds:
 
 ```rust
 let st = match kind.as_str() {
     "lsl" => 0b00u32,
-    "lsr" => 0b01,
-    "asr" => 0b10,
-    other => return Err(format!("neg does not support shift '{}'", other)),
+    "lsr" => 0b01u32,
+    "asr" => 0b10u32,
+    _ => return Err(format!("neg: invalid shift kind: {} (expected lsl/lsr/asr)", kind)),
 };
 ```
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/76
+
+## Regression Property
+
+Failing property: `neg_rejects_ror_shift`
+
+```rust
+prop_assert!(encode_neg(&[xreg(0), xreg(1), shift("ror", 5)]).is_err());
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/77
