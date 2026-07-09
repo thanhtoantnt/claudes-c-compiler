@@ -1811,6 +1811,20 @@ mod prop_encode_csel_tests {
                 slot, result
             );
         }
+        // Property F — width-coherence negative contract. CSEL has one sf bit
+        // for all three GP operands; Rd/Rn/Rm must all be W or all be X.
+        #[test]
+        fn prop_rejects_mixed_width_operands(n in 0u32..=30u32) {
+            let cases = [
+                vec![Operand::Reg(format!("x{}", n)), Operand::Reg(format!("w{}", n)), Operand::Reg(format!("x{}", n)), Operand::Cond("eq".into())],
+                vec![Operand::Reg(format!("x{}", n)), Operand::Reg(format!("x{}", n)), Operand::Reg(format!("w{}", n)), Operand::Cond("eq".into())],
+                vec![Operand::Reg(format!("w{}", n)), Operand::Reg(format!("x{}", n)), Operand::Reg(format!("w{}", n)), Operand::Cond("eq".into())],
+                vec![Operand::Reg(format!("w{}", n)), Operand::Reg(format!("w{}", n)), Operand::Reg(format!("x{}", n)), Operand::Cond("eq".into())],
+            ];
+            for ops in cases {
+                prop_assert!(encode_csel(&ops).is_err(), "mixed-width CSEL operands must be Err, got {:?}", encode_csel(&ops));
+            }
+        }
     }
 }
 

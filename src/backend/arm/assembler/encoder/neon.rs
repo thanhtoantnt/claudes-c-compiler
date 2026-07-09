@@ -3040,3 +3040,75 @@ mod neon_movi_props {
         }
     }
 }
+
+#[cfg(test)]
+mod ext_range_pbt_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Companion to `ext_pbt_tests` above. The existing module documents the
+    // missing validation with *passing* masking/round-trip properties. These
+    // properties instead assert the spec-mandated *error* contracts directly;
+    // each is EXPECTED TO FAIL until range/arrangement validation is added.
+    //
+    // Oracle (ARM ARM, EXT):
+    //   EXT Vd.T, Vn.T, Vm.T, #index   (T = 8B or 16B only)
+    //   - imm4 is a 4-bit field (0..=15); out-of-range index is unrepresentable.
+    //   - EXT 8B:  Q=0 and imm4<3> == 0, i.e. index in 0..=7 (8..=15 UNDEFINED).
+    //   - EXT 16B: Q=1, index in 0..=15.
+    //   - Only 8B/16B arrangements are valid; any other arrangement is rejected
+    //     by GAS ("operand mismatch") / LLVM.
+
+    fn ext_ops(rd: u32, rn: u32, rm: u32, arr: &str, index: i64) -> Vec<Operand> {
+        vec![
+            Operand::RegArrangement { reg: format!("v{}", rd), arrangement: arr.to_string() },
+            Operand::RegArrangement { reg: format!("v{}", rn), arrangement: arr.to_string() },
+            Operand::RegArrangement { reg: format!("v{}", rm), arrangement: arr.to_string() },
+            Operand::Imm(index),
+        ]
+    }
+
+    proptest! {
+        // 1. Negative contract (EXPECTED TO FAIL — documents a bug):
+        //    imm4 is a 4-bit field (0..=15); an index outside that range cannot be
+        //    encoded and must be rejected (GAS/LLVM: "immediate must be an integer
+        //    in range [0, 15]"). The encoder masks with `index & 0xF` and silently
+        //    truncates (e.g. #16 -> #0, #17 -> #1) instead of returning Err.
+        #[test]
+        fn out_of_range_imm4_must_be_rejected(
+            arr in prop_oneof![Just("8b"), Just("16b")],
+            index in 16i64..=65535i64
+        ) {
+            let res = encode_neon_ext(&ext_ops(0, 1, 2, arr, index));
+            prop_assert!(res.is_err(),
+                "EXT {:?} #{} is outside the 4-bit imm4 range and must be rejected, got {:?}",
+                arr, index, res);
+        }
+
+        // 2. Negative contract (EXPECTED TO FAIL — documents a bug):
+        //    EXT 8B requires imm4<3> == 0, i.e. index in 0..=7. An index of 8..=15
+        //    is architecturally UNDEFINED for Q=0 and must be rejected. The encoder
+        //    accepts it (masking into the imm4 field), producing an invalid word.
+        #[test]
+        fn ext_8b_high_index_must_be_rejected(index in 8u32..16u32) {
+            let res = encode_neon_ext(&ext_ops(0, 1, 2, "8b", index as i64));
+            prop_assert!(res.is_err(),
+                "EXT 8B #{} is UNDEFINED (imm4<3> must be 0) and must be rejected, got {:?}",
+                index, res);
+        }
+
+        // 3. Negative contract (EXPECTED TO FAIL — documents a bug):
+        //    EXT is defined only for the 8B/16B arrangements. Any other arrangement
+        //    (4s, 8h, 2d, ...) is invalid and must be rejected. The encoder only
+        //    tests for "16b" and silently treats everything else as 8B (Q=0).
+        #[test]
+        fn invalid_arrangement_must_be_rejected(
+            arr in prop_oneof![Just("4s"), Just("8h"), Just("4h"), Just("2d"), Just("2s")]
+        ) {
+            let res = encode_neon_ext(&ext_ops(0, 1, 2, arr, 1));
+            prop_assert!(res.is_err(),
+                "EXT {:?} is not a valid EXT arrangement (only 8b/16b), must be rejected, got {:?}",
+                arr, res);
+        }
+    }
+}

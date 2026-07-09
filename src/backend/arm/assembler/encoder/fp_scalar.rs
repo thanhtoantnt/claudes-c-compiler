@@ -526,6 +526,120 @@ mod tests {
         }
     }
 
+    // ── encode_fneg (FP data-processing, 1 source: FNEG) ===================
+    // ARMv8-A "Floating-point data-processing (1 source)" layout:
+    //   0 00 11110 ftype 1 opcode 10000 Rn Rd
+    //   bits[31]=0, bits[30:24]=0011110 (0x1E), bits[23:22]=ftype,
+    //   bit[21]=1, bits[20:15]=opcode (6-bit, FNEG=000010), bits[14:10]=10000,
+    //   bits[9:5]=Rn (src), bits[4:0]=Rd (dst).
+    //   Cross-checked: FNEG S0,S0 = 0x1E214000, FNEG D0,D0 = 0x1E614000.
+    fn fneg_opcode_of(w: u32) -> u32 { (w >> 15) & 0x3F }
+    fn fneg_fixed_of(w: u32) -> u32  { (w >> 10) & 0x1F }
+
+    proptest! {
+        // Oracle: reference / field layout. Homogeneous-precision FP operands
+        // => every field at its canonical ARMv8 bit position, opcode == FNEG.
+        #[test]
+        fn prop_fneg_places_fields(
+            rd in 0u32..32, rn in 0u32..32, dbl in any::<bool>(),
+        ) {
+            let p = if dbl { "d" } else { "s" };
+            let ops = vec![
+                Operand::Reg(format!("{}{}", p, rd)),
+                Operand::Reg(format!("{}{}", p, rn)),
+            ];
+            let w = expect_word(encode_fneg(&ops));
+            let ftype = if dbl { 0b01u32 } else { 0b00u32 };
+
+            // Reference word: 0x1E214000 (single) / 0x1E614000 (double),
+            // OR'd with the two 5-bit register fields.
+            prop_assert_eq!(w, 0x1E214000u32 | (ftype << 22) | (rn << 5) | rd);
+            // Fixed bits of the scalar FP 1-source encoding.
+            prop_assert_eq!(w >> 24, 0x1Eu32);             // [31:24] = 0x1E
+            prop_assert_eq!((w >> 21) & 1, 1u32);          // bit 21 = 1
+            prop_assert_eq!(fneg_fixed_of(w), 0b10000u32);// [14:10] = 10000
+            // FNEG opcode occupies bits[20:15] and must equal 000010.
+            prop_assert_eq!(fneg_opcode_of(w), 0b000010u32);
+            // Register fields round-trip exactly into their 5-bit slots.
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(rn_of(w), rn);
+        }
+
+        // Oracle: reference / precision. ftype derived solely from dest prefix:
+        // 'd' => 01 (double), else => 00 (single); sf (bit 31) always 0.
+        #[test]
+        fn prop_fneg_ftype_from_dest(
+            rd in 0u32..32, rn in 0u32..32, dbl in any::<bool>(),
+        ) {
+            let p = if dbl { "d" } else { "s" };
+            let ops = vec![
+                Operand::Reg(format!("{}{}", p, rd)),
+                Operand::Reg(format!("{}{}", p, rn)),
+            ];
+            let w = expect_word(encode_fneg(&ops));
+            prop_assert_eq!(ftype_of(w), if dbl { 0b01 } else { 0b00 });
+            prop_assert_eq!(sf_of(w), 0); // scalar FP, never sf=1
+        }
+
+        // Oracle: determinism. Same operands => identical word.
+        #[test]
+        fn prop_fneg_is_deterministic(
+            rd in 0u32..32, rn in 0u32..32, dbl in any::<bool>(),
+        ) {
+            let p = if dbl { "d" } else { "s" };
+            let ops = vec![
+                Operand::Reg(format!("{}{}", p, rd)),
+                Operand::Reg(format!("{}{}", p, rn)),
+            ];
+            let w1 = expect_word(encode_fneg(&ops));
+            let w2 = expect_word(encode_fneg(&ops));
+            prop_assert_eq!(w1, w2);
+        }
+
+        // Negative contract (validated, PASSES): out-of-range FP register
+        // numbers (>= 32) MUST be rejected by get_reg/parse_reg_num, not
+        // masked into the 5-bit field.
+        #[test]
+        fn prop_fneg_rejects_out_of_range_reg(n in 32u32..256u32, pos in 0u32..2u32) {
+            let mut names = vec!["d0".to_string(), "d0".to_string()];
+            names[pos as usize] = format!("d{}", n);
+            let ops: Vec<Operand> = names.into_iter().map(Operand::Reg).collect();
+            prop_assert!(
+                encode_fneg(&ops).is_err(),
+                "register d{} must be rejected (5-bit field), not silently masked", n
+            );
+        }
+
+        // Negative contract (FINDING — FAILS): FNEG requires homogeneous
+        // FP-register operands. Mixed precision (Dd, Sn) and GP-bank operands
+        // (Xd, Xn) must be rejected, but encode_fneg derives ftype ONLY from
+        // the dest prefix and never validates either operand's bank or the
+        // source's precision, so it silently accepts illegal operands.
+        #[test]
+        fn prop_fneg_rejects_mismatched_precision_and_bank(n in 0u32..32) {
+            // Mixed precision: D dest, S source.
+            let mix = vec![
+                Operand::Reg(format!("d{}", n)),
+                Operand::Reg(format!("s{}", n)),
+            ];
+            prop_assert!(
+                encode_fneg(&mix).is_err(),
+                "mixed precision (Dd, Sn) must be rejected; got {:?}",
+                encode_fneg(&mix)
+            );
+            // GP-bank operands are not valid for FNEG.
+            let gp = vec![
+                Operand::Reg(format!("x{}", n)),
+                Operand::Reg(format!("x{}", n)),
+            ];
+            prop_assert!(
+                encode_fneg(&gp).is_err(),
+                "GP registers (x{}) are not valid FNEG operands; got {:?}",
+                n, encode_fneg(&gp)
+            );
+        }
+    }
+
     // ── encode_fp_1src (FP data-processing, 1 source: FRINTN/P/M/Z/A/X/I) ===
     // ARMv8-A layout: 0 00 11110 ftype 1 opcode 10000 Rn Rd
     //   bits[31:24]=0x1E, bits[23:22]=ftype, bit[21]=1,
