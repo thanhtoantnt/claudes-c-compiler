@@ -24,3 +24,5 @@ into the Rt field even for instructions whose Rt is architecturally fixed to XZR
 **Oracle verification:** clang-14 rejects `ic iallu, x5`, `ic ialluis, x0`,
 `tlbi vmalle1, x5`, `tlbi vmalle1is, x3`, `tlbi vmalle1, xzr` — all
 *"does not use a register"*.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/323

@@ -88,3 +88,5 @@ fn prop_tbz_rejects_bit_beyond_w_width(n in 0u32..=30u32, bit in 32u32..=63u32, 
 ```
 
 Minimal failing input today: `n = 0, bit = 40`.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/303

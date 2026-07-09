@@ -33,3 +33,5 @@ aliases `#0`.
 ```
 cargo test --lib system_barriers_hints::b_s2_brk_rejects_out_of_range_immediate -- --ignored
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/325

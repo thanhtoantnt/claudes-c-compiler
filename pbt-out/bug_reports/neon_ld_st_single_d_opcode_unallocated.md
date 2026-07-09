@@ -70,3 +70,5 @@ correctly setting `size = 0b01` (which only pairs validly with opcode
 ```
 
 
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/318

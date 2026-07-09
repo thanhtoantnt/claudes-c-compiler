@@ -93,3 +93,5 @@ prop_assert!(encode_stop("stadd", &[gp('x', 0), mem(1, 1)]).is_err());
 | `stop_offset_silently_dropped` | PASS (documents the mechanism) |
 | `stop_nonzero_offset_rejected` | ignored → **FAIL** under `--ignored` |
 | `stop_golden_encodings` | PASS |
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/302

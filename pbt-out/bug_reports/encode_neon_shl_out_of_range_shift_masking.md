@@ -140,3 +140,5 @@ fn shl_out_of_range_shift_regression() {
     }
 }
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/297

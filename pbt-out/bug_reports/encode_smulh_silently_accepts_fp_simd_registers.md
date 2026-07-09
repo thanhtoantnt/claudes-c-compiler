@@ -52,3 +52,5 @@ cargo test --lib data_processing_smull_smaddl_smulh_mneg_fpsimd_sp_pbt::smulh_re
 ```
 
 **GitHub Issue:** (none)
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/337

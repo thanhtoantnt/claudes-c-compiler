@@ -29,3 +29,5 @@ function has its own witness below.)
 **Oracle verification:** clang-14 rejects `sys #0, c0, c0, #0, d0`,
 `at s1e1r, d0`, `ic ivau, d0`, `tlbi vae1, d0`, `dc cvac, d0` — all
 *"invalid operand for instruction"*.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/321

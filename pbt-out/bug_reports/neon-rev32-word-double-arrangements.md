@@ -42,3 +42,5 @@ Same structural gap as REV16: `encode_neon_two_misc` only receives
 `(u_bit, opcode)`, not the legal-size set. Pass a legal-size mask in, or add
 an explicit arrangement guard (`arr ∈ {"8b","16b","4h","8h"}` /
 `size ∈ {00,01}`) in the `mod.rs` `rev32` dispatch arm before encoding.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/313

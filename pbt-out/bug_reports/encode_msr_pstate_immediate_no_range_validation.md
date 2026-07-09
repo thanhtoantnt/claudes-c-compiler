@@ -116,4 +116,5 @@ fn b1_msr_rejects_out_of_range_pstate_immediate() {
 Current behaviour: the assertion fails — e.g. `msr daifset, #16` returns
 `Ok(Word(3573760223))` (`0xD503_40DF`, i.e. `daifset #0`).
 
-**GitHub Issue:** <link if created>
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/283

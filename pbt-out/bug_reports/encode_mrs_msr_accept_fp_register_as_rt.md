@@ -122,4 +122,5 @@ fn b2_mrs_msr_reject_fp_register_rt() {
 Current behaviour: the assertion fails — e.g. `mrs d0, sctlr_el1` returns
 `Ok(Word(3577221120))` (`0xD538_1000`, i.e. identical to `mrs x0, sctlr_el1`).
 
-**GitHub Issue:** <link if created>
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/282

@@ -59,4 +59,5 @@ Failing property: `negs_rejects_mixed_register_widths`
 prop_assert!(encode_negs(&[Operand::Reg("w0".into()), Operand::Reg("x1".into())]).is_err());
 ```
 
-**GitHub Issue:** (none)
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/288

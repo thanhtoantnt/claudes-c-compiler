@@ -43,3 +43,5 @@ stays green). Reproduce with:
 ```
 cargo test --lib data_processing_extend_pbt::uxtb_rejects_x_destination -- --ignored
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/309

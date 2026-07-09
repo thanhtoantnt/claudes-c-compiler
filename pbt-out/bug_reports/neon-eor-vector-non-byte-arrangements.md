@@ -47,3 +47,5 @@ if arr_d != "8b" && arr_d != "16b" {
     return Err(format!("EOR (vector): invalid arrangement {arr_d:?}; only .8b/.16b allowed"));
 }
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/311

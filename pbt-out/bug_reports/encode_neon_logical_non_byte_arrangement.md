@@ -64,3 +64,5 @@ let q: u32 = match arr_d.as_str() {
     other => return Err(format!("NEON logical requires .8b/.16b, got .{other}")),
 };
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/294

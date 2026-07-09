@@ -22,3 +22,5 @@ masks instead of range-checking before `parse()`.
 (witness properties, run with `--ignored`).
 **Oracle verification:** clang-14 `--target=aarch64-linux-gnu` rejects `sys #8, …`,
 `sys #0, c16, c0, #0`, `sys #0, c0, c0, #8`.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/324

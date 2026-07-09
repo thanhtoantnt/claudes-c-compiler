@@ -75,3 +75,5 @@ The two long-double *properties* (`long_double_add_sub_round_trips_to_native_f64
 non-crashing domain (`|v| == 0` or `|v| >= 1.0`) via `prop_assume!` so they
 still provide coverage of the working range; lift that restriction once this bug
 is fixed.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/310

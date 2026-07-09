@@ -81,3 +81,5 @@ golden_fmul_by_element: assertion `left == right` failed
 - (0b01111 << 24)
 + (0b011111 << 23)   // bits [28:23] = 0 11111  -> bit 23 = 1
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/316

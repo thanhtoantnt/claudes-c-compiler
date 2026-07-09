@@ -71,3 +71,5 @@ let (u_bit, size_bits): (u32, u32) = match opc {
     _ => return Err(format!("UNALLOCATED/unsupported NEON logical opc: {opc}")),
 };
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/295

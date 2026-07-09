@@ -56,3 +56,5 @@ if index > max {
     return Err(format!("float by-element: lane index {index} out of range [0, {max}]"));
 }
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/317

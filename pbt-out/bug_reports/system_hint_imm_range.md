@@ -36,3 +36,5 @@ no-ops/diagnostics, but the miscompilation is silent).
 ```
 cargo test --lib system_barriers_hints::b_s3_hint_rejects_out_of_range_immediate -- --ignored
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/330

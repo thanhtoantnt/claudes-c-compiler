@@ -34,3 +34,5 @@ behaviour).
 ```
 cargo test --lib system_barriers_hints::b_s1_svc_rejects_out_of_range_immediate -- --ignored
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/331

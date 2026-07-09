@@ -51,4 +51,5 @@ Failing property: `sbc_rejects_fp_simd_in_any_position`
 prop_assert!(encode_sbc(&[Operand::Reg("x0".into()), Operand::Reg("x1".into()), Operand::Reg("v2".into())], false).is_err());
 ```
 
-**GitHub Issue:** (none)
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/299

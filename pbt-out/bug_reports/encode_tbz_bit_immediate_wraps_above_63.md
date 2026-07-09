@@ -99,3 +99,5 @@ fn prop_tbz_rejects_negative_bit((rt_name, _) in arb_gp_reg(), bit in -4096i64..
 ```
 
 Minimal failing inputs today: `bit = 64` and `bit = -1`.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/304

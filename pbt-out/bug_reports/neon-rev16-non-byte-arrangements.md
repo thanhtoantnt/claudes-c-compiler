@@ -49,3 +49,5 @@ dispatcher for the `rev16` arm:
 } else { encode_rev16(operands) },
 ```
 with an explicit `arr ∈ {"8b","16b"}` guard (or a size check) before encoding.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/312

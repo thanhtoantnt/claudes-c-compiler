@@ -93,3 +93,5 @@ prop_assert!(encode_bic(&[xreg(0), xreg(1), xreg(2), shift("foo", 0)]).is_err())
 prop_assert!(encode_bics(&[xreg(0), xreg(1), xreg(2), shift("foo", 0)]).is_err());
 prop_assert!(encode_mvn(&[xreg(0), xreg(1), shift("foo", 0)]).is_err());
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/298

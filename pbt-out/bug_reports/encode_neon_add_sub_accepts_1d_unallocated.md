@@ -13,3 +13,5 @@ The arrangement-to-size mapping does not filter out `.1d`; any arrangement that 
 
 ## Severity
 MEDIUM — emits UNALLOCATED encoding for an invalid assembly syntax that should be rejected.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/291

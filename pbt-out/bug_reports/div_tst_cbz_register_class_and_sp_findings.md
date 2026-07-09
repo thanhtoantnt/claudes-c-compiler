@@ -145,3 +145,5 @@ prop_assert!(encode_cbz(&[Operand::Reg("d0".into()), Operand::Symbol("lab".into(
 // SP aliasing
 prop_assert!(encode_tst(&[Operand::Reg("sp".into()), Operand::Reg("x0".into())]).is_err());
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/332

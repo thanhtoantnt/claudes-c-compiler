@@ -30,3 +30,5 @@ the `sy` option (CRm = 0xF).
 ```
 cargo test --lib system_barriers_hints::b_s4a_dmb_dsb_reject_register_operand -- --ignored
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/327

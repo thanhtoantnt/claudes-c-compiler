@@ -14,3 +14,5 @@ Same as `encode_neon_mla`/`encode_neon_mls` — the arrangement-to-size mapping 
 
 ## Severity
 MEDIUM — emits UNALLOCATED encoding; undefined behavior on hardware.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/296

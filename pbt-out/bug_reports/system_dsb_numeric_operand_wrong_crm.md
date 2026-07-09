@@ -33,3 +33,5 @@ barrier than intended, and a valid numeric CRm is mishandled).
 ```
 cargo test --lib system_barriers_hints::b_s4b_dmb_dsb_numeric_operand_maps_to_crm -- --ignored
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/328

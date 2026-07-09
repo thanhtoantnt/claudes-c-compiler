@@ -46,3 +46,5 @@ The `num_structs` and element size are both known to the encoder, so the
 required transfer-size check is straightforward; the fix is purely additive
 (input validation) and does not change the encoding of any currently-correct
 input.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/319

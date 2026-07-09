@@ -43,3 +43,5 @@ if rd > 31 {
     return Err(format!("register number {} out of range [0, 31]", rd));
 }
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/281

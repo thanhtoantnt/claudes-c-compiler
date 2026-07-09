@@ -58,4 +58,5 @@ Failing witness: `mul_rejects_fp_simd_in_any_position`
 cargo test --lib data_processing_mul_madd_msub_umaddl_umull_pbt::mul_rejects_fp_simd_in_any_position -- --ignored
 ```
 
-**GitHub Issue:** (none)
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/285

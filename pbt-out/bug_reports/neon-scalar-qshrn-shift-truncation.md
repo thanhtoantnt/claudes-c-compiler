@@ -37,3 +37,5 @@ let shift = shift_i as u32;
 `#[ignore]`d test `prop_rejects_truncating_shift` fails today (run with
 `cargo test --lib neon_scalar_qshrn_pbt -- --ignored prop_rejects_truncating_shift`).
 The default `cargo test` run stays green.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/314

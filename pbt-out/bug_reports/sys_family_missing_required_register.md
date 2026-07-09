@@ -23,3 +23,5 @@ must be an error.
 (witness properties, run with `--ignored`).
 **Oracle verification:** clang-14 rejects `at s1e1r`, `ic ivau`, `tlbi vae1`,
 `dc cvac` — all *"requires a register"*.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/322

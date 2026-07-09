@@ -59,3 +59,5 @@ let q: u32 = match arr_d.as_str() {
     other => return Err(format!("bic requires .8b or .16b, got .{other}")),
 };
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/292

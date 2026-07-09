@@ -88,3 +88,5 @@ let imm = imm as u32;
   form are encoded correctly).
 * `shift_rejects_missing_shift_operand` — passes (negative contract).
 * `shift_rejects_invalid_immediate` — `#[ignore]`d witness, fails as described.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/301

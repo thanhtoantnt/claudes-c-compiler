@@ -51,4 +51,5 @@ Failing property: `negs_rejects_fp_simd_in_any_position`
 prop_assert!(encode_negs(&[Operand::Reg("x0".into()), Operand::Reg("v1".into())]).is_err());
 ```
 
-**GitHub Issue:** (none)
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/289

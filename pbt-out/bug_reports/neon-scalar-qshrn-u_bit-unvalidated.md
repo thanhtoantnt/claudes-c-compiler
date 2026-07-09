@@ -32,3 +32,5 @@ if u_bit > 1 {
 `#[ignore]`d test `prop_rejects_out_of_range_u_bit` fails today (run with
 `cargo test --lib neon_scalar_qshrn_pbt -- --ignored prop_rejects_out_of_range_u_bit`).
 The default `cargo test` run stays green.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/315

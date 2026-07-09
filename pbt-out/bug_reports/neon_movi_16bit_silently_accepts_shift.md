@@ -14,3 +14,5 @@ The `.4h`/`.8h` branch does not check `operands.len() > 2` or validate the absen
 
 ## Severity
 MEDIUM — silent misencoding; the instruction executes as the unshifted form, silently changing program semantics.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/320
