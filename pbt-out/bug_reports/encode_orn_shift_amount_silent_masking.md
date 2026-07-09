@@ -1,52 +1,50 @@
-# Bug Report: `encode_orn` silently masks out-of-range shift amounts
+# Bug Report: `encode_orn` silently truncates shift amounts above 31
 
 **Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_orn`
-**Severity:** Medium
+**Severity:** High
 
 ## Summary
 
-`encode_orn` unconditionally masks the shift amount with `& 0x3F` without range-checking it against the register width.
-
-## Spec (ARMv8 ARM §C4.1.115)
-
-The shifted-register ORN `imm6` field (bits 15:10) holds the shift amount:
-- 64-bit (X) registers: valid range `0..=63`; `lsl #64` and above are UNDEFINED
-- 32-bit (W) registers: valid range `0..=31`; `32..=63` is UNPREDICTABLE
-
-GAS and llvm-mc reject these with `Error: immediate value out of range`.
+`encode_orn` masks shift amount with `& 0x3F` without width-dependent validation. For 32-bit W-register forms, shifts 32+ accepted and encoded as `amount % 64`, producing instruction with different shift.
 
 ## Root Cause
 
 ```rust
-let word = (sf << 31) | (0b01 << 29) | (0b01010 << 24) | (shift_type << 22) | (1 << 21)
-    | (rm << 16) | ((shift_amount & 0x3F) << 10) | (rn << 5) | rd;
+let imm6 = shift & 0x3F;  // no width check
 ```
-
-No validation that the shift amount fits the architectural range before masking.
 
 ## Reproduction
 
-**Input:** `orn x0, x0, x0, lsl #64`
+**Input:** `orn w0, w1, w2, lsl #32`
 
-**Expected:** `Err` — shift amount out of range (0..=63 for X-registers)
+**Expected:** `Err` — ORN shift out of range: 32 (W-register max is 31)
 
-**Actual:** `Ok(Word(_))` — encodes identically to `orn x0, x0, x0` (lsl #64 → lsl #0)
+**Actual:** `Ok(Word(...))` — imm6 = 32 % 64 = 32
 
-**Minimal failing input:** rd = 0, rn = 0, rm = 0, amount = 64
+**Minimal failing input:** is_64 = false, shift = 32 (or 64, 96, 127)
 
 ## Impact
 
-Silent mis-compilation: any caller passing an out-of-range shift emits a different instruction than intended with no diagnostic.
+W-register shifts 32+ accepted, encoded with potentially wrong semantics.
 
 ## Suggested Fix
 
-Range-check the shift against the width:
+Validate width before masking:
 
 ```rust
 let max_shift = if is_64 { 63 } else { 31 };
-if shift_amount > max_shift {
-    return Err(format!("shift amount {} out of range for orn", shift_amount));
+if shift < 0 || shift > max_shift {
+    return Err(format!("orn shift out of range: {}", shift));
 }
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/87
+## Regression Property
+
+Failing property: `orn_rejects_oversized_shift`
+
+```rust
+prop_assert!(encode_orn(&[wreg(0), wreg(1), wreg(2)], shift("lsl", 32)]).is_err());
+prop_assert!(encode_orn(&[xreg(0), xreg(1), xreg(2)], shift("lsl", 64)]).is_err());
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/92

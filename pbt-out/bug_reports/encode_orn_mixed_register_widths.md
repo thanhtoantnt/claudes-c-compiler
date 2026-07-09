@@ -1,48 +1,55 @@
-# Bug Report: `encode_orn` silently accepts mixed X/W register widths
+# Bug Report: `encode_orn` silently accepts mixed-width register operands
 
 **Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_orn`
-**Severity:** Medium
+**Severity:** High
 
 ## Summary
 
-All operands of a shifted-register logical op must share the same register width. GAS rejects `orn x0, w1, w2` with "Error: operand size mismatch". The encoder derives `sf` (bit 31) only from operand 0 and discards the widths of operands 1 and 2, so mixed X/W operands are silently encoded.
+`encode_orn` derives `sf` (width) bit **only from destination `Rd`**, discarding widths of `Rn` and `Rm`. ARMv8-A ORN (shifted register) requires all three operands to share same width. Mixed-width forms like `orn x0, w1, w2` accepted and encoded with `sf=1`.
 
 ## Root Cause
 
 ```rust
 let (rd, is_64) = get_reg(operands, 0)?;
-let (rn, _) = get_reg(operands, 1)?;
-let (rm, _) = get_reg(operands, 2)?;
-let sf = sf_bit(is_64);  // <-- only uses rd64
+let (rn, _) = get_reg(operands, 1)?;   // width discarded
+let (rm, _) = get_reg(operands, 2)?;   // width discarded
+let sf = sf_bit(is_64);
 ```
-
-The `is_64` flags from operands 1 and 2 are discarded, so width mismatches are never checked.
 
 ## Reproduction
 
-**Input:** `orn x0, w0, w0`
+**Input:** `orn x0, w1, w2, lsl #0`
 
-**Expected:** `Err` — operand size mismatch
+**Expected:** `Err` — all ORN operands must have matching widths
 
-**Actual:** `Ok` — encodes as 64-bit ORN reading W registers
+**Actual:** `Ok(Word(...))` — sf=1 from Rd, W-register numbers used
 
-**Minimal failing input:** rd = 0, rn = 0, rm = 0, mix = 0
+**Minimal failing input:** rd="x0", rn="w0", rm="w0", shift=0
 
 ## Impact
 
-A typo'd `orn x0, w1, w2` assembles without error but produces a 64-bit instruction reading W registers, silent mis-compilation. Same defect exists in `encode_eon`, `encode_bics`, `encode_mvn`, `encode_logical`.
+Mixed-width forms accepted. Same defect class as `encode_eon`, `encode_eor`, `encode_and`.
 
 ## Suggested Fix
 
-Capture and compare the widths of all three register operands:
+Collect and validate width flags:
 
 ```rust
-let (rd, rd64) = get_reg(operands, 0)?;
-let (rn, rn64) = get_reg(operands, 1)?;
-let (rm, rm64) = get_reg(operands, 2)?;
-if rd64 != rn64 || rd64 != rm64 {
-    return Err("orn operands must all be the same register width".to_string());
+let (rd, is_64) = get_reg(operands, 0)?;
+let (rn, rn_64) = get_reg(operands, 1)?;
+let (rm, rm_64) = get_reg(operands, 2)?;
+if rn_64 != is_64 || rm_64 != is_64 {
+    return Err("all ORN operands must have the same width".into());
 }
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/85
+## Regression Property
+
+Failing property: `orn_rejects_mixed_width_operands`
+
+```rust
+prop_assert!(encode_orn(&[xreg(0), wreg(1), wreg(2)], shift("lsl", 0)]).is_err());
+prop_assert!(encode_orn(&[wreg(0), xreg(1), xreg(2)], shift("lsl", 0)]).is_err());
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/91
