@@ -54,4 +54,13 @@ let word = (1u32 << 31) | (0b0011011101 << 21) | (rm << 16)
         | (ra << 10) | (rn << 5) | rd;
 ```
 
+## Regression Property
+
+Failing property: `umull_rejects_width_violations`
+
+```rust
+prop_assert!(encode_umull(&[wreg(0), wreg(1), wreg(2)]).is_err());  // W destination
+prop_assert!(encode_umull(&[xreg(0), xreg(1), xreg(2)]).is_err());  // X sources
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/108
