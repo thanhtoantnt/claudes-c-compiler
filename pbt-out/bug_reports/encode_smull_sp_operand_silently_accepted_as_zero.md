@@ -1,26 +1,51 @@
-# Bug Report: `encode_smull` silently accepts SP/WSP operands as zero registers
+# Bug Report: `encode_smull` silently accepts SP as accumulator
 
-**Target:** `src/backend/arm/assembler/encoder/data_processing.rs`, function `encode_smull`
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_smull`
+**Severity:** High
 
 ## Summary
 
-`encode_smull` uses the shared generic register parser, which maps `sp`/`wsp` to register number 31. SMULL is an alias of SMADDL and does not permit SP operands; register 31 in these fields is the zero register. The encoder accepts invalid SP/WSP operands and silently encodes them as XZR/WZR.
+`parse_reg_num` maps both `sp`/`wsp` and `xzr`/`wzr` to register number 31. SMULL encodes as `SMADDL Xd, Wn, Wm, XZR`, where `Ra = 31` means XZR, not SP. But `smull x0, w1, w2` with SP as implicit accumulator is accepted and produces wrong encoding.
+
+## Root Cause
+
+```rust
+let (rd, _) = get_reg(operands, 0)?;  // sp → 31, treated as XZR
+let (rn, _) = get_reg(operands, 1)?;
+let (rm, _) = get_reg(operands, 2)?;
+```
+
+No SP-form validation.
 
 ## Reproduction
 
-Characterization from the PBT campaign:
+**Input:** `smull sp, w1, w2`
 
-```text
-smull x0, wsp, w2
-```
+**Expected:** `Err` — SMULL destination must not be SP
 
-Actual behavior: returns `Ok(Word(_))` with `Rn = 31`, equivalent to `smull x0, wzr, w2`.
+**Actual:** `Ok(Word(...))` — SP encoded as register 31 (same as XZR)
 
 ## Impact
 
-Invalid source is accepted and assembled as a different instruction than written, changing multiplication semantics without a diagnostic.
+SP silently accepted and encoded as XZR. Wrong destination in multiply-accumulate path.
 
-## Suggested fix
+## Suggested Fix
 
-For multiply/long-multiply instruction classes, reject `sp`/`wsp` before converting to a register number.
+Reject SP as destination:
+
+```rust
+let name = match &operands[0] { Operand::Reg(r) => r.to_lowercase(), _ => String::new() };
+if name == "sp" || name == "wsp" {
+    return Err("SMULL destination must not be SP".into());
+}
+```
+
+## Regression Property
+
+Failing property: `smull_rejects_sp_destination`
+
+```rust
+prop_assert!(encode_smull(&[Operand::Reg("sp".into()), wreg(1), wreg(2)]).is_err());
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/98
