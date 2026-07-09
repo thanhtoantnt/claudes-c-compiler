@@ -202,6 +202,10 @@ mod data_processing_logical_not_pbt;
 mod load_store_ldar_ldxr_class_pbt;
 #[cfg(test)]
 mod data_processing_adc_sbc_neg_negs_pbt;
+#[cfg(test)]
+mod data_processing_mul_madd_msub_umaddl_umull_pbt;
+#[cfg(test)]
+mod fp_scalar_bank_precision_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
