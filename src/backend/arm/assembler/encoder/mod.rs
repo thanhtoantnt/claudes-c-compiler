@@ -40,6 +40,8 @@ mod neon_rev64_pbt;
 mod neon_pmull_pbt;
 #[cfg(test)]
 mod neon_faddp_pbt;
+#[cfg(test)]
+mod neon_fcvtn_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
