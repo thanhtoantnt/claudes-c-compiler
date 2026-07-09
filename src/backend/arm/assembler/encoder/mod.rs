@@ -134,6 +134,10 @@ mod data_processing_shift_pbt;
 mod encode_logical_pbt;
 #[cfg(test)]
 mod fp_scalar_fmov_pbt;
+#[cfg(test)]
+mod data_processing_mov_wide_imm_pbt;
+#[cfg(test)]
+mod fp_scalar_fcvt_rounding_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
