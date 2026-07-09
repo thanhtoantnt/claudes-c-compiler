@@ -154,6 +154,10 @@ mod system_msr_mrs_pbt;
 mod system_barriers_hints_pbt;
 #[cfg(test)]
 mod data_processing_mneg_smaddl_smulh_umulh_pbt;
+#[cfg(test)]
+mod neon_ld_st_multi_pbt;
+#[cfg(test)]
+mod neon_ld_st_single_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
