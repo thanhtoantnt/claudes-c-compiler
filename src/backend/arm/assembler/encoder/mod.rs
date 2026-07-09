@@ -56,6 +56,10 @@ mod neon_scalar_three_same_pbt;
 mod neon_three_diff_pbt;
 #[cfg(test)]
 mod neon_elem_long_pbt;
+#[cfg(test)]
+mod neon_three_diff_narrow_pbt;
+#[cfg(test)]
+mod neon_two_misc_narrow_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
