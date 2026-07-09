@@ -50,4 +50,4 @@ prop_assert!(encode_sbfiz(&[wreg(0), wreg(0), imm(0), imm(35)]).is_err());
 prop_assert!(encode_sbfiz(&[xreg(0), xreg(0), imm(0), imm(32)]).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/145
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/214

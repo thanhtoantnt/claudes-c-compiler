@@ -97,4 +97,4 @@ Failing property: `uxth_rejects_64bit_destination_form` (P6)
 prop_assert!(encode_uxth(&[xreg(0), xreg(0)]).is_err());  // X destination invalid
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/126
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/211

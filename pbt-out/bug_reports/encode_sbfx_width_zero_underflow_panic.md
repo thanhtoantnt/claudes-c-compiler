@@ -49,4 +49,4 @@ prop_assert!(encode_sbfx(&[xreg(0), xreg(1), imm(0), imm(0)]).is_err());  // wid
 prop_assert!(encode_sbfx(&[wreg(0), wreg(1), imm(0), imm(0)]).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/161
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/218

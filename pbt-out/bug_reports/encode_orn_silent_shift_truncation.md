@@ -61,4 +61,4 @@ prop_assert!(encode_orn(&[wreg(0), wreg(0), wreg(0)], shift("lsl", 63)]).is_err(
 | `orn_negative_contracts (a)` | PASS |
 | `orn_negative_contracts (b)` | **FAIL** |
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/88
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/232

@@ -41,4 +41,4 @@ Failing property: `umaddl_rejects_x_source_registers`
 prop_assert!(encode_umaddl(&[xreg(0), xreg(1), xreg(2), xreg(3)]).is_err());  // X sources
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/106
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/200

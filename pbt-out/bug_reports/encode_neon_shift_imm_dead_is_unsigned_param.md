@@ -45,4 +45,4 @@ Failing property: `prop_is_unsigned_ignored`
 prop_assert_ne!(encode_neon_shift_imm(&ops, true), encode_neon_shift_imm(&ops, false));
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/83
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/230

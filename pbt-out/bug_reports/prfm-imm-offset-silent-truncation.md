@@ -48,4 +48,4 @@ Failing property: `prop_prfm_large_offset_not_silently_truncated`
 prop_assert!(encode_prfm(&[Operand::Reg("x0".into()), mem_offset(xreg(1), 34359738368)]).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/119
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/208

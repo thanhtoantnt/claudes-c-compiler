@@ -81,3 +81,5 @@ halfword long multiply produces an object that references the wrong register,
 with no diagnostic. Low frequency (depends on register allocation hitting the
 upper half of the V register file for this instruction form) but high severity
 when it occurs (wrong code, no warning).
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/237

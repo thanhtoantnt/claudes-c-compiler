@@ -93,3 +93,5 @@ In `neon_three_diff_pbt.rs` (5 passing properties + 1 `#[ignore]`d finding):
   operands → `Err`).
 - **`#[ignore]`d finding** asserting `opcode >= 0x10` and `u_bit >= 2` return
   `Err` — this is the property this bug report documents.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/236

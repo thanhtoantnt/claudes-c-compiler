@@ -55,4 +55,4 @@ prop_assert!(encode_ubfx(&[xreg(0), xreg(1), imm(0), imm(65)]).is_err());  // wi
 prop_assert!(encode_ubfx(&[wreg(0), wreg(1), imm(0), imm(0)]).is_err());   // width=0
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/163
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/220

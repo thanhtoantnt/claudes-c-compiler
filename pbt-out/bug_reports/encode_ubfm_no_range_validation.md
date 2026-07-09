@@ -56,4 +56,4 @@ prop_assert!(encode_ubfm(&[xreg(0), xreg(1), imm(-1), imm(0)]).is_err());    // 
 prop_assert!(encode_ubfm(&[wreg(0), wreg(1), imm(0), imm(64)]).is_err());    // imms overflow
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/164
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/222

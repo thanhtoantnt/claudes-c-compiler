@@ -85,4 +85,4 @@ fn uxtw_rejects_32bit_destination_form() {
 ```
 
 **Reproduce:** `cargo test --lib data_processing::uxtw_props::uxtw_rejects_32bit_destination_form`
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/112
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/203

@@ -46,4 +46,4 @@ Failing property: `uxth_rejects_mixed_width`
 prop_assert!(encode_uxth(&[wreg(0), xreg(0)]).is_err());  // mixed width
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/128
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/213

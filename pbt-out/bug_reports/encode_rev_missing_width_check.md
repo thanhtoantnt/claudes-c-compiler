@@ -50,4 +50,4 @@ prop_assert!(encode_rev(&[wreg(0), xreg(0)]).is_err());  // W dest, X src
 prop_assert!(encode_rev(&[xreg(0), wreg(0)]).is_err());  // X dest, W src
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/154
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/215

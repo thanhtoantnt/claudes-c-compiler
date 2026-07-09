@@ -49,4 +49,4 @@ prop_assert!(encode_sxtb(&[xreg(0), wreg(0)]).is_err());
 prop_assert!(encode_sxtb(&[wreg(0), xreg(0)]).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/164
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/221

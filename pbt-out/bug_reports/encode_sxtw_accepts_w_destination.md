@@ -56,4 +56,4 @@ fn sxtw_rejects_w_destination(n in 0u32..=31) {
 }
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/101
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/199

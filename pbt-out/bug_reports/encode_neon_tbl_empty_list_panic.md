@@ -60,4 +60,4 @@ Failing property: `prop_empty_list_does_not_panic`
 prop_assert!(encode_neon_tbl(&[xreg(0), xreg(0), Operand::RegList(vec![])]).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/84
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/231

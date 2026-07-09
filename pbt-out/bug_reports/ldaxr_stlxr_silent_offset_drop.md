@@ -58,4 +58,4 @@ Failing property: `prop_nonzero_offset_rejected`
 prop_assert!(encode_ldaxr_stlxr(&[wreg(0), xreg(1), mem_offset(xreg(2), 1)], false).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/115
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/204

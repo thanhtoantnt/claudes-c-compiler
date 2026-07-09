@@ -63,4 +63,4 @@ prop_assert!(encode_umull(&[wreg(0), wreg(1), wreg(2)]).is_err());  // W destina
 prop_assert!(encode_umull(&[xreg(0), xreg(1), xreg(2)]).is_err());  // X sources
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/108
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/201

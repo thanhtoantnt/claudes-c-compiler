@@ -112,4 +112,4 @@ fn prop_nonzero_offset_rejected(
 Minimal failing case: `encode_swp("swp", &[Reg("x0"), Reg("x1"), Mem { base: "x0", offset: -1 }])`
 returns `Ok(Word(0xF8208040))`; expected `Err`.
 
-**GitHub Issue:** <link if created>
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/234

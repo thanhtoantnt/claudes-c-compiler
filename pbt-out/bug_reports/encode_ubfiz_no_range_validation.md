@@ -56,4 +56,4 @@ prop_assert!(encode_ubfiz(&[wreg(0), wreg(1), imm(32), imm(1)]).is_err());  // l
 prop_assert!(encode_ubfiz(&[xreg(0), xreg(1), imm(-1), imm(1)]).is_err()); // negative
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/163
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/219

@@ -51,4 +51,4 @@ prop_assert!(encode_movn(&[xreg(0), imm(1), shift("lsl", 17)]).is_err());  // in
 prop_assert!(encode_movn(&[wreg(0), imm(1), shift("lsl", 32)]).is_err());  // invalid for 32-bit
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/61
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/228

@@ -49,4 +49,4 @@ prop_assert!(encode_fsqrt(&[xreg(0), xreg(1)]).is_err());  // GP bank
 prop_assert!(encode_fsqrt(&[wreg(0), wreg(1)]).is_err());  // GP bank
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/173
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/225

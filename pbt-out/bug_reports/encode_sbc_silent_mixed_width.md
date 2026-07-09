@@ -50,4 +50,4 @@ Failing property: `sbc_rejects_mixed_width_operands`
 prop_assert!(encode_sbc(&[xreg(0), wreg(1), xreg(2)], false).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/92
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/233

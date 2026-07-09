@@ -55,4 +55,4 @@ prop_assert!(encode_fmadd_fmsub(&[xreg(0), xreg(1), xreg(2), xreg(3)], false).is
 prop_assert!(encode_fmadd_fmsub(&[wreg(0), wreg(1), wreg(2), wreg(3)], true).is_err());   // GP bank (FMSUB)
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/172
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/224

@@ -47,4 +47,4 @@ prop_assert!(encode_tst(&[wreg(0), wreg(1)], 64).is_err());
 prop_assert!(encode_tst(&[xreg(0), xreg(1)], 128).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/167
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/223

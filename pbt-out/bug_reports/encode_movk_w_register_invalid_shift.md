@@ -47,4 +47,4 @@ prop_assert!(encode_movk(&[wreg(0), imm(0xFFFF), shift(32)]).is_err());  // inva
 prop_assert!(encode_movk(&[wreg(0), imm(0xFFFF), shift(48)]).is_err());  // invalid
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/60
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/227

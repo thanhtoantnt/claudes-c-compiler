@@ -47,4 +47,4 @@ Failing property: `uxth_rejects_64bit_form_as_mov`
 prop_assert!(encode_uxth(&[xreg(0), xreg(0)]).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/127
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/212

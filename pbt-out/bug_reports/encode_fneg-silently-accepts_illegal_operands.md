@@ -53,4 +53,4 @@ prop_assert!(encode_fneg(&[wreg(0), wreg(1)]).is_err());  // GP bank
 prop_assert!(encode_fneg(&[vreg_arr(0, "8b"), vreg_arr(1, "8b")]).is_err());  // NEON form only
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/175
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/226

@@ -50,4 +50,4 @@ Failing property: `prop_out_of_range_imm9_is_rejected`
 prop_assert!(encode_ldtr_sized(&[xreg(0), mem_offset(xreg(1), 256)], true, 0).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/117
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/206

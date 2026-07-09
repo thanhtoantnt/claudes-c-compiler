@@ -122,3 +122,5 @@ Minimal failing input: `is_load = false, rt_num = 0, base_num = 0, off = 1`
 → `Ok(Word(3365927936))`. Expected: `Err`.
 
 **GitHub Issue:** _none_
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/235

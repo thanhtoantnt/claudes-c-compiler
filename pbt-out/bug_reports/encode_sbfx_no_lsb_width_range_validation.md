@@ -55,4 +55,4 @@ prop_assert!(encode_sbfx(&[xreg(0), xreg(1), imm(0), imm(65)]).is_err());  // wi
 prop_assert!(encode_sbfx(&[xreg(0), xreg(1), imm(-3), imm(1)]).is_err());  // negative lsb
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/160
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/217

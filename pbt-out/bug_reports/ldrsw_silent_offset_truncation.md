@@ -62,4 +62,4 @@ Failing property: `prop_out_of_range_mem_offset_rejected`
 prop_assert!(encode_ldrsw(&[xreg(0), mem_offset(xreg(1), 16384)], true).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/116
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/205

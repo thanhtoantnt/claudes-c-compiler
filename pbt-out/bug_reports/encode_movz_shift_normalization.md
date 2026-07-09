@@ -51,4 +51,4 @@ prop_assert!(encode_movz(&[xreg(0), imm(1), shift("lsl", 17)]).is_err());  // in
 prop_assert!(encode_movz(&[wreg(0), imm(1), shift("lsl", 32)]).is_err());  // invalid for 32-bit
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/63
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/229

@@ -46,4 +46,4 @@ Failing property: `umull_rejects_mixed_width_operands`
 prop_assert!(encode_umull(&[wreg(0), wreg(1), wreg(2)]).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/110
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/202

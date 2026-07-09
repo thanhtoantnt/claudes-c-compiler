@@ -54,4 +54,4 @@ prop_assert!(encode_ret(&[Operand::Reg("v5".into())]).is_err());
 prop_assert!(encode_ret(&[Operand::Reg("q31".into())]).is_err());
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/155
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/216
