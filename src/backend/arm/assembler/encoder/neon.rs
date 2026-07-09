@@ -3692,3 +3692,291 @@ mod prop_encode_neon_three_same_tests {
         }
     }
 }
+
+
+#[cfg(test)]
+mod prop_encode_neon_aes_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ORACLE: ARMv8-A ARM, AES cryptographic instructions.
+    //   AESE/AESD/AESMC/AESIMC <Vd>.16B, <Vn>.16B
+    //   0100 1110 0010 1000 opcode 10 Rn Rd
+    //    31----------------24 23----16 15--12 11-10 9-5 4-0
+    // Field masks (derived from the four canonical words below):
+    //   Rd -> [4:0],  Rn -> [9:5],  opcode -> [16:12] (only 00100..00111 allocated),
+    //   fixed "10" at [11:10],  prefix bits [31:17] constant.
+    // Golden words (Vd = Vn = V0.16B), taken straight from the ARM ARM examples:
+    //   AESE 0x4E284800  AESD 0x4E285800  AESMC 0x4E286800  AESIMC 0x4E287800
+    const AESE: u32 = 0x4E284800;
+    const AESD: u32 = 0x4E285800;
+    const AESMC: u32 = 0x4E286800;
+    const AESIMC: u32 = 0x4E287800;
+    // Everything except opcode[16:12], Rn[9:5], Rd[4:0]:
+    const FIXED_TEMPLATE: u32 = 0x4E28_0800;
+    const FIXED_PREFIX: u32 = 0x4E284800 >> 17; // == 0x2714, bits [31:17]
+    const NON_16B: &[&str] = &["8b", "4h", "8h", "2s", "4s", "1d", "2d"];
+
+    fn vreg(num: u32, arr: &str) -> Operand {
+        Operand::RegArrangement {
+            reg: format!("v{}", num),
+            arrangement: arr.to_string(),
+        }
+    }
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    // Independent spec oracle: place opcode at [16:12], Rn at [9:5], Rd at [4:0].
+    fn ref_word(rd: u32, rn: u32, opcode: u32) -> u32 {
+        FIXED_TEMPLATE | (opcode << 12) | (rn << 5) | rd
+    }
+
+    prop_compose! {
+        fn vreg_num()(n in 0u32..=31u32) -> u32 { n }
+    }
+
+    proptest! {
+        // Property 1 — Known-answer against the ARM ARM golden words for all
+        // four mnemonics (Vd = Vn = V0.16B). These constants come directly from
+        // the architecture reference, independent of the encoder's logic.
+        #[test]
+        fn prop_golden_known_answer(opcode in prop::sample::select(&[4u32, 5, 6, 7])) {
+            let expected = match opcode {
+                4 => AESE, 5 => AESD, 6 => AESMC, 7 => AESIMC, _ => unreachable!(),
+            };
+            let ops = vec![vreg(0, "16b"), vreg(0, "16b")];
+            prop_assert_eq!(word(encode_neon_aes(&ops, opcode)), expected);
+        }
+
+        // Property 2 — Differential against the independent ARM ARM field
+        // oracle, across all allocated opcodes and the full register range.
+        #[test]
+        fn prop_matches_spec_oracle(
+            opcode in prop::sample::select(&[4u32, 5, 6, 7]),
+            rd in vreg_num(), rn in vreg_num(),
+        ) {
+            let ops = vec![vreg(rd, "16b"), vreg(rn, "16b")];
+            prop_assert_eq!(word(encode_neon_aes(&ops, opcode)), ref_word(rd, rn, opcode));
+        }
+
+        // Property 3 — Layout invariants: prefix bits [31:17] are constant;
+        // Rd maps to [4:0] and Rn to [9:5] independently over 0..=31; the
+        // opcode field [16:12] is untouched by the register operands.
+        #[test]
+        fn prop_register_and_prefix_layout(
+            opcode in prop::sample::select(&[4u32, 5, 6, 7]),
+            rd in vreg_num(), rn in vreg_num(),
+        ) {
+            let ops = vec![vreg(rd, "16b"), vreg(rn, "16b")];
+            let w = word(encode_neon_aes(&ops, opcode));
+            prop_assert_eq!(w >> 17, FIXED_PREFIX, "prefix bits [31:17] must be constant");
+            prop_assert_eq!(w & 0x1F, rd, "Rd must map to bits [4:0]");
+            prop_assert_eq!((w >> 5) & 0x1F, rn, "Rn must map to bits [9:5]");
+            prop_assert_eq!((w >> 12) & 0x1F, opcode, "opcode must map to bits [16:12]");
+        }
+
+        // Property 4 — Arity contract: fewer than 2 operands must error.
+        #[test]
+        fn prop_arity_contract(n in 0usize..=1) {
+            let ops: Vec<Operand> = (0..n).map(|_| vreg(0, "16b")).collect();
+            let res = encode_neon_aes(&ops, 0b00100);
+            prop_assert!(res.is_err(), "{} operands must error, got {:?}", n, res);
+        }
+
+        // Property 5 — NEGATIVE CONTRACT (findings). The AES encoding space
+        // allocates ONLY opcodes 00100..00111; any other value is UNDEF at
+        // runtime (ARM ARM). Likewise AESE/AESD/AESMC/AESIMC require the .16B
+        // arrangement exclusively. The encoder must reject (a) unallocated
+        // opcodes and (b) non-.16B arrangements rather than silently emit a
+        // malformed / unallocated word. EXPECTED TO FAIL: the encoder performs
+        // neither check today.
+        #[test]
+        #[ignore = "documented bug: AES accepts unallocated opcodes and non-.16B arrangements"]
+        fn prop_unallocated_opcode_and_arrangement_must_error(
+            bad_opcode in (0u32..32u32)
+                .prop_filter("unallocated opcode", |o| !(*o >= 4 && *o <= 7)),
+            bad_arr in prop::sample::select(NON_16B),
+        ) {
+            let good = vec![vreg(0, "16b"), vreg(1, "16b")];
+            let res_op = encode_neon_aes(&good, bad_opcode);
+            prop_assert!(res_op.is_err(),
+                "unallocated AES opcode {:#07b} must error (only 00100..00111 valid), got {:?}",
+                bad_opcode, res_op);
+
+            let bad = vec![vreg(0, bad_arr), vreg(1, bad_arr)];
+            let res_arr = encode_neon_aes(&bad, 0b00100);
+            prop_assert!(res_arr.is_err(),
+                "AES requires .16B; arrangement {} must error, got {:?}",
+                bad_arr, res_arr);
+        }
+    }
+}
+
+// ── encode_neon_shift_right: property-based tests ────────────────────────
+//
+// Target: `encode_neon_shift_right(operands, u_bit, opcode)` encodes the
+// AArch64 Advanced-SIMD "shift right by immediate" family dispatched in
+// mod.rs: SRSHR/URSHR, SSRA/USRA, SRSRA/URSRA.
+//
+// ARM ARM layout (Advanced SIMD shift by immediate):
+//   31  30  29  28-23   22-19  18-16   15-11   10   9-5  4-0
+//   0   Q   U   011110  immh   immb    opcode   1    Rn   Rd
+//
+// Callers pass a *6-bit* opcode value whose low bit is the fixed '1' at
+// bit 10 (SRSHR=0b001001, SSRA=0b000101, SRSRA=0b001101), so
+// `(opcode << 10)` puts opcode[5:1] at bits 15-11 and opcode[0]=1 at bit 10.
+// immh:immb (7 bits, 22-16) = (esize*2) - shift, shift in 1..=esize.
+#[cfg(test)]
+mod shift_right_pbt_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // (arrangement, element_bits, Q) for every arrangement the encoder accepts.
+    const ARRANGEMENTS: &[(&str, u32, u32)] = &[
+        ("8b", 8, 0), ("16b", 8, 1),
+        ("4h", 16, 0), ("8h", 16, 1),
+        ("2s", 32, 0), ("4s", 32, 1),
+        ("2d", 64, 1),
+    ];
+    // Opcode values from the real dispatch table in mod.rs (6-bit, low bit=1).
+    const OPCODES: &[u32] = &[0b001001, 0b000101, 0b001101];
+
+    fn vreg(num: u32, arr: &str) -> Operand {
+        Operand::RegArrangement { reg: format!("v{}", num), arrangement: arr.to_string() }
+    }
+
+    fn encode(rd: u32, rn: u32, arr: &str, shift: i64, u_bit: u32, opcode: u32) -> Result<u32, String> {
+        let ops = vec![vreg(rd, arr), vreg(rn, arr), Operand::Imm(shift)];
+        match encode_neon_shift_right(&ops, u_bit, opcode) {
+            Ok(EncodeResult::Word(w)) => Ok(w),
+            Ok(other) => Err(format!("unexpected non-Word result: {:?}", other)),
+            Err(e) => Err(e),
+        }
+    }
+
+    // Independent reconstruction straight from the ARM ARM field layout.
+    // `(immhb << 16)` places the 7-bit immh:immb at bits 22-16 — written as a
+    // single shift rather than the encoder's split `(>>3)<<19 | (&7)<<16` form.
+    fn ref_word(rd: u32, rn: u32, q: u32, element_bits: u32, shift: u32, u_bit: u32, opcode: u32) -> u32 {
+        let immhb = (element_bits * 2) - shift; // bits 22-16
+        (q << 30) | (u_bit << 29) | (0b011110u32 << 23) | (immhb << 16)
+            | (opcode << 10) | (rn << 5) | rd
+    }
+
+    proptest! {
+        // 1. Differential oracle: for every accepted arrangement, every register
+        //    pair, both U values, all dispatched opcodes, and every in-range
+        //    shift, the encoded word equals the independent reference.
+        #[test]
+        fn prop_matches_reference(
+            rd in 0u32..32u32,
+            rn in 0u32..32u32,
+            u_bit in 0u32..2u32,
+            shift_factor in 1u32..1000u32,
+        ) {
+            for &(arr, element_bits, q) in ARRANGEMENTS {
+                let shift = (shift_factor % element_bits) + 1; // 1..=element_bits
+                for &opcode in OPCODES {
+                    let word = encode(rd, rn, arr, shift as i64, u_bit, opcode)
+                        .expect("valid shift-right must encode");
+                    prop_assert_eq!(word, ref_word(rd, rn, q, element_bits, shift, u_bit, opcode));
+                }
+            }
+        }
+
+        // 2. immh:immb invariant: bits 22-16 must equal (esize*2) - shift, i.e.
+        //    the shift amount is recoverable from the encoded word.
+        #[test]
+        fn prop_immhb_field(
+            u_bit in 0u32..2u32,
+            shift_factor in 1u32..1000u32,
+        ) {
+            for &(arr, element_bits, _q) in ARRANGEMENTS {
+                let shift = (shift_factor % element_bits) + 1;
+                for &opcode in OPCODES {
+                    let word = encode(3, 5, arr, shift as i64, u_bit, opcode).unwrap();
+                    let immhb = (word >> 16) & 0x7F;
+                    prop_assert_eq!(immhb, element_bits * 2 - shift,
+                        "arr={} shift={} immh:immb mismatch", arr, shift);
+                }
+            }
+        }
+
+        // 3. Field independence: Rd (4-0), Rn (9-5), opcode (15-10), the fixed
+        //    011110 (28-23) and bit-31=0 must not collide with each other or with
+        //    the size/shift fields for any register numbering.
+        #[test]
+        fn prop_fields_isolated(
+            rd in 0u32..32u32,
+            rn in 0u32..32u32,
+            u_bit in 0u32..2u32,
+        ) {
+            for &(arr, element_bits, _q) in ARRANGEMENTS {
+                let shift = element_bits; // max valid shift
+                for &opcode in OPCODES {
+                    let word = encode(rd, rn, arr, shift as i64, u_bit, opcode).unwrap();
+                    prop_assert_eq!(word & 0x1F, rd, "Rd field");
+                    prop_assert_eq!((word >> 5) & 0x1F, rn, "Rn field");
+                    prop_assert_eq!((word >> 10) & 0x3F, opcode, "opcode field (15-10)");
+                    prop_assert_eq!((word >> 23) & 0x3F, 0b011110u32, "fixed bits 28-23");
+                    prop_assert_eq!(word >> 31, 0u32, "bit 31 must be 0");
+                }
+            }
+        }
+
+        // 4. Negative contract: natural out-of-range shifts and malformed
+        //    operands are rejected for every element size. (All pass — confirms
+        //    the shift==0 / shift>esize / bad-arrangement / arity guards.)
+        #[test]
+        fn prop_out_of_range_rejected(
+            over in 1u32..1024u32,
+            neg in (-1000i64)..=(-1i64),
+        ) {
+            for &(arr, element_bits, _q) in ARRANGEMENTS {
+                prop_assert!(encode(0, 1, arr, 0, 0, 0b001001).is_err(),
+                    "shift 0 must be rejected for {}", arr);
+                let big = (element_bits + over) as i64;
+                prop_assert!(encode(0, 1, arr, big, 0, 0b001001).is_err(),
+                    "shift {} (>{}) must be rejected for {}", big, element_bits, arr);
+                prop_assert!(encode(0, 1, arr, neg, 0, 0b001001).is_err(),
+                    "negative shift {} must be rejected for {}", neg, arr);
+            }
+            // .1d is not a valid shift-right source arrangement
+            prop_assert!(encode(0, 1, "1d", 1, 0, 0b001001).is_err());
+            // too few operands
+            let short = vec![vreg(0, "4s"), vreg(1, "4s")];
+            prop_assert!(encode_neon_shift_right(&short, 0, 0b001001).is_err());
+            // shift slot is not an immediate
+            let wrong = vec![vreg(0, "4s"), vreg(1, "4s"), vreg(2, "4s")];
+            prop_assert!(encode_neon_shift_right(&wrong, 0, 0b001001).is_err());
+        }
+
+        // 5. Silent-truncation gap: the immediate is read as i64 and cast to
+        //    u32 *before* the range check (`let shift = get_imm(...)? as u32`).
+        //    An i64 immediate whose low 32 bits land in 1..=esize is accepted
+        //    even though the true value is far out of range. A conforming
+        //    assembler rejects such immediates. This property documents the gap
+        //    (it currently FAILS).
+        #[test]
+        #[ignore = "documented bug: shift-right casts large i64 immediates to u32 before validation"]
+        fn prop_huge_immediate_not_truncated(
+            k in 1u64..=4u64,
+            base in 1u32..64u32,
+        ) {
+            for &(arr, element_bits, _q) in ARRANGEMENTS {
+                let in_range_base = ((base - 1) % element_bits) + 1; // 1..=esize
+                let huge = ((k << 32) as i64) + in_range_base as i64; // >= 2^32
+                let res = encode(0, 1, arr, huge, 0, 0b001001);
+                prop_assert!(res.is_err(),
+                    "i64 shift {} (truncates to u32 {}) must be rejected for {}-bit elems, got {:?}",
+                    huge, in_range_base, element_bits, res);
+            }
+
+        }
+    }
+}
