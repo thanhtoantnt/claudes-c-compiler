@@ -1,19 +1,10 @@
-# Bug — `encode_add_sub` silently truncates extended-register shift (`imm3`)
+# Bug Report: `encode_add_sub` silently truncates extended-register shift (`imm3`)
 
-**Target:** `src/backend/arm/assembler/encoder/data_processing.rs`, `encode_add_sub` (extended-register branch)
-**Severity:** high — produces a *valid-but-wrong* encoding with no diagnostic.
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_add_sub` (extended-register branch)
+**Severity:** High
 
-## Where
-```rust
-if let Some(Operand::Extend { kind, amount }) = operands.get(3) {
-    ...
-    let imm3 = *amount & 0x7;   // <-- masks bits above the 3-bit imm3 field
-    let word = ... | (option << 13) | (imm3 << 10) | (rn << 5) | rd;
-    return Ok(EncodeResult::Word(word));
-}
-```
+## Summary
 
-## Problem
 The ARMv8 ARM *Add (extended register)* encoding places the optional shift into the
 3-bit `imm3` field (bits 12:10). The field can only hold values `0..=7`; the
 architecture further constrains the maximum per extend kind (e.g. for `uxtb`/`sxtb`
@@ -25,15 +16,37 @@ as `uxtw #0`, `… #9` as `uxtw #1`, etc. — a different instruction from the o
 source requested, with no diagnostic. This is the worst failure mode for an encoder:
 downstream consumers (assembler users, the linker, tests) cannot detect it.
 
-## Reproducing property (fails)
-`tests::extend_amount_above_7_must_be_rejected`
-```text
-minimal failing input: rd = 0, rn = 0, rm = 0, ek = 0, amount = 8
-assertion failed: encode_add_sub(&ops, false, false).is_err()
+## Root Cause
+
+```rust
+if let Some(Operand::Extend { kind, amount }) = operands.get(3) {
+    ...
+    let imm3 = *amount & 0x7;   // <-- masks bits above the 3-bit imm3 field
+    let word = ... | (option << 13) | (imm3 << 10) | (rn << 5) | rd;
+    return Ok(EncodeResult::Word(word));
+}
 ```
 
-## Suggested fix
+The code masks the shift amount with `& 0x7` without validating that the value fits in the 3-bit `imm3` field, allowing out-of-range values to silently wrap.
+
+## Reproduction
+
+**Input:** `add x0, x1, x2, uxtw #8`
+
+**Expected:** `Err` — shift amount out of range (0..=7)
+
+**Actual:** `Ok(Word(_))` — silently encoded as `uxtw #0`
+
+**Minimal failing input:** rd = 0, rn = 0, rm = 0, ek = 0, amount = 8
+
+## Impact
+
+Silent mis-compilation: invalid assembly is accepted and produces a valid-but-wrong instruction with no diagnostic. The assembler emits instructions that differ from the source, with no way for downstream consumers (assembler users, the linker, tests) to detect the corruption.
+
+## Suggested Fix
+
 Validate the shift amount before encoding:
+
 ```rust
 let imm3 = *amount;
 if imm3 > 7 {
@@ -42,9 +55,7 @@ if imm3 > 7 {
 // (optional, stricter) enforce per-extend-kind maximums per ARMv8 ARM
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/1
-
-## Regression property
+## Regression Property
 
 Failing property: `extend_amount_above_7_must_be_rejected`
 
@@ -52,4 +63,4 @@ Failing property: `extend_amount_above_7_must_be_rejected`
 prop_assert!(encode_add_sub(&ops, false, false).is_err());
 ```
 
-Minimal failing input: rd = 0, rn = 0, rm = 0, ek = 0, amount = 8
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/1
