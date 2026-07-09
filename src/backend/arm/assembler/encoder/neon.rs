@@ -2890,3 +2890,153 @@ mod neon_logical_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod neon_movi_props {
+    use super::{encode_neon_movi, EncodeResult};
+    use crate::backend::arm::assembler::parser::Operand;
+    use proptest::prelude::*;
+
+    fn movi_ops(rd: u32, arr: &str, imm: i64) -> Vec<Operand> {
+        vec![
+            Operand::RegArrangement { reg: format!("v{}", rd), arrangement: arr.to_string() },
+            Operand::Imm(imm),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        // Oracle: reference layout (AdvSIMD modified immediate)
+        // .8b/.16b byte-mask form: 0 Q 0 0 1111 0 0000 abc 1110 0 1 defgh Rd
+        // where imm8 = abc:defgh. Every field of the word must match the spec.
+        #[test]
+        fn byte_form_field_layout(arr in prop_oneof![Just("8b"), Just("16b")],
+                                  imm8 in 0u32..=255u32, rd in 0u32..=31u32) {
+            let w = match encode_neon_movi(&movi_ops(rd, arr, imm8 as i64)) {
+                Ok(EncodeResult::Word(w)) => w,
+                other => panic!("expected Word, got {:?}", other),
+            };
+            prop_assert_eq!(w >> 31, 0, "bit31 must be 0");
+            prop_assert_eq!((w >> 30) & 1, u32::from(arr == "16b"), "Q bit");
+            prop_assert_eq!((w >> 23) & 0x7F, 0b0011110, "fixed bits[29:23]");
+            prop_assert_eq!((w >> 19) & 0xF, 0, "bits[22:19] reserved 0");
+            prop_assert_eq!((w >> 16) & 0x7, (imm8 >> 5) & 0x7, "abc=imm8[7:5]@[18:16]");
+            prop_assert_eq!((w >> 12) & 0xF, 0b1110, "cmode=1110");
+            prop_assert_eq!((w >> 11) & 1, 0, "o2=0");
+            prop_assert_eq!((w >> 10) & 1, 1, "fixed 1@10");
+            prop_assert_eq!((w >> 5) & 0x1F, imm8 & 0x1F, "defgh=imm8[4:0]@[9:5]");
+            prop_assert_eq!(w & 0x1F, rd, "Rd@[4:0]");
+        }
+
+        // Oracle: algebraic field independence. Varying only Rd touches bits[4:0];
+        // varying only the immediate touches only bits[18:16] and bits[9:5].
+        #[test]
+        fn field_independence(imm8 in 0u32..=255u32, r1 in 0u32..=31u32, r2 in 0u32..=31u32) {
+            prop_assume!(r1 != r2);
+            let wr = |rd| match encode_neon_movi(&movi_ops(rd, "16b", imm8 as i64)) {
+                Ok(EncodeResult::Word(w)) => w, other => panic!("{:?}", other) };
+            let w1 = wr(r1);
+            let w2 = wr(r2);
+            // Only the Rd field differs.
+            prop_assert_eq!(w1 & !0x1Fu32, w2 & !0x1Fu32, "Rd leaked into other bits");
+
+            let i1 = match encode_neon_movi(&movi_ops(7, "16b", 0x5A)) {
+                Ok(EncodeResult::Word(w)) => w, other => panic!("{:?}", other) };
+            let i2 = match encode_neon_movi(&movi_ops(7, "16b", 0xA5)) {
+                Ok(EncodeResult::Word(w)) => w, other => panic!("{:?}", other) };
+            let imm_mask = (0x7u32 << 16) | (0x1Fu32 << 5);
+            prop_assert_eq!((i1 ^ i2) & !imm_mask, 0, "immediate leaked into non-imm bits");
+        }
+
+        // Oracle: cmode selection per arrangement / shift.
+        #[test]
+        fn cmode_per_form(
+            arr in prop_oneof![Just("4h"), Just("8h"), Just("2s"), Just("4s")],
+            imm8 in 0u32..=255u32, rd in 0u32..=31u32
+        ) {
+            let w = match encode_neon_movi(&movi_ops(rd, arr, imm8 as i64)) {
+                Ok(EncodeResult::Word(w)) => w, other => panic!("{:?}", other) };
+            let want_cmode = match arr {
+                "4h" | "8h" => 0b1000u32,
+                _ => 0b0000u32,
+            };
+            prop_assert_eq!((w >> 12) & 0xF, want_cmode, "cmode for {}", arr);
+            prop_assert_eq!((w >> 16) & 0x7, (imm8 >> 5) & 0x7, "abc");
+            prop_assert_eq!((w >> 5) & 0x1F, imm8 & 0x1F, "defgh");
+            prop_assert_eq!(w & 0x1F, rd, "Rd");
+            prop_assert_eq!((w >> 30) & 1, u32::from(arr == "8h" || arr == "4s"), "Q");
+        }
+
+        // Oracle: .2s/.4s LSL shift selects cmode 0000/0010/0100/0110.
+        #[test]
+        fn shift_selects_cmode(
+            arr in prop_oneof![Just("2s"), Just("4s")],
+            imm8 in 0u32..=255u32, rd in 0u32..=31u32,
+            shift in prop_oneof![Just(0u32), Just(8), Just(16), Just(24)]
+        ) {
+            let ops = vec![
+                Operand::RegArrangement { reg: format!("v{}", rd), arrangement: arr.to_string() },
+                Operand::Imm(imm8 as i64),
+                Operand::Shift { kind: "lsl".to_string(), amount: shift },
+            ];
+            let w = match encode_neon_movi(&ops) {
+                Ok(EncodeResult::Word(w)) => w, other => panic!("{:?}", other) };
+            let want = match shift { 0 => 0b0000u32, 8 => 0b0010, 16 => 0b0100, _ => 0b0110 };
+            prop_assert_eq!((w >> 12) & 0xF, want, "cmode for lsl #{}", shift);
+        }
+
+        // Negative contract: arrangements with no MOVI encoding are rejected.
+        #[test]
+        fn unsupported_arrangement_rejected(
+            arr in prop_oneof![Just("1d"), Just("1q"), Just("2h"), Just("16s"), Just("b"), Just("")]
+        ) {
+            prop_assert!(encode_neon_movi(&movi_ops(0, arr, 0)).is_err(),
+                "arrangement {:?} has no MOVI encoding", arr);
+        }
+
+        // Negative contract: unsupported LSL shift amounts for .2s/.4s error.
+        #[test]
+        fn unsupported_shift_rejected(
+            arr in prop_oneof![Just("2s"), Just("4s")],
+            shift in (1u32..32u32).prop_filter(
+                "not canonical", |s| !(*s == 0 || *s == 8 || *s == 16 || *s == 24))
+        ) {
+            let ops = vec![
+                Operand::RegArrangement { reg: "v0".to_string(), arrangement: arr.to_string() },
+                Operand::Imm(1),
+                Operand::Shift { kind: "lsl".to_string(), amount: shift },
+            ];
+            prop_assert!(encode_neon_movi(&ops).is_err(), "shift={} must error", shift);
+        }
+
+        // Oracle: .2d strict byte validation (each byte must be 0x00 or 0xFF).
+        #[test]
+        fn d2_form_strict_byte_validation(bits in 0u64..=255u64) {
+            let mut imm: u64 = 0;
+            for i in 0..8 { if (bits >> i) & 1 == 1 { imm |= 0xFFu64 << (i * 8); } }
+            prop_assert!(matches!(encode_neon_movi(&movi_ops(0, "2d", imm as i64)),
+                Ok(EncodeResult::Word(_))), "valid 2d imm 0x{:x}", imm);
+            // A byte that is neither 0x00 nor 0xFF must be rejected.
+            prop_assert!(encode_neon_movi(&movi_ops(0, "2d", 1)).is_err(),
+                "imm=1 has byte 0x01 and must error");
+        }
+
+        // Negative contract (EXPECTED TO FAIL — documents a bug):
+        // ARM MOVI byte/word/halfword immediates occupy an 8-bit field
+        // (0..=255). GAS/LLVM reject out-of-range values ("immediate must be
+        // an integer in range [0, 255]"). This encoder masks with `& 0xFF`
+        // and silently truncates (#256 -> #0) instead of returning Err,
+        // inconsistent with the strictly-validated .2d path.
+        #[test]
+        fn out_of_range_immediate_must_be_rejected(
+            arr in prop_oneof![Just("8b"), Just("16b"), Just("2s"), Just("4s"), Just("4h"), Just("8h")],
+            imm in 256i64..=65535i64
+        ) {
+            let res = encode_neon_movi(&movi_ops(0, arr, imm));
+            prop_assert!(res.is_err(),
+                "MOVI {:?} #{} is out of 8-bit range and must be rejected, got {:?}",
+                arr, imm, res);
+        }
+    }
+}

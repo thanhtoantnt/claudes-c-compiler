@@ -4205,3 +4205,177 @@ mod prop_encode_cas_tests {
         }
     }
 }
+
+/// Property-based tests for `encode_cas` MEMORY OFFSET VALIDATION.
+///
+/// Architectural invariant under test: ARMv8.1-A CAS (ARM ARM §C6.2.21,
+/// Compare and Swap) uses the *plain* `[Xn|SP]` addressing mode ONLY. There is
+/// no immediate-offset, pre-index, post-index, or register-offset form for any
+/// CAS variant (cas/casa/casl/casal/casb/.../cash/...). Any memory operand
+/// carrying a non-zero offset or writeback is architecturally UNDEFINED and
+/// MUST be rejected rather than silently encoded.
+#[cfg(test)]
+mod prop_encode_cas_offset_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ORACLE: ARM ARM §C6.2.21 — CAS encoding `size 001000 1 L 1 Rs o0 11111
+    // Rn Rt`. The fixed `11111[14:10]` field is the literal encoding of "no
+    // offset / no index register"; an immediate offset would occupy a
+    // different encoding class which CAS does not have. Therefore every offset
+    // other than zero (in the `[Xn]` form) is invalid.
+
+    fn reg(prefix: char, n: u32) -> Operand {
+        Operand::Reg(format!("{}{}", prefix, n))
+    }
+    fn mem0(base: &str) -> Operand {
+        Operand::Mem { base: base.to_string(), offset: 0 }
+    }
+    fn mem_off(base: &str, offset: i64) -> Operand {
+        Operand::Mem { base: base.to_string(), offset }
+    }
+
+    fn variants() -> &'static [&'static str] {
+        &[
+            "cas", "casa", "casl", "casal",
+            "casb", "casab", "caslb", "casalb",
+            "cash", "casah", "caslh", "casalh",
+        ]
+    }
+
+    fn ops_for(variant: &str, mem: Operand) -> Vec<Operand> {
+        // Pick valid register widths for the size class so the memory operand
+        // is the only thing that could make encoding fail.
+        let is_sized = variant.contains('b') || variant.contains('h');
+        let p = if is_sized { 'w' } else { 'x' };
+        vec![reg(p, 0), reg(p, 1), mem]
+    }
+
+    proptest! {
+        // Property 1 — POSITIVE contract: the only architecturally valid memory
+        // operand is `[Xn]` (offset == 0). For every CAS variant and every base
+        // register, offset==0 MUST be accepted, and an explicit `offset: 0` must
+        // encode identically to the canonical `[Xn]` form.
+        #[test]
+        fn prop_zero_offset_accepted_and_invariant(
+            vi in 0usize..12usize,
+            rn in 0u32..=31u32,
+        ) {
+            let mn = variants()[vi];
+            let canonical = mem0(&format!("x{}", rn));
+            let explicit_zero = mem_off(&format!("x{}", rn), 0);
+            let r1 = encode_cas(mn, &ops_for(mn, canonical));
+            let r2 = encode_cas(mn, &ops_for(mn, explicit_zero));
+            prop_assert!(
+                r1.is_ok(),
+                "{} with [x{}] (offset 0) should be Ok, got {:?}",
+                mn, rn, r1
+            );
+            // offset==0 must have NO observable effect on the word.
+            match (r1, r2) {
+                (Ok(EncodeResult::Word(a)), Ok(EncodeResult::Word(b))) => {
+                    prop_assert_eq!(a, b);
+                }
+                (a, b) => prop_assert!(false, "both Ok: got {:?} / {:?}", a, b),
+            }
+        }
+
+        // Property 2 — NEGATIVE contract (THE KEY FINDING): CAS has no offset
+        // addressing mode. ANY non-zero immediate offset in `[Xn, #imm]` MUST be
+        // rejected. The current implementation matches `Operand::Mem { base, .. }`
+        // and silently DROPS the offset, emitting `cas ...,[Xn]` with no
+        // diagnostic — a wrong-instruction-with-no-error defect.
+        //
+        // EXPECTED TO FAIL against the current implementation: documents the
+        // silent-offset-drop bug (see bug report below).
+        #[test]
+        fn prop_nonzero_immediate_offset_rejected(
+            vi in 0usize..12usize,
+            offset in 1i64..4096i64,
+            neg in any::<bool>(),
+            rn in 0u32..=31u32,
+        ) {
+            let mn = variants()[vi];
+            let off = if neg { -offset } else { offset };
+            let ops = ops_for(mn, mem_off(&format!("x{}", rn), off));
+            let r = encode_cas(mn, &ops);
+            prop_assert!(
+                r.is_err(),
+                "{} with [x{}, #{}] (nonzero offset) must be Err: CAS has no \
+                 offset addressing mode. Got Ok — offset was silently dropped, \
+                 producing an unintended `cas ...,[x{}]` encoding.",
+                mn, rn, off, rn
+            );
+        }
+
+        // Property 3 — NEGATIVE contract: pre-index writeback `[Xn, #imm]!` is
+        // not a CAS addressing mode and MUST always be rejected regardless of
+        // the offset value (including zero, since writeback itself is invalid).
+        #[test]
+        fn prop_pre_index_writeback_rejected(
+            vi in 0usize..12usize,
+            offset in -256i64..256i64,
+            rn in 0u32..=31u32,
+        ) {
+            let mn = variants()[vi];
+            let mem = Operand::MemPreIndex {
+                base: format!("x{}", rn),
+                offset,
+            };
+            let r = encode_cas(mn, &ops_for(mn, mem));
+            prop_assert!(
+                r.is_err(),
+                "{} with [x{}, #{}]! (pre-index) must be Err: CAS has no \
+                 writeback addressing mode. Got Ok.",
+                mn, rn, offset
+            );
+        }
+
+        // Property 4 — NEGATIVE contract: post-index `[Xn], #imm` is not a CAS
+        // addressing mode and MUST always be rejected regardless of offset value.
+        #[test]
+        fn prop_post_index_writeback_rejected(
+            vi in 0usize..12usize,
+            offset in -256i64..256i64,
+            rn in 0u32..=31u32,
+        ) {
+            let mn = variants()[vi];
+            let mem = Operand::MemPostIndex {
+                base: format!("x{}", rn),
+                offset,
+            };
+            let r = encode_cas(mn, &ops_for(mn, mem));
+            prop_assert!(
+                r.is_err(),
+                "{} with [x{}], #{} (post-index) must be Err: CAS has no \
+                 writeback addressing mode. Got Ok.",
+                mn, rn, offset
+            );
+        }
+
+        // Property 5 — NEGATIVE contract: register offset `[Xn, Xm]` (and its
+        // extend/shift variants) is not a CAS addressing mode and MUST be
+        // rejected. CAS only ever addresses `[Xn]`.
+        #[test]
+        fn prop_register_offset_rejected(
+            vi in 0usize..12usize,
+            rn in 0u32..=31u32,
+            rm in 0u32..=31u32,
+        ) {
+            let mn = variants()[vi];
+            let mem = Operand::MemRegOffset {
+                base: format!("x{}", rn),
+                index: format!("x{}", rm),
+                extend: None,
+                shift: None,
+            };
+            let r = encode_cas(mn, &ops_for(mn, mem));
+            prop_assert!(
+                r.is_err(),
+                "{} with [x{}, x{}] (register offset) must be Err: CAS has no \
+                 register-offset addressing mode. Got Ok.",
+                mn, rn, rm
+            );
+        }
+    }
+}

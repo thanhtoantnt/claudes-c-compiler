@@ -1329,6 +1329,82 @@ mod prop_encode_cond_branch_tests {
                 cased(cond_name, case_mode), cond_name
             );
         }
+
+        // Property H — determinism / purity. Encoding the same (cond, operand)
+        // pair repeatedly yields bit-identical word AND relocation (symbol and
+        // addend). encode_cond_branch is a pure function of its inputs.
+        #[test]
+        fn prop_encoding_is_deterministic(
+            cond_idx in 0usize..COND_TABLE.len(),
+            (op, exp_sym, exp_off) in arb_accepted_symbol(),
+        ) {
+            let cond_name = COND_TABLE[cond_idx].0;
+            let ops = vec![op];
+            prop_assert_eq!(
+                word_of(encode_cond_branch(cond_name, &ops)),
+                word_of(encode_cond_branch(cond_name, &ops))
+            );
+            let rel1 = reloc_of(encode_cond_branch(cond_name, &ops));
+            let rel2 = reloc_of(encode_cond_branch(cond_name, &ops));
+            prop_assert_eq!(&rel1.symbol, &rel2.symbol);
+            prop_assert_eq!(&rel1.symbol, &exp_sym);
+            prop_assert_eq!(rel1.addend, rel2.addend);
+            prop_assert_eq!(rel1.addend, exp_off);
+        }
+
+        // Property I — arity / negative contract. A conditional branch with no
+        // target operand must return Err. `get_symbol` reads operands[0]
+        // unconditionally, so an empty vector cannot yield a relocation.
+        #[test]
+        fn prop_empty_operands_rejected(
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let cond_name = COND_TABLE[cond_idx].0;
+            let empty: Vec<Operand> = vec![];
+            prop_assert!(
+                encode_cond_branch(cond_name, &empty).is_err(),
+                "encode_cond_branch must reject an empty operand list"
+            );
+        }
+
+        // Property J — word invariance across ALL accepted operand kinds.
+        // Property A only proves the fixed word for the `Symbol` form; Property
+        // D only checks the *relocation* across kinds. This closes the gap: the
+        // instruction word must be exactly `OPCODE | cond_val` for EVERY kind
+        // `get_symbol` accepts, because the operand influences ONLY the
+        // relocation, never the word.
+        #[test]
+        fn prop_word_is_operand_independent(
+            cond_idx in 0usize..COND_TABLE.len(),
+            (op, _sym, _off) in arb_accepted_symbol(),
+        ) {
+            let (cond_name, cond_val) = COND_TABLE[cond_idx];
+            let ops = vec![op];
+            prop_assert_eq!(
+                word_of(encode_cond_branch(cond_name, &ops)),
+                OPCODE | cond_val
+            );
+        }
+
+        // Property K — injectivity modulo aliases. Property B checks each known
+        // condition name maps to its table value; this complements it by
+        // asserting two DISTINCT condition values yield DISTINCT words. The cond
+        // field is the only varying part of the word and occupies the low 4
+        // bits, so distinct values cannot collide. Aliases (cs/hs, cc/lo) map
+        // to the same value and are covered by Property C.
+        #[test]
+        fn prop_distinct_cond_values_distinct_words(
+            i in 0usize..COND_TABLE.len(),
+            j in 0usize..COND_TABLE.len(),
+        ) {
+            let (_, vi) = COND_TABLE[i];
+            let (_, vj) = COND_TABLE[j];
+            let op = Operand::Symbol("target".into());
+            let wi = enc(COND_TABLE[i].0, &op);
+            let wj = enc(COND_TABLE[j].0, &op);
+            prop_assume!(vi != vj);
+            prop_assert_ne!(wi, wj);
+        }
     }
 }
 

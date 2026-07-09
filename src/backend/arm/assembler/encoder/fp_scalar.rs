@@ -1188,4 +1188,165 @@ mod tests {
             );
         }
     }
+
+    // ── encode_fmadd_fmsub (FMADD/FMSUB: Rd = Ra +/- (Rn * Rm)) ==============
+    // ARMv8-A "Floating-point data-processing (3 source)" layout:
+    //   0 00 11111 ftype 0 Rm o1 Ra Rn Rd
+    //   bits[31:24]=00011111 (0x1F), bits[23:22]=ftype (00=S, 01=D),
+    //   bit[21]=0, bits[20:16]=Rm, bit[15]=o1 (0=FMADD, 1=FMSUB),
+    //   bits[14:10]=Ra, bits[9:5]=Rn, bits[4:0]=Rd.
+    //   Cross-checked: FMADD D0,D0,D0,D0 = 0x1F400000, FMADD S0,S0,S0,S0 = 0x1F000000,
+    //   FMSUB D0,D0,D0,D0 = 0x1F408000 (only bit 15 differs from FMADD).
+    fn fms_rm_of(w: u32) -> u32 { (w >> 16) & 0x1F }
+    fn fms_ra_of(w: u32) -> u32 { (w >> 10) & 0x1F }
+    fn fms_o1_of(w: u32) -> u32 { (w >> 15) & 1 }
+
+    proptest! {
+        // Oracle: reference / field layout. Homogeneous-precision FP operands
+        // (all S or all D) with in-range register numbers + is_sub => every
+        // field lands at its canonical ARMv8 bit position with no truncation.
+        #[test]
+        fn prop_fmadd_places_fields(
+            rd in 0u32..32, rn in 0u32..32, rm in 0u32..32, ra in 0u32..32,
+            dbl in any::<bool>(), is_sub in any::<bool>(),
+        ) {
+            let p = if dbl { "d" } else { "s" };
+            let ops = vec![
+                Operand::Reg(format!("{}{}", p, rd)),
+                Operand::Reg(format!("{}{}", p, rn)),
+                Operand::Reg(format!("{}{}", p, rm)),
+                Operand::Reg(format!("{}{}", p, ra)),
+            ];
+            let w = expect_word(encode_fmadd_fmsub(&ops, is_sub));
+            let ftype = if dbl { 0b01u32 } else { 0b00u32 };
+            let o1 = if is_sub { 1u32 } else { 0u32 };
+
+            // Fixed bits of the scalar FP 3-source encoding.
+            prop_assert_eq!(w >> 24, 0x1Fu32);      // bits[31:24] = 00011111
+            prop_assert_eq!((w >> 21) & 1, 0u32);   // bit 21 = 0 (not FNMADD/FNMSUB)
+            prop_assert_eq!(sf_of(w), 0u32);        // scalar FP, sf always 0
+
+            // ftype, o1, and all four register fields round-trip exactly.
+            prop_assert_eq!(ftype_of(w), ftype);
+            prop_assert_eq!(fms_o1_of(w), o1);
+            prop_assert_eq!(rd_of(w), rd);          // [4:0]
+            prop_assert_eq!(rn_of(w), rn);          // [9:5]
+            prop_assert_eq!(fms_rm_of(w), rm);      // [20:16]
+            prop_assert_eq!(fms_ra_of(w), ra);      // [14:10]
+
+            // Reference reconstruction.
+            let expected = (0b00011111u32 << 24) | (ftype << 22) | (rm << 16)
+                | (o1 << 15) | (ra << 10) | (rn << 5) | rd;
+            prop_assert_eq!(w, expected);
+        }
+
+        // Oracle: precision + opcode derivation. ftype comes solely from the
+        // dest prefix ('d' => 01 double, else => 00 single); is_sub selects
+        // o1 (bit 15). FMADD vs FMSUB on identical operands differ ONLY in
+        // bit 15 — no other field is perturbed.
+        #[test]
+        fn prop_fmadd_ftype_and_o1_derivation(
+            rd in 0u32..32, rn in 0u32..32, rm in 0u32..32, ra in 0u32..32,
+            dbl in any::<bool>(),
+        ) {
+            let p = if dbl { "d" } else { "s" };
+            let ops = vec![
+                Operand::Reg(format!("{}{}", p, rd)),
+                Operand::Reg(format!("{}{}", p, rn)),
+                Operand::Reg(format!("{}{}", p, rm)),
+                Operand::Reg(format!("{}{}", p, ra)),
+            ];
+            let w_add = expect_word(encode_fmadd_fmsub(&ops, false));
+            let w_sub = expect_word(encode_fmadd_fmsub(&ops, true));
+
+            prop_assert_eq!(ftype_of(w_add), if dbl { 0b01 } else { 0b00 });
+            prop_assert_eq!(fms_o1_of(w_add), 0u32); // FMADD
+            prop_assert_eq!(fms_o1_of(w_sub), 1u32); // FMSUB
+            // The ONLY difference between FMADD and FMSUB is bit 15.
+            prop_assert_eq!(w_add ^ w_sub, 1u32 << 15);
+        }
+
+        // Oracle: determinism. Same operands + is_sub => identical word.
+        #[test]
+        fn prop_fmadd_is_deterministic(
+            rd in 0u32..32, rn in 0u32..32, rm in 0u32..32, ra in 0u32..32,
+            is_sub in any::<bool>(),
+        ) {
+            let ops = vec![
+                Operand::Reg(format!("d{}", rd)),
+                Operand::Reg(format!("d{}", rn)),
+                Operand::Reg(format!("d{}", rm)),
+                Operand::Reg(format!("d{}", ra)),
+            ];
+            let w1 = expect_word(encode_fmadd_fmsub(&ops, is_sub));
+            let w2 = expect_word(encode_fmadd_fmsub(&ops, is_sub));
+            prop_assert_eq!(w1, w2);
+        }
+
+        // Negative contract (validated, PASSES): out-of-range register numbers
+        // (>= 32) MUST be rejected by get_reg (parse_reg_num caps at 31), not
+        // masked into 5 bits; too-few operands (< 4) and non-register operands
+        // must be rejected.
+        #[test]
+        fn prop_fmadd_rejects_bad_regs_arity(
+            n in 32u32..256u32, pos in 0u32..4u32, imm in any::<i64>(),
+        ) {
+            // Out-of-range register in any of the four operand positions.
+            let mut names = vec!["d0".to_string(), "d0".to_string(),
+                                 "d0".to_string(), "d0".to_string()];
+            names[pos as usize] = format!("d{}", n);
+            let ops: Vec<Operand> = names.into_iter().map(Operand::Reg).collect();
+            prop_assert!(
+                encode_fmadd_fmsub(&ops, false).is_err(),
+                "register d{} must be rejected (5-bit field), not silently masked", n
+            );
+            // Too few operands (< 4).
+            prop_assert!(encode_fmadd_fmsub(&[], false).is_err());
+            prop_assert!(encode_fmadd_fmsub(&[Operand::Reg("d0".into())], false).is_err());
+            prop_assert!(encode_fmadd_fmsub(&[
+                Operand::Reg("d0".into()), Operand::Reg("d0".into()), Operand::Reg("d0".into())
+            ], false).is_err());
+            // Non-register operand.
+            let bad = vec![
+                Operand::Reg("d0".into()), Operand::Reg("d0".into()),
+                Operand::Reg("d0".into()), Operand::Imm(imm),
+            ];
+            prop_assert!(encode_fmadd_fmsub(&bad, false).is_err());
+        }
+
+        // Negative contract (FINDING — FAILS): FMADD/FMSUB operate ONLY on
+        // floating-point registers, and all four operands MUST be the same
+        // precision (all S or all D). But encode_fmadd_fmsub derives ftype
+        // solely from operands[0] and never validates operand banks or
+        // precision homogeneity, so it silently accepts illegal operands:
+        //   - GP-bank operands (W/X) are mis-encoded as single-precision FP;
+        //   - mixed-precision FP operands (Dd, Sn, Sm, Sa) corrupt the encoding.
+        #[test]
+        fn prop_fmadd_rejects_mixed_precision_and_gp_bank(n in 0u32..32) {
+            // Mixed precision: dest double, sources single.
+            let mix = vec![
+                Operand::Reg(format!("d{}", n)),
+                Operand::Reg(format!("s{}", n)),
+                Operand::Reg(format!("s{}", n)),
+                Operand::Reg(format!("s{}", n)),
+            ];
+            prop_assert!(
+                encode_fmadd_fmsub(&mix, false).is_err(),
+                "mixed precision (Dd, Sn, Sm, Sa) must be rejected; got {:?}",
+                encode_fmadd_fmsub(&mix, false)
+            );
+            // GP-bank operands are not valid FP 3-source operands.
+            let gp = vec![
+                Operand::Reg(format!("x{}", n)),
+                Operand::Reg(format!("x{}", n)),
+                Operand::Reg(format!("x{}", n)),
+                Operand::Reg(format!("x{}", n)),
+            ];
+            prop_assert!(
+                encode_fmadd_fmsub(&gp, false).is_err(),
+                "GP registers (x{}) are not valid FMADD/FMSUB operands; got {:?}",
+                n, encode_fmadd_fmsub(&gp, false)
+            );
+        }
+    }
 }
