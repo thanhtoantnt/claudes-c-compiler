@@ -70,3 +70,64 @@ Failing property: `<property_name>`
 4. **Regression property:**
    - ✅ Use `## Regression Property` section with `Failing property:`
    - ❌ Don't use `## Regression property`, `## Failing property`, etc.
+
+---
+
+# PBT Campaign Report Structure
+
+For overall PBT campaign reporting, use this format:
+
+```markdown
+# PBT Campaign Report: <campaign_name>
+
+## Summary
+
+**Date:** YYYY-MM-DD
+**Repository:** <repository_name>
+**Modules tested:** <list of modules tested>
+**Tests:** <total> total
+**Result:** <passing> passing, <bugs> bug(s)
+
+## Modules Tested
+
+| Module | Tests | Bugs | Oracles Used |
+|--------|-------|------|-------------|
+| `<module_path>` — <function_name> | <count> | <count> | <oracle_type> |
+| `<module_path>` — <function_name> | <count> | <count> | <oracle_type> |
+
+## Bugs Found
+
+### Bug #1: `<function>` `<description>`
+
+**Failing property:** `<property_name>` — Formal: `<formal_spec>`
+
+**Law:** `<invariant_or_contract>`
+
+**Minimal input:** `<minimal_failing_input>` (Hypothesis shrunk from the invalid domain)
+
+**Expected:** <expected_behavior> — **Actual:** <actual_behavior>
+
+**Root cause:** <technical_explanation>
+
+**Impact:** <consequences_of_bug>
+
+**Severity:** <severity_level>
+
+**Bug report:** `pbt-out/bug_reports/<bug_report_filename>`
+
+## Design Caveats
+
+<any limitations or caveats in the test design>
+
+## Test Files Created
+
+| File | Tests |
+|------|-------|
+| `<test_file_path>` | <count> — <description> |
+| `<test_file_path>` | <count> — <description> |
+
+## Output Directories
+
+- `pbt-out/` — `PLAN.md`, `PROPERTIES.md`, `REPORT.md`
+- `pbt-out/bug_reports/` — <list of bug reports>
+```
