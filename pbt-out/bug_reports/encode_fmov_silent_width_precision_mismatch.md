@@ -1,69 +1,63 @@
 # Bug Report: `encode_fmov` silently accepts width/precision-mismatched operands
 
-**Target:** `src/backend/arm/assembler/encoder/fp_scalar.rs` — `encode_fmov`
-**Severity:** Medium (incorrect-code emission, no diagnostic)
-**All 5 PBT properties pass** — this report documents a *separate* functional gap
-found during analysis and confirmed by probe.
+**Target:** `src/backend/arm/assembler/encoder/fp_scalar.rs` → `encode_fmov`
+**Severity:** Medium
 
 ## Summary
 
-`encode_fmov` derives the instruction's `sf`/`ftype` from **only one** operand of
-each pair and never cross-checks that the two operands have matching width
-(GP↔FP) or matching precision (FP↔FP). As a result, operands that the AArch64
-ARM defines as UNDEFINED/UNALLOCATED are accepted and encoded as a different,
-plausible-looking instruction with **no error**. The wrong encoding is then
-written verbatim into the object file.
+`encode_fmov` derives `sf`/`ftype` from **only one operand of each pair** and never validates width/precision coherence. GP↔FP pairs must match widths (`Dd↔Xn`, `Sd↔Wn`), and FP↔FP pairs must match precision. Mismatches produce wrong encodings.
 
-## Root cause
+## Root Cause
 
-- **GP→FP branch** (`rd_is_fp && !rm_is_fp`): `is_double = rd_lower.starts_with('d')`.
-  The GP source register's width (`x` vs `w`) is **ignored**.
-- **FP→GP branch** (`!rd_is_fp && rm_is_fp`): `is_double = rm_lower.starts_with('d')`.
-  The GP destination's width (`x` vs `w`) is **ignored**.
-- **FP↔FP branch** (`rd_is_fp && rm_is_fp`): `is_double = rd.starts_with('d') || rm.starts_with('d')`.
-  No check that both operands are the same precision (`s` vs `d`).
+- GP→FP: `sf` from source GP register width (discarded)
+- FP→GP: `sf` from dest GP register width (discarded)
+- FP↔FP: `is_double = rd.starts_with('d') || rm.starts_with('d')` — OR not AND
 
-## Confirmed cases (probe output, this build)
+## Reproduction
 
-| Input          | Emitted word    | Actually decodes as | Correct behavior |
-|----------------|-----------------|---------------------|------------------|
-| `fmov d0, w1`  | `0x9E670020` (sf=1, ftype=01) | `fmov d0, x1` | **Err** — D dest needs X source |
-| `fmov s0, x1`  | `0x1E270020` (sf=0, ftype=00) | `fmov s0, w1` | **Err** — S dest needs W source |
-| `fmov w0, d1`  | `0x9E660020` (sf=1, ftype=01) | `fmov x0, d1` | **Err** — D source needs X dest |
-| `fmov x0, s1`  | `0x1E260020` (sf=0, ftype=00) | `fmov w0, s1` | **Err** — S source needs W dest |
-| `fmov d0, s1`  | `0x1E604020` (ftype=01)        | `fmov d0, d1` | **Err** — FP↔FP requires matching precision |
+**Input:** `fmov d0, w1`
 
-Each emits a syntactically valid 32-bit word that the disassembler renders as a
-*different instruction* than the one written, with the source/dest register
-number stolen from the wrong-width/wrong-precision operand.
+**Expected:** `Err` — FMOV D-register requires X-register GP source
+
+**Actual:** `Ok(Word(0x9E670020))` — silently encodes as `fmov d0, x1` (W→X coerced)
+
+**Other failing inputs:**
+- `fmov s0, x1` → encodes as `fmov s0, w1` (X→W)
+- `fmov d0, s1` → encodes as `fmov d0, d1` (S→D)
 
 ## Impact
 
-- A typo or a buggy codegen pass (e.g. passing a W source to a D move, or an S
-  register paired with a D) produces a **wrong-width register access** with no
-  assembler error, silently corrupting codegen. Hard to diagnose downstream.
-- `fmov d0, s1` reinterprets the S register's number in a D-context encoding —
-  architecturally UNALLOCATED per the ARMv8 ARM (FMOV (register) requires
-  `ftype` to match both operand sizes).
+Silent miscompilation: operand width/precision corrupted with no error. Wrong-width register access, architecturally UNALLOCATED encodings produced.
 
-## Suggested fix
+## Suggested Fix
 
-Validate consistency before encoding:
-- GP→FP: `Dd ↔ Xn`, `Sd ↔ Wn` (reject `Dd,Wn` and `Sd,Xn`).
-- FP→GP: `Xd ↔ Dn`, `Wd ↔ Sn` (reject `Xd,Sn` and `Wd,Dn`).
-- FP↔FP: require both operands the same precision (`s/s` or `d/d`); reject mixed.
+Validate width/precision coherence before encoding:
 
-Return `Err("fmov: operand width/precision mismatch")` on violation. (Note also
-that the GP-register width helpers `is_64bit_reg`/`is_32bit_reg` already exist in
-`encoder/mod.rs` and can be reused.)
+```rust
+// GP→FP: Dd ↔ Xn, Sd ↔ Wn
+if rd_is_fp && !rm_is_fp {
+    let expects_x = rd_name.starts_with('d');
+    let has_x = rn_name.starts_with('x');
+    if expects_x != has_x {
+        return Err("FMOV: Dd requires Xn, Sd requires Wn".into());
+    }
+}
+// FP↔FP: must share precision
+if rd_is_fp && rm_is_fp {
+    if rd_name.starts_with('d') != rm_name.starts_with('d') {
+        return Err("FMOV: FP-to-FP move requires matching precision".into());
+    }
+}
+```
 
-## Test coverage note
+## Regression Property
 
-The added property suite (`fp_scalar::tests`, 5 properties) proves the **happy
-path is bit-exact** (reference encodings `0x1E204020`/`0x1E604020`/`0x9E670000`/
-`0x1E270000`/`0x9E660000`/`0x1E260000`, correct `sf`/`ftype`/`rmode`, full 5-bit
-register round-trip with **no truncation** for `0..=31`, and rejection of
-immediates / short arity / out-of-range register numbers). The mismatch gap
-above is deliberately *not* asserted as a failing test to keep the suite green;
-it is tracked here.
+Failing property: `prop_fmov_rejects_mismatched_width_and_precision`
+
+```rust
+prop_assert!(encode_fmov(&[dreg(0), wreg(1)]).is_err());  // D-register needs X source
+prop_assert!(encode_fmov(&[sreg(0), xreg(1)]).is_err());  // S-register needs W source
+prop_assert!(encode_fmov(&[dreg(0), sreg(1)]).is_err());  // FP precision mismatch
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/145
