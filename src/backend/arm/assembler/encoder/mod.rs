@@ -20,6 +20,7 @@ mod bitfield;
 mod neon;
 #[cfg(test)]
 mod neon_ins_pbt;
+mod neon_mla_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
