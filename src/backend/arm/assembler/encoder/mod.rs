@@ -146,6 +146,10 @@ mod fp_scalar_int_to_float_pbt;
 mod load_store_ldp_stp_pbt;
 #[cfg(test)]
 mod load_store_prfm_prop_tests;
+#[cfg(test)]
+mod prop_adrp_cbz_tbz;
+#[cfg(test)]
+mod system_msr_mrs_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
