@@ -1,45 +1,38 @@
-# Bug Report — `encode_add_sub`: W-register shifted form silently accepts shift ≥ 32
+# Bug Report: `encode_add_sub` W-register shifted form silently accepts shift ≥ 32
 
-**Function:** `encode_add_sub` in
-`src/backend/arm/assembler/encoder/data_processing.rs`
-
-**Severity:** Medium (emits an UNDEFINED AArch64 encoding instead of an
-assembler error)
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_add_sub`
+**Severity:** Medium
 
 ## Summary
 
-In the shifted-register branch, the shift amount is masked into the 6-bit
-`imm6` field with `& 0x3F` for *both* 32-bit (W) and 64-bit (X) forms:
+In the shifted-register branch, the shift amount is masked into the 6-bit `imm6` field with `& 0x3F` for *both* 32-bit (W) and 64-bit (X) forms:
 
 ```rust
 let word = ((sf << 31) | (op << 30) | (s_bit << 29) | (0b01011 << 24) | (shift_type << 22))
          | (rm << 16) | ((shift_amount & 0x3F) << 10) | (rn << 5) | rd;
 ```
 
-For a 64-bit register, `imm6 ∈ [0, 63]` is valid, so masking is correct.
-For a 32-bit register (`sf == 0`), the ARMv8 ARM restricts `imm6` to
-`[0, 31]`; any larger value is UNDEFINED. GAS and LLVM-MC reject such
-encodings (e.g. `add w0, w0, w0, lsl #32`). This implementation instead
-silently encodes `imm6 = 32`, producing a word that is architecturally
-UNDEFINED.
+For a 64-bit register, `imm6 ∈ [0, 63]` is valid, so masking is correct. For a 32-bit register (`sf == 0`), the ARMv8 ARM restricts `imm6` to `[0, 31]`; any larger value is UNDEFINED. GAS and LLVM-MC reject such encodings (e.g. `add w0, w0, w0, lsl #32`). This implementation instead silently encodes `imm6 = 32`, producing a word that is architecturally UNDEFINED.
+
+## Root Cause
+
+The `& 0x3F` mask is applied to the shift amount without first checking if the value exceeds the valid range for the register width. For 32-bit registers, shift amounts 32..=63 should be rejected but are silently masked.
 
 ## Reproduction
 
-Property `w_reg_shifted_form_rejects_shift_above_31` (negative contract) fails
-with minimized input:
+**Input:** `add w0, w0, w0, lsl #32`
 
-```
-rd = 0, rn = 0, rm = 0, amount = 32, sk = 0   // add w0, w0, w0, lsl #32
-```
+**Expected:** `Err` — shift amount out of range (0..=31 for W-registers)
 
-The call returns `Ok(EncodeResult::Word(..))`; the test asserts `is_err()`.
+**Actual:** `Ok(EncodeResult::Word(..))` — emits UNDEFINED encoding
 
-## Expected behavior
+**Minimal failing input:** rd = 0, rn = 0, rm = 0, amount = 32, sk = 0
 
-For 32-bit shifted-register operands, `shift_amount` outside `[0, 31]` must be
-rejected with an `Err`, matching GAS/LLVM-MC.
+## Impact
 
-## Suggested fix
+Emits architecturally UNDEFINED encodings. For 32-bit registers, shift amounts 32..=63 are UNDEFINED (may behave unpredictably on hardware). The assembler accepts invalid instructions and produces words that hardware treats as undefined behavior.
+
+## Suggested Fix
 
 Validate the shift amount against register width before encoding:
 
@@ -53,28 +46,12 @@ if shift_amount > max_shift {
 }
 ```
 
-## What passes (verified by the new suite)
-
-All other `encode_add_sub` branches are correct for the tested inputs:
-
-- Immediate form (unshifted, auto/`lsl #12` shifted, negative-imm op flip,
-  out-of-range → `Err`, `sf` width).
-- Shifted-register form: `lsl`/`lsr`/`asr` shift-type field, `imm6` placement,
-  `S` bit, register placement (64-bit).
-- Extended-register form: all 8 extend kinds (`uxtb`…`sxtx`) map to the correct
-  `option` field with bit 21 set and `imm3 == 0`.
-- SP operand (rd or rn = `sp`) correctly routes to the extended-register form
-  with `option = UXTX` so register 31 reads as SP, not XZR.
-- Relocation modifiers: `:lo12:` → `AddAbsLo12`, `:tprel_lo12_nc:` →
-  `TlsLeAddTprelLo12`, `:tprel_hi12:` → `TlsLeAddTprelHi12` with `sh = 1`;
-  `imm12` left zero for the linker in all three.
-
-## Regression property
+## Regression Property
 
 Failing property: `w_reg_shifted_form_rejects_shift_above_31`
 
 ```rust
-prop_assert!(encode_add_sub(&[wreg(rd), wreg(rn), wreg(rm), Operand::Shift { kind: "lsl".into(), amount: 32 }], false, false).is_err());
+prop_assert!(encode_add_sub(&[wreg(rd), wreg(rn), wreg(rm)], "lsl", 32], false, false).is_err());
 ```
 
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/7
