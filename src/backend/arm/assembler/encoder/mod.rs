@@ -82,6 +82,10 @@ mod neon_shll_pbt;
 mod neon_rbit_pbt;
 #[cfg(test)]
 mod neon_float_cmp_zero_pbt;
+#[cfg(test)]
+mod neon_sli_pbt;
+#[cfg(test)]
+mod neon_across_long_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
