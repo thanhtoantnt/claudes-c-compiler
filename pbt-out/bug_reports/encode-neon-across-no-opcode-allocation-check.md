@@ -112,4 +112,4 @@ fn across_rejects_unallocated_opcodes() {
 
 Reproduce: `cargo test --lib neon_across_pbt::across_rejects_unallocated_opcodes -- --ignored`
 
-**GitHub Issue:** _(none yet)_
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/204

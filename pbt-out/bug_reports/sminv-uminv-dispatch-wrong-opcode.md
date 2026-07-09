@@ -80,4 +80,4 @@ top-level `encode_instruction` dispatch and assert the result is `0x4EB0B820`.
 // uminv v0.4s, v1.4s  →  0x6EB0B820
 ```
 
-**GitHub Issue:** _(none yet)_
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/210

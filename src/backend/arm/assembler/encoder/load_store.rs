@@ -601,6 +601,174 @@ pub(crate) fn encode_ldrs(operands: &[Operand], size: u32) -> Result<EncodeResul
     Err(format!("unsupported ldrsb/ldrsh operands: {:?}", operands))
 }
 
+#[cfg(test)]
+mod prop_encode_ldrs_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: spec-conformance / negative contract — FIELD PLACEMENT +
+    // OFFSET VALIDATION.
+    //
+    // Target: `encode_ldrs` (LDRSB/LDRSH — Load Register Signed Byte/Half,
+    // ARM ARM §C6.2.118 / §C6.2.124, all addressing forms).
+    //
+    // LDRSB: size=00 (byte); LDRSH: size=01 (half).
+    // opc selects the destination width: opc=10 → 64-bit Xt target,
+    // opc=11 → 32-bit Wt target.
+    //
+    // Encodings emitted by the function:
+    //   unsigned offset : size 111 V=0 01 opc imm12        Rn Rt
+    //   unscaled (LDUR) : size 111 V=0 00 opc 0 imm9 00    Rn Rt   (Mem fallback)
+    //   post-index      : size 111 V=0 00 opc 0 imm9 01    Rn Rt
+    //   pre-index       : size 111 V=0 00 opc 0 imm9 11    Rn Rt
+    //   register offset : size 111 V=0 00 opc 1 Rm opt S 10 Rn Rt
+    //
+    // The imm9 field ([20:12]) is a SIGNED 9-bit offset in the range
+    // [-256, 255]. Offsets outside that range are NOT representable in the
+    // unscaled / pre / post forms and MUST be rejected. BUG: the encoder
+    // computes `imm9 = (*offset as i32) & 0x1FF` with NO range check, so
+    // out-of-range offsets are silently corrupted (e.g. -300 → +212,
+    // +4096 → 0, +512 → 0). This is the same masking defect already
+    // documented for the sibling `encode_ldtr_sized` encoder. Properties 3
+    // & 5 (negative contracts) fail today — that failure IS the bug.
+
+    fn gp_reg(width: char, num: u32) -> Operand {
+        Operand::Reg(format!("{}{}", width, num))
+    }
+    fn mem_op(base_num: u32, offset: i64) -> Operand {
+        Operand::Mem { base: format!("x{}", base_num), offset }
+    }
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+    /// Sign-extend the imm9 field ([20:12]) back to i32.
+    fn decode_imm9(w: u32) -> i32 {
+        let enc = (w >> 12) & 0x1FF;
+        if enc & 0x100 != 0 {
+            (enc | 0xFFFFFE00) as i32
+        } else {
+            enc as i32
+        }
+    }
+
+    proptest! {
+        // ── Property 1: field placement round-trips (reference). ──
+        // For all in-range valid encodings the Rt=[4:0], Rn=[9:5],
+        // size=[31:30] and opc=[23:22] fields must reflect the inputs.
+        // PASSES today.
+        #[test]
+        fn prop_fields_round_trip(
+            size in 0u32..=1u32,
+            is_64 in any::<bool>(),
+            rt_num in 0u32..=31u32,
+            base_num in 0u32..=31u32,
+            off in -256i64..=255i64,
+        ) {
+            let width = if is_64 { 'x' } else { 'w' };
+            let expected_opc: u32 = if is_64 { 0b10 } else { 0b11 };
+            // Post-index exercises every field and uses imm9 directly.
+            let ops = vec![
+                gp_reg(width, rt_num),
+                Operand::MemPostIndex { base: format!("x{}", base_num), offset: off },
+            ];
+            let w = word(encode_ldrs(&ops, size));
+            prop_assert_eq!( w        & 0x1F, rt_num,       "Rt field");
+            prop_assert_eq!((w >> 5)  & 0x1F, base_num,     "Rn field");
+            prop_assert_eq!((w >> 30) & 0x3,  size,         "size field");
+            prop_assert_eq!((w >> 22) & 0x3,  expected_opc, "opc field");
+        }
+
+        // ── Property 2: opc selects destination width (spec-conformance). ──
+        // X target ⇒ opc=10, W target ⇒ opc=11. PASSES today.
+        #[test]
+        fn prop_opc_selects_width(
+            size in 0u32..=1u32,
+            is_64 in any::<bool>(),
+            off in -256i64..=255i64,
+        ) {
+            let width = if is_64 { 'x' } else { 'w' };
+            let expected_opc: u32 = if is_64 { 0b10 } else { 0b11 };
+            let ops = vec![
+                gp_reg(width, 0),
+                Operand::MemPreIndex { base: "x1".to_string(), offset: off },
+            ];
+            let w = word(encode_ldrs(&ops, size));
+            prop_assert_eq!((w >> 22) & 0x3, expected_opc);
+        }
+
+        // ── Property 3: NEGATIVE CONTRACT — out-of-range imm9 must be Err. ──
+        // For pre/post-index the offset is a signed 9-bit field, so any value
+        // outside [-256, 255] is unrepresentable and MUST be rejected rather
+        // than silently masked.
+        //
+        // EXPECTED TO FAIL today: the encoder masks with & 0x1FF and returns
+        // Ok. This failure IS the bug being reported.
+        #[test]
+        #[ignore = "documented bug: ldrsb/ldrsh imm9 offsets outside [-256,255] are masked"]
+        fn prop_out_of_range_imm9_rejected(
+            size in 0u32..=1u32,
+            form in 0u32..2u32,
+            off in (-4096i64..4096i64).prop_filter(
+                "out of signed-9-bit range", |o| *o < -256 || *o > 255),
+        ) {
+            let mem = match form {
+                0 => Operand::MemPostIndex { base: "x1".to_string(), offset: off },
+                _ => Operand::MemPreIndex  { base: "x1".to_string(), offset: off },
+            };
+            let ops = vec![gp_reg('x', 0), mem];
+            let res = encode_ldrs(&ops, size);
+            prop_assert!(res.is_err(),
+                "offset {} is outside the signed 9-bit range [-256,255] and must be \
+                 rejected; got {:?}", off, res);
+        }
+
+        // ── Property 4: out-of-range offset silently corrupted (mechanism). ──
+        // Documents HOW the bug manifests in the Mem unscaled fallback: a
+        // negative offset past -256 cannot be recovered from the 9-bit field.
+        // PASSES today — it is the smoking gun for the masking.
+        #[test]
+        fn prop_out_of_range_offset_silently_corrupted(
+            size in 0u32..=1u32,
+            off in (-4096i64..-257i64),
+        ) {
+            // Negative offset forces the unscaled (LDUR) fallback path.
+            let ops = vec![gp_reg('x', 0), mem_op(1, off)];
+            let w = word(encode_ldrs(&ops, size));
+            prop_assert_ne!(decode_imm9(w) as i64, off,
+                "offset {} was silently truncated into the 9-bit field", off);
+        }
+
+        // ── Property 5: NEGATIVE CONTRACT — common programmer offsets. ──
+        // Concrete regression anchors for offsets a human is likely to write
+        // on a sign-extending load (positive, negative, page-aligned). All
+        // are out of the signed-9-bit range and MUST be rejected.
+        // EXPECTED TO FAIL today.
+        #[test]
+        #[ignore = "documented bug: common out-of-range ldrsb/ldrsh imm9 offsets are masked"]
+        fn prop_common_offsets_rejected(
+            size in 0u32..=1u32,
+            form in 0u32..2u32,
+            off_idx in 0usize..8usize,
+        ) {
+            let offsets = [256i64, 257, 512, 1000, 4096, -257, -258, -512];
+            let off = offsets[off_idx];
+            let mem = match form {
+                0 => Operand::MemPostIndex { base: "x1".to_string(), offset: off },
+                _ => Operand::MemPreIndex  { base: "x1".to_string(), offset: off },
+            };
+            let ops = vec![gp_reg('x', 0), mem];
+            let res = encode_ldrs(&ops, size);
+            prop_assert!(res.is_err(),
+                "ldrsb/ldrsh offset {} is out of the [-256,255] range and must be \
+                 Err; got {:?}", off, res);
+        }
+    }
+}
+
 pub(crate) fn encode_ldp_stp(operands: &[Operand], is_load: bool) -> Result<EncodeResult, String> {
     if operands.len() < 3 {
         return Err("ldp/stp requires 3 operands".to_string());

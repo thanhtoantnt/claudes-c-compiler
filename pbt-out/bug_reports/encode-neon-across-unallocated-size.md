@@ -126,4 +126,4 @@ places whatever opcode it is handed into bits 16–12 — so this is a separate
 *caller* defect, documented in its own report:
 `sminv-uminv-dispatch-wrong-opcode.md`.
 
-**GitHub Issue:** _(none yet)_
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/209
