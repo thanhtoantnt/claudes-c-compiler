@@ -15,3 +15,5 @@ pub(crate) mod types;
 mod long_double_pbt;
 #[cfg(test)]
 mod const_arith_binop_prop_tests;
+#[cfg(test)]
+mod const_eval_pbt;

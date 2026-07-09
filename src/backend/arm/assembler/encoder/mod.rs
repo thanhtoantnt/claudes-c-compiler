@@ -178,6 +178,8 @@ mod data_processing_addsub_div_bitmask_pbt;
 mod neon_scalar_qshrn_pbt;
 #[cfg(test)]
 mod compare_branch_regclass_pbt;
+#[cfg(test)]
+mod neon_movi_16bit_split_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
