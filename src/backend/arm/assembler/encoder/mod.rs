@@ -174,6 +174,10 @@ mod load_store_pbt;
 mod neon_ld_st_dispatch_pbt;
 #[cfg(test)]
 mod data_processing_addsub_div_bitmask_pbt;
+#[cfg(test)]
+mod neon_scalar_qshrn_pbt;
+#[cfg(test)]
+mod compare_branch_regclass_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
