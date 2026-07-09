@@ -46,6 +46,8 @@ mod neon_fcvtn_pbt;
 mod neon_mvni_pbt;
 #[cfg(test)]
 mod neon_two_misc_pbt;
+#[cfg(test)]
+mod neon_zip_uzp_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
