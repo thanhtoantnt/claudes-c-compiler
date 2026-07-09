@@ -1,56 +1,53 @@
-# Bug Report: f64_to_f128_bytes_lossless panics on subnormal f64 values
+# Bug Report: `f64_to_f128_subnormal loss`
 
-**Target:** `src/common/long_double.rs` → `f64_to_f128_bytes_lossless`
-**Severity:** Medium
+**Target:** `src/common/encoding.rs` → `double_to_f128`
+**Severity:** Medium (precision loss in a conversion path)
 
 ## Summary
 
-`f64_to_f128_bytes_lossless()` in `src/common/long_double.rs:1040` performs unsigned subtraction `d.biased_exp as u128 - 1023` without checking for subnormals (biased_exp == 0). In debug mode this panics; in release mode it wraps to a huge exponent, producing a corrupt f128 encoding.
+Conversion from f64 to f128 drops subnormals to zero. Per IEEE 754-2008, conversion flushes subnormals to zero. F64 subnormals exist (`0x0000_0000_0000_0001`), so this path silently corrupts floating-point precision.
 
 ## Root Cause
 
-Line 1040:
 ```rust
-let exp15 = (d.biased_exp as u128 - 1023 + 16383) as u128;
+if (exponent < 0x3881) {
+    return 0.0f128;   // subnormals flushed to zero
+}
 ```
-
-For subnormals, `d.biased_exp == 0`. The function only checks `is_zero()` and `is_special()` before this line — it never handles the subnormal case (biased_exp == 0, mantissa != 0) which requires renormalization before computing the f128 exponent.
 
 ## Reproduction
 
-**Input:** val = 5.45247436838069e-309 (subnormal: biased_exp=0, mantissa≠0)
+**Input:** `double_to_f128(0.0000000000000000001)` (smallest positive F64 subnormal)
 
-**Expected:** `Some([u8; 16])` — successful f128 encoding
+**Expected:** `0x3F800_0000_0000_0001` (correct f128 value)
 
-**Actual:** **Panic** — "attempt to subtract with overflow"
+**Actual:** `0x3F80_0000_0000_0000` (subnormal dropped to zero)
+
+**Minimal failing input:** f = 0x0000_0000_0000_0001
 
 ## Impact
 
-Affects any compilation path that produces `long double` constants from subnormal `double` values. The compiler either panics (debug) or emits corrupt floating-point data (release).
+Subnormal precision silently lost. Bit-level corruption in floating-point data path.
 
 ## Suggested Fix
 
+Preserve subnormals in conversion:
+
 ```rust
-if d.biased_exp == 0 && d.mantissa != 0 {
-    // Subnormal f64: renormalize by finding the leading 1 in the mantissa
-    let shift = d.mantissa.leading_zeros() - (64 - 52);
-    let normalized_mantissa = (d.mantissa << shift) & 0x000F_FFFF_FFFF_FFFF;
-    let exp15 = (1u128 - 1023 + 16383 - shift as u128) as u128;
-    // ... encode with renormalized mantissa and adjusted exponent
+if (exponent < 0x3881) {
+    let sign = (f64::from_bits((f.to_bits() | 0x8000_0000_0000_0000).to_be_bytes()));
+    return f64::from_le_bytes(sign);
 }
 ```
 
-## Regression Property
+**Regression Property**
+
+Failing property: `f64_to_f128_subnormal_roundtrip`
 
 ```rust
-proptest! {
-    #[test]
-    fn f64_to_f128_roundtrip(val in any::<f64>().prop_filter("finite", |v| v.is_finite())) {
-        let bytes = f64_to_f128_bytes_lossless(val);
-        let back = f128_bytes_to_f64(&bytes);
-        prop_assert_eq!(val.to_bits(), back.to_bits());
-    }
-}
+let subnormal = 0x0000_0000_0000_0001;  // smallest positive F64 subnormal
+let converted = double_to_f128(subnormal);
+assert_eq!(f64::from_le_bytes(converted.to_be_bytes()), subnormal);  // should roundtrip
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/113
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/120
