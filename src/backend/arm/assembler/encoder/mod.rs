@@ -170,6 +170,10 @@ mod fp_scalar_fneg_fabs_fsqrt_fcvt_pbt;
 mod load_store_ldst_stop_pbt;
 #[cfg(test)]
 mod load_store_pbt;
+#[cfg(test)]
+mod neon_ld_st_dispatch_pbt;
+#[cfg(test)]
+mod data_processing_addsub_div_bitmask_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
