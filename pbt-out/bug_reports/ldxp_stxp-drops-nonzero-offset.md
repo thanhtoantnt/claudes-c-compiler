@@ -85,3 +85,4 @@ Some(Operand::Mem { base, offset }) => {
 
 (analogously for the store branch's `operands.get(3)`). After this fix the two
 failing properties flip to PASS and the two passing properties continue to hold.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/179

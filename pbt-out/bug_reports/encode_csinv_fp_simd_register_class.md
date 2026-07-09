@@ -48,3 +48,4 @@ the GP (X/W) class.
 Add a GP-class check for CSINV's register operands, e.g. by rejecting names whose
 prefix is not `x`/`w`/`sp`/`wsp`/`xzr`/`wzr`/`lr` (mirroring the `is_64bit_reg` /
 `is_32bit_reg` helpers in encoder/mod.rs:157/163), returning `Err` otherwise.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/169

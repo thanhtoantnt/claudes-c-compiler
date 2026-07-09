@@ -77,3 +77,4 @@ if rn_double != is_double {
 The four passing properties confirm the **encoding arithmetic itself is correct**
 (opcode `000010`, ftype, fixed bits `0x1E214000`/`0x1E614000`, register field placement);
 only operand validation is missing.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/172

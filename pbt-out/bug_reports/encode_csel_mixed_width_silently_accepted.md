@@ -110,3 +110,4 @@ fn prop_rejects_mismatched_register_widths(
     );
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/167

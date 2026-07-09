@@ -110,3 +110,4 @@ truncate into, so masking would be wrong.)
   offset validation is added).
 - proptest persisted failing seeds in
   `proptest-regressions/backend/arm/assembler/encoder/load_store.txt`.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/180

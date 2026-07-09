@@ -27,3 +27,4 @@ The assembler emits an undefined vector instruction instead of rejecting invalid
 ## Suggested fix
 
 After validating `index <= 15`, add a `.8b`-specific guard rejecting `index > 7`.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/176

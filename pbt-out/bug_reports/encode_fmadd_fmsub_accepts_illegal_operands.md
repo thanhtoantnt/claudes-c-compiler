@@ -68,3 +68,4 @@ Property suite added to `fp_scalar.rs` (`mod tests`):
 
 Baseline (correct) encoding confirmed against the ARM ARM:
 `FMADD D0,D0,D0,D0 = 0x1F400000`, `FMADD S0,S0,S0,S0 = 0x1F000000`, `FMSUB D0,D0,D0,D0 = 0x1F408000`.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/171

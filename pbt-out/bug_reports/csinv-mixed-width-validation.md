@@ -70,3 +70,4 @@ if rn_is_64 != is_64 || rm_is_64 != is_64 {
     return Err("csinv: all register operands must have the same width".into());
 }
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/164

@@ -27,3 +27,4 @@ Invalid SIMD source text is accepted and encoded as a different instruction shap
 ## Suggested fix
 
 Reject any arrangement except `"8b"` and `"16b"` before computing `q`.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/178

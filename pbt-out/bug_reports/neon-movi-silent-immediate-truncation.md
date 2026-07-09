@@ -86,3 +86,4 @@ No cross-assembler (llvm-mc / aarch64 `as`) was available in this environment fo
 differential validation, so the reference oracle is derived directly from the
 AdvSIMD modified-immediate bit layout (independently re-derived, not copied from
 the implementation).
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/181

@@ -55,3 +55,4 @@ if rd_double != rn_double {
 
 `prop_fsqrt_rejects_mismatched_precision_and_bank` fails on minimal input
 `n = 0` at the mixed-precision assertion (`FSQRT D0, S0`).
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/174

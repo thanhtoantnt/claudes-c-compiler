@@ -93,3 +93,4 @@ The same latent gap affects the sibling conditional-select encoders
 registers, because `parse_reg_num` accepts every such prefix and `get_reg` derives
 `sf` only from `is_64bit_reg`. This is the same validation-gap theme and is noted
 separately in that property.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/165

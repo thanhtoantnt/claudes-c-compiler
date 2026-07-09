@@ -87,3 +87,4 @@ if rd_name.starts_with('d') != rn_name.starts_with('d') {
 }
 // optionally: reject GP banks (w/x) explicitly
 ```
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/170

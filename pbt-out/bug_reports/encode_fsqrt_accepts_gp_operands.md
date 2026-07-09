@@ -52,3 +52,4 @@ if !is_fp_reg(&rd_name) || !is_fp_reg(&rn_name) {
 `prop_fsqrt_rejects_mismatched_precision_and_bank` exercises the GP-bank case
 (`FSQRT X0, X0`); combined with the mixed-precision case it fails on minimal
 input `n = 0`. (Split out: the GP assertion alone fails for any `n` in `0..32`.)
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/173

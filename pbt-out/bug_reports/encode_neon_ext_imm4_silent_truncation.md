@@ -27,3 +27,4 @@ A typo or codegen bug changes the selected byte offset without diagnostic, produ
 ## Suggested fix
 
 Validate the immediate before encoding: reject values outside `0..=15` and remove the masking-as-validation behavior.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/177

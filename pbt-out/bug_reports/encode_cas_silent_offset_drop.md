@@ -107,3 +107,4 @@ the identical `Operand::Mem { base, .. }` match and has the same defect.
 | `prop_pre_index_writeback_rejected` | ✅ pass | `[Xn,#imm]!` correctly rejected via `_` arm |
 | `prop_post_index_writeback_rejected` | ✅ pass | `[Xn],#imm` correctly rejected via `_` arm |
 | `prop_register_offset_rejected` | ✅ pass | `[Xn,Xm]` correctly rejected via `_` arm |
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/166

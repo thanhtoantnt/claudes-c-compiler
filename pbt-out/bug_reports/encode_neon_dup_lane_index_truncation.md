@@ -89,3 +89,4 @@ fully correct fix should additionally bound the index against `arr_d`.)
 The GP-register form (`DUP Vd.T, Rn`) is unaffected; it has no lane index. The
 sibling function `encode_neon_ins` uses the same `(*index & mask)` idiom and is
 likely affected by the same class of bug — worth a follow-up property suite.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/175

@@ -84,3 +84,4 @@ aliases, so they very likely share this defect.
 register as `Rd`) is accepted because `parse_reg_num("d0") == Some(0)`. CSINC is defined only
 on GP (X/W) registers. This is an independent validation gap (FP/SIMD register acceptance),
 not the mixed-width defect above.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/168
