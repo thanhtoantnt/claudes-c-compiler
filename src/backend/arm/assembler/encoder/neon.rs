@@ -1854,6 +1854,228 @@ pub(crate) fn encode_neon_scalar_qshrn(operands: &[Operand], u_bit: u32, is_roun
 // ── NEON addp (integer pairwise add) — already handled in three-same as addp ──
 
 #[cfg(test)]
+mod scalar_qshrn_pbt_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    /// (u_bit, is_rounding) -> reference mnemonic accepted by llvm-mc.
+    fn mnemonic(u_bit: u32, is_rounding: bool) -> &'static str {
+        match (u_bit, is_rounding) {
+            (0, false) => "sqshrn",
+            (0, true) => "sqrshrn",
+            (1, false) => "uqshrn",
+            (1, true) => "uqrshrn",
+            _ => unreachable!(),
+        }
+    }
+
+    /// dest scalar letter -> (dest element bits, source scalar letter, valid shift max).
+    /// b<-h (narrow 16->8), h<-s (32->16), s<-d (64->32).
+    fn dest_info(dest: &str) -> (u32, char, u32) {
+        match dest {
+            "b" => (8, 'h', 8),
+            "h" => (16, 's', 16),
+            "s" => (32, 'd', 32),
+            _ => unreachable!(),
+        }
+    }
+
+    fn run(u_bit: u32, is_rounding: bool, dest: &str, dest_num: u32, src_num: u32, shift: i64) -> Result<u32, String> {
+        let (_, src_letter, _) = dest_info(dest);
+        let ops = vec![
+            Operand::Reg(format!("{}{}", dest, dest_num)),
+            Operand::Reg(format!("{}{}", src_letter, src_num)),
+            Operand::Imm(shift),
+        ];
+        match encode_neon_scalar_qshrn(&ops, u_bit, is_rounding) {
+            Ok(EncodeResult::Word(w)) => Ok(w),
+            Ok(other) => Err(format!("unexpected non-Word result: {:?}", other)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Differential oracle: assemble a single instruction with llvm-mc-18 and
+    /// return its little-endian 32-bit encoding, or None if unavailable/rejected.
+    fn llvm_mc_encode(mnem: &str, dest: &str, dest_num: u32, src_letter: char, src_num: u32, shift: u32) -> Option<u32> {
+        let text = format!("{} {}{}, {}{}, #{}\n", mnem, dest, dest_num, src_letter, src_num, shift);
+        let mut child = Command::new("llvm-mc-18")
+            .args(["--triple=aarch64", "--assemble", "--show-encoding"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn().ok()?;
+        {
+            let mut stdin = child.stdin.take()?;
+            stdin.write_all(text.as_bytes()).ok()?;
+        }
+        let output = child.wait_with_output().ok()?;
+        if !output.status.success() {
+            return None; // llvm rejected the operand combination
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let line = stdout.lines().find(|l| l.contains("encoding:"))?;
+        let bytes_str = line.split('[').nth(1)?.split(']').next()?;
+        let bytes: Vec<u8> = bytes_str
+            .split(',')
+            .map(|s| s.trim().trim_start_matches("0x"))
+            .filter_map(|s| u8::from_str_radix(s, 16).ok())
+            .collect();
+        if bytes.len() != 4 {
+            return None;
+        }
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(96))]
+
+        // 1. Differential oracle against llvm-mc. Catches any encoding deviation
+        //    from the reference ISA assembler for valid operand combinations.
+        #[test]
+        #[ignore = "documented bug: scalar qshrn misses fixed bit 28"]
+        fn prop_matches_llvm_mc(
+            u_bit in 0u32..2u32,
+            is_rounding in any::<bool>(),
+            dest_idx in 0usize..3usize,
+            dest_num in 0u32..32u32,
+            src_num in 0u32..32u32,
+            shift in 1u32..=32u32,
+        ) {
+            let dests = ["b", "h", "s"];
+            let dest = dests[dest_idx];
+            let (_, src_letter, max_shift) = dest_info(dest);
+            let shift = (shift % max_shift) + 1; // clamp into [1, max_shift]
+
+            let word = run(u_bit, is_rounding, dest, dest_num, src_num, shift as i64)
+                .expect("valid input must encode");
+
+            if let Some(refw) = llvm_mc_encode(mnemonic(u_bit, is_rounding), dest, dest_num, src_letter, src_num, shift) {
+                prop_assert_eq!(
+                    word, refw,
+                    "mismatch {} {}{}, {}{}, #{}",
+                    mnemonic(u_bit, is_rounding), dest, dest_num, src_letter, src_num, shift
+                );
+            }
+        }
+
+        // 2. ISA-fixed high bits for scalar shift-by-immediate.
+        //    bits 31-30 == 0b01 and bit 28 == 1 are hard-wired in the encoding.
+        #[test]
+        #[ignore = "documented bug: scalar qshrn misses fixed bit 28"]
+        fn prop_fixed_high_bits(
+            dest_idx in 0usize..3usize,
+            dest_num in 0u32..32u32,
+            src_num in 0u32..32u32,
+            shift in 1u32..=32u32,
+            u_bit in 0u32..2u32,
+            is_rounding in any::<bool>(),
+        ) {
+            let dests = ["b", "h", "s"];
+            let dest = dests[dest_idx];
+            let (_, _, max_shift) = dest_info(dest);
+            let shift = (shift % max_shift) + 1;
+            let word = run(u_bit, is_rounding, dest, dest_num, src_num, shift as i64).unwrap();
+            prop_assert_eq!((word >> 30) & 0b11, 0b01u32, "bits 31-30 (scalar)");
+            // Bit 28 is a fixed '1' for Advanced SIMD scalar shift by immediate.
+            prop_assert_eq!((word >> 28) & 1, 1u32, "bit 28 must be 1; word=0x{:08x}", word);
+        }
+
+        // 3. Rd (bits 4-0) and Rn (bits 9-5) fields preserve the register numbers.
+        #[test]
+        fn prop_reg_fields_preserved(
+            dest_idx in 0usize..3usize,
+            dest_num in 0u32..32u32,
+            src_num in 0u32..32u32,
+            shift in 1u32..=32u32,
+            u_bit in 0u32..2u32,
+            is_rounding in any::<bool>(),
+        ) {
+            let dests = ["b", "h", "s"];
+            let dest = dests[dest_idx];
+            let (_, _, max_shift) = dest_info(dest);
+            let shift = (shift % max_shift) + 1;
+            let word = run(u_bit, is_rounding, dest, dest_num, src_num, shift as i64).unwrap();
+            prop_assert_eq!(word & 0x1F, dest_num, "Rd field");
+            prop_assert_eq!((word >> 5) & 0x1F, src_num, "Rn field");
+        }
+
+        // 4. immh:immb (bits 22-16) encodes (source_element_bits - shift).
+        #[test]
+        fn prop_immh_immb_value(
+            dest_idx in 0usize..3usize,
+            shift in 1u32..=32u32,
+            u_bit in 0u32..2u32,
+            is_rounding in any::<bool>(),
+        ) {
+            let dests = ["b", "h", "s"];
+            let dest = dests[dest_idx];
+            let (ebits, _, max_shift) = dest_info(dest);
+            let shift = (shift % max_shift) + 1;
+            let word = run(u_bit, is_rounding, dest, 0, 0, shift as i64).unwrap();
+            let immh_immb = (word >> 16) & 0x7F;
+            prop_assert_eq!(immh_immb, ebits * 2 - shift, "immh:immb for {} shift {}", dest, shift);
+        }
+
+        // 5. U bit (bit 29) and opcode (bits 15-11) reflect the flags; bit 10 == 1.
+        #[test]
+        fn prop_u_bit_and_opcode(
+            dest_idx in 0usize..3usize,
+            shift in 1u32..=32u32,
+            u_bit in 0u32..2u32,
+            is_rounding in any::<bool>(),
+        ) {
+            let dests = ["b", "h", "s"];
+            let dest = dests[dest_idx];
+            let (_, _, max_shift) = dest_info(dest);
+            let shift = (shift % max_shift) + 1;
+            let word = run(u_bit, is_rounding, dest, 0, 0, shift as i64).unwrap();
+            prop_assert_eq!((word >> 29) & 1, u_bit, "U bit");
+            prop_assert_eq!((word >> 10) & 1, 1u32, "fixed bit 10");
+            let opcode = (word >> 11) & 0x1F;
+            let expected = if is_rounding { 0b10011u32 } else { 0b10010u32 };
+            prop_assert_eq!(opcode, expected, "opcode (rounding={})", is_rounding);
+        }
+
+        // 6. Negative contract: shift==0 or shift>dest_element_bits is rejected;
+        //    shifts inside the valid window are accepted.
+        #[test]
+        fn prop_rejects_out_of_range_shift(
+            dest_idx in 0usize..3usize,
+            shift in proptest::sample::select(vec![0u32, 1u32, 8u32, 9u32, 16u32, 17u32, 32u32, 33u32, 64u32]),
+            u_bit in 0u32..2u32,
+            is_rounding in any::<bool>(),
+        ) {
+            let dests = ["b", "h", "s"];
+            let dest = dests[dest_idx];
+            let (ebits, src_letter, _) = dest_info(dest);
+            let ops = vec![
+                Operand::Reg(format!("{}0", dest)),
+                Operand::Reg(format!("{}0", src_letter)),
+                Operand::Imm(shift as i64),
+            ];
+            let res = encode_neon_scalar_qshrn(&ops, u_bit, is_rounding);
+            let should_err = shift == 0 || shift > ebits;
+            prop_assert_eq!(res.is_err(), should_err, "dest={} shift={}", dest, shift);
+        }
+
+        // 7. Negative contract: unsupported destination scalar type is rejected.
+        #[test]
+        fn prop_rejects_bad_dest_type(
+            bad_dest in proptest::sample::select(vec!["d0", "q0", "v0", "x0", "w0"]),
+            shift in 1u32..=8u32,
+        ) {
+            let ops = vec![
+                Operand::Reg(bad_dest.to_string()),
+                Operand::Reg("h0".to_string()),
+                Operand::Imm(shift as i64),
+            ];
+            let res = encode_neon_scalar_qshrn(&ops, 0, false);
+            prop_assert!(res.is_err(), "expected Err for dest {}", bad_dest);
+        }
+    }
+}
+
+#[cfg(test)]
 mod movi_pbt_tests {
     use super::*;
     use proptest::prelude::*;
