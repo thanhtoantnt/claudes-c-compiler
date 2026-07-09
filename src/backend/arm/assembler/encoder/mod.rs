@@ -214,6 +214,10 @@ mod div_tst_cbz_regclass_pbt;
 mod data_processing_smulh_umulh_uxtb_uxth_pbt;
 #[cfg(test)]
 mod compare_branch_condselect_regclass_pbt;
+#[cfg(test)]
+mod data_processing_sxtb_sxth_sxtw_fpsimd_pbt;
+#[cfg(test)]
+mod data_processing_div_fpsimd_sp_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
