@@ -3112,3 +3112,215 @@ mod ext_range_pbt_tests {
         }
     }
 }
+
+/// Complementary property-based tests for `encode_neon_dup`.
+///
+/// The sibling `dup_pbt_tests` module checks per-field invariants. This module
+/// adds: (1) full-word reference/golden oracles that reconstruct the entire
+/// 32-bit encoding from the ARM ARM bit layout independently of the encoder's
+/// own shift expression, (2) a non-aliasing invariant between the general and
+/// element forms, and (3) a negative contract that out-of-range lane indices
+/// must be rejected (this currently FAILS and documents a real bug — see the
+/// accompanying bug report).
+#[cfg(test)]
+mod dup_pbt_extra_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Destination arrangements accepted by the general form. Note DUP(general)
+    // has no `.1d` variant.
+    const GP_ARRS: &[&str] = &["8b", "16b", "4h", "8h", "2s", "4s", "2d"];
+    // Destination arrangements accepted by the element form.
+    const ELEM_DEST_ARRS: &[&str] = &["8b", "16b", "4h", "8h", "2s", "4s", "1d", "2d"];
+
+    fn expected_q(arr: &str) -> u32 {
+        match arr {
+            "16b" | "8h" | "4s" | "2d" => 1,
+            _ => 0,
+        }
+    }
+
+    // imm5 size-code for the GP form (no index).
+    fn gp_imm5_code(arr: &str) -> u32 {
+        match arr {
+            "8b" | "16b" => 0b00001,
+            "4h" | "8h" => 0b00010,
+            "2s" | "4s" => 0b00100,
+            "2d" => 0b01000,
+            _ => unreachable!("gp_imm5_code on {}", arr),
+        }
+    }
+
+    fn gp_ops(rd: u32, arr: &str, rn: u32) -> Vec<Operand> {
+        vec![
+            Operand::RegArrangement { reg: format!("v{}", rd), arrangement: arr.to_string() },
+            Operand::Reg(format!("x{}", rn)),
+        ]
+    }
+
+    fn elem_ops(rd: u32, dest_arr: &str, rn: u32, elem_size: &str, index: u32) -> Vec<Operand> {
+        vec![
+            Operand::RegArrangement {
+                reg: format!("v{}", rd),
+                arrangement: dest_arr.to_string(),
+            },
+            Operand::RegLane {
+                reg: format!("v{}", rn),
+                elem_size: elem_size.to_string(),
+                index,
+            },
+        ]
+    }
+
+    fn word(ops: &[Operand]) -> u32 {
+        match encode_neon_dup(ops) {
+            Ok(EncodeResult::Word(w)) => w,
+            Ok(other) => panic!("expected Word, got {:?}", other),
+            Err(e) => panic!("expected Ok, got Err: {}", e),
+        }
+    }
+
+    // Independent full-word reconstruction of the general form, built field by
+    // field from the ARM ARM layout `0 Q 0 01110 000 imm5 0 0001 1 Rn Rd`.
+    // This decomposition differs structurally from the encoder's single
+    // `(0b001110000u32 << 21)` expression, so agreement is meaningful.
+    fn ref_gp_word(rd: u32, arr: &str, rn: u32) -> u32 {
+        let q = expected_q(arr);
+        let imm5 = gp_imm5_code(arr);
+        let mut w = 0u32;
+        w |= 0u32 << 31; // bit31
+        w |= q << 30; // bit30 = Q
+        w |= 0u32 << 29; // bit29
+        w |= 0b01110u32 << 24; // bits[28:24]
+        w |= 0b000u32 << 21; // bits[23:21]
+        w |= imm5 << 16; // bits[20:16]
+        w |= 0u32 << 15; // bit15
+        w |= 0b0001u32 << 11; // bits[14:11]
+        w |= 1u32 << 10; // bit10
+        w |= rn << 5; // bits[9:5]
+        w |= rd; // bits[4:0]
+        w
+    }
+
+    // Independent full-word reconstruction of the element form, built from
+    // `0 Q 0 01110 000 imm5 0 0000 1 Rn Rd` where imm5 packs the lane index.
+    fn ref_elem_word(rd: u32, dest_arr: &str, rn: u32, elem_size: &str, index: u32) -> u32 {
+        let q = expected_q(dest_arr);
+        let imm5 = match elem_size {
+            "b" => (index << 1) | 0b00001,
+            "h" => (index << 2) | 0b00010,
+            "s" => (index << 3) | 0b00100,
+            "d" => (index << 4) | 0b01000,
+            _ => unreachable!(),
+        };
+        let mut w = 0u32;
+        w |= 0u32 << 31;
+        w |= q << 30;
+        w |= 0b01110u32 << 24;
+        w |= 0b000u32 << 21;
+        w |= imm5 << 16;
+        w |= 0u32 << 15;
+        w |= 0b0000u32 << 11; // bits[14:11]
+        w |= 1u32 << 10; // bit10
+        w |= rn << 5;
+        w |= rd;
+        w
+    }
+
+    proptest! {
+        // 1. Golden full-word anchors: a few canonical encodings must match the
+        //    exact machine word mandated by the ARM ARM. These pin the entire
+        //    instruction, not just individual fields, so a single misplaced bit
+        //    is caught. Register operands are swept to confirm they slot in.
+        #[test]
+        fn prop_golden_gp_words(rn in 0u32..32u32, rd in 0u32..32u32) {
+            // DUP V0.16b, X0 == 0x4E010C00
+            prop_assert_eq!(word(&gp_ops(rd, "16b", rn)), 0x4E010C00u32 | (rn << 5) | rd);
+            // DUP V0.8b, X0 == 0x0E010C00  (Q=0)
+            prop_assert_eq!(word(&gp_ops(rd, "8b", rn)), 0x0E010C00u32 | (rn << 5) | rd);
+            // DUP V0.2d, X0 == 0x4E080C00  (imm5=01000)
+            prop_assert_eq!(word(&gp_ops(rd, "2d", rn)), 0x4E080C00u32 | (rn << 5) | rd);
+            // DUP V0.4s, X0 == 0x4E040C00  (Q=1 for the 128-bit .4s form, imm5=00100)
+            prop_assert_eq!(word(&gp_ops(rd, "4s", rn)), 0x4E040C00u32 | (rn << 5) | rd);
+        }
+
+        // 2. Golden full-word anchors for the element form.
+        #[test]
+        fn prop_golden_elem_words(rn in 1u32..32u32, rd in 0u32..32u32) {
+            // DUP V0.16b, Vn.b[0] == 0x4E010400  (base with Rn=0)
+            prop_assert_eq!(word(&elem_ops(rd, "16b", rn, "b", 0)), 0x4E010400u32 | (rn << 5) | rd);
+            // DUP V0.8b, Vn.h[0] == 0x0E020400  (Q=0)
+            prop_assert_eq!(word(&elem_ops(rd, "8b", rn, "h", 0)), 0x0E020400u32 | (rn << 5) | rd);
+            // DUP V0.4s, Vn.s[3] == 0x4E1C0400  (imm5 = (3<<3)|00100 = 11100)
+            prop_assert_eq!(word(&elem_ops(rd, "4s", rn, "s", 3)), 0x4E1C0400u32 | (rn << 5) | rd);
+            // DUP V0.2d, Vn.d[1] == 0x4E180400  (imm5 = (1<<4)|01000 = 11000)
+            prop_assert_eq!(word(&elem_ops(rd, "2d", rn, "d", 1)), 0x4E180400u32 | (rn << 5) | rd);
+        }
+
+        // 3. Full-word differential reference: across ALL valid arrangements and
+        //    (for the element form) all in-range lane indices, the encoder's
+        //    output equals the independent bit-by-bit reconstruction.
+        #[test]
+        fn prop_full_word_reference(rd in 0u32..32u32, rn in 0u32..32u32, idx in 0u32..16u32) {
+            for &arr in GP_ARRS {
+                prop_assert_eq!(word(&gp_ops(rd, arr, rn)), ref_gp_word(rd, arr, rn),
+                    "gp full-word mismatch arr={}", arr);
+            }
+            for &dest in ELEM_DEST_ARRS {
+                for &(es, max) in &[("b", 15u32), ("h", 7u32), ("s", 3u32), ("d", 1u32)] {
+                    let index = idx & max;
+                    prop_assert_eq!(
+                        word(&elem_ops(rd, dest, rn, es, index)),
+                        ref_elem_word(rd, dest, rn, es, index),
+                        "elem full-word mismatch dest={} es={} idx={}", dest, es, index
+                    );
+                }
+            }
+        }
+
+        // 4. Non-aliasing: the general and element forms must never emit the same
+        //    opcode. They differ precisely in bits[15:10] (0b000011 vs 0b000001),
+        //    so the two outputs for identical rd/rn/arrangement must be unequal.
+        //    This guards against a regression that collapses the two forms.
+        #[test]
+        fn prop_gp_and_elem_forms_differ(rd in 0u32..32u32, rn in 0u32..32u32) {
+            for &arr in &["8b", "16b"] {
+                let g = word(&gp_ops(rd, arr, rn));
+                let e = word(&elem_ops(rd, arr, rn, "b", 0));
+                prop_assert_ne!(g, e, "gp/elem collide for arr={}", arr);
+                // Specifically, the form discriminator bit 11 must be set in the
+                // general form and clear in the element form.
+                prop_assert_eq!((g >> 11) & 1, 1u32, "gp must set bit11 arr={}", arr);
+                prop_assert_eq!((e >> 11) & 1, 0u32, "elem must clear bit11 arr={}", arr);
+            }
+        }
+
+        // 5. NEGATIVE CONTRACT (CURRENTLY FAILS — documents a bug).
+        //    For the element form the lane index is packed into imm5, whose
+        //    width is finite per element size (b:4 bits, h:3, s:2, d:1). An
+        //    index that exceeds this field width is unrepresentable for ANY
+        //    arrangement and is reserved/UNDEFINED in the ARM ARM — it MUST be
+        //    rejected. The encoder instead silently truncates with
+        //    `index & 0xF` / `& 0x7` / `& 0x3` / `& 0x1`, aliasing e.g.
+        //    `.b[16]` onto `.b[0]` and `.d[2]` onto `.d[0]` with no error.
+        #[test]
+        fn prop_out_of_range_lane_index_must_error(
+            oob in 1u32..16u32
+        ) {
+            // Use the widest arrangement per size so the field-width limit
+            // coincides with the architectural limit.
+            let cases: &[(u32, &str, &str)] = &[
+                (15 + oob, "16b", "b"), // > 15
+                (7 + oob,  "8h",  "h"), // > 7
+                (3 + oob,  "4s",  "s"), // > 3
+                (1 + oob,  "2d",  "d"), // > 1
+            ];
+            for &(index, dest, es) in cases {
+                let res = encode_neon_dup(&elem_ops(0, dest, 1, es, index));
+                prop_assert!(res.is_err(),
+                    "out-of-range lane index {} for .{} (field max exceeded) must be rejected, got {:?}",
+                    index, es, res);
+            }
+        }
+    }
+}
