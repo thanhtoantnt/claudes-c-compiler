@@ -122,6 +122,10 @@ mod neon_mul_pbt;
 mod neon_bic_pbt;
 #[cfg(test)]
 mod neon_bitwise_insert_pbt;
+#[cfg(test)]
+mod neon_float_elem_pbt;
+#[cfg(test)]
+mod load_store_ldop_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
