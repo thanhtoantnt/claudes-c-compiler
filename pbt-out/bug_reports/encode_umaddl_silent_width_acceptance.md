@@ -48,8 +48,14 @@ if ra64 {
     return Err("umaddl accumulator must be a 64-bit (X) register".to_string());
 }
 if rn64 || rm64 {
-    return Err("umaddl source operands must be 32-bit (W) registers".to_string());
-}
+## Regression Property
+
+Failing property: `umaddl_rejects_width_violations`
+
+```rust
+prop_assert!(encode_umaddl(&[wreg(0), wreg(1), wreg(2), xreg(3)]).is_err());  // W destination
+prop_assert!(encode_umaddl(&[xreg(0), xreg(1), xreg(2), xreg(3)]).is_err());  // X sources
+prop_assert!(encode_umaddl(&[xreg(0), wreg(1), wreg(2), wreg(3)]).is_err());  // W accumulator
 ```
 
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/104

@@ -45,4 +45,14 @@ if width == 0 || lsb + width > regsize {
 }
 ```
 
+## Regression Property
+
+Failing property: `prop_rejects_out_of_range_lsb_width`
+
+```rust
+prop_assert!(encode_ubfx(&[wreg(0), wreg(1), imm(32), imm(1)]).is_err());  // lsb >= regsize
+prop_assert!(encode_ubfx(&[xreg(0), xreg(1), imm(0), imm(65)]).is_err());  // width > regsize
+prop_assert!(encode_ubfx(&[wreg(0), wreg(1), imm(0), imm(0)]).is_err());   // width=0
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/163
