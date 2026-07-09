@@ -941,6 +941,128 @@ pub(crate) fn encode_ldar_stlr(operands: &[Operand], is_load: bool, forced_size:
     Ok(EncodeResult::Word(word))
 }
 
+#[cfg(test)]
+mod prop_encode_ldar_stlr_offset_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: spec-conformance / negative contract — OFFSET VALIDATION.
+    //
+    // (Sibling modules `prop_encode_ldxr_stxr_offset_tests` and
+    // `prop_encode_ldxp_stxp_offset_tests` cover the same defect class for
+    // the exclusive load/store family. THIS module targets the
+    // acquire/release load/store family, `encode_ldar_stlr`.)
+    //
+    // Target: `encode_ldar_stlr` (LDAR/STLR — Load-Acquire / Store-Release
+    // Register, ARM ARM §C6.2.101 / §C6.2.275, plus LDARB/LDARH byte/halfword
+    // forms driven by `forced_size`).
+    //
+    // Per the ARM ARM the ONLY permitted assembler syntax is:
+    //
+    //     LDAR  <Xt>, [<Xn|SP>]      STLR  <Xt>, [<Xn|SP>]
+    //     LDARB <Wt>, [<Xn|SP>]      STLRB <Wt>, [<Xn|SP>]
+    //     LDARH <Wt>, [<Xn|SP>]      STLRH <Wt>, [<Xn|SP>]
+    //
+    // The encoding carries NO immediate-offset / scaled-immediate field —
+    // the effective address is exactly the base register:
+    //
+    //     LDAR/STLR: size 001000 1 L 0 11111 1 11111 Rn Rt   (no imm field)
+    //
+    // OFFSET-VALIDATION consequence: a non-zero immediate offset is
+    // *unrepresentable*. `ldar x0, [x1, #8]` cannot be encoded and MUST be
+    // rejected with Err. Register-field placement (Rt=[4:0], Rn=[9:5]) is
+    // independent of any (illegal) offset. This is the same silent-drop
+    // defect already documented for the sibling exclusive encoders: the
+    // match arm `Operand::Mem { base, .. }` discards `offset` via `..`.
+
+    fn gp_reg(width: char, num: u32) -> Operand {
+        Operand::Reg(format!("{}{}", width, num))
+    }
+    fn mem_op(base_num: u32, offset: i64) -> Operand {
+        Operand::Mem { base: format!("x{}", base_num), offset }
+    }
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+    /// LDAR/STLR operand list: Rt, [Rn, #off].
+    fn ops(rt_w: char, rt: u32, base: u32, off: i64) -> Vec<Operand> {
+        vec![gp_reg(rt_w, rt), mem_op(base, off)]
+    }
+
+    proptest! {
+        // ── Property 1: the offset is silently discarded (BUG MECHANISM). ──
+        // The ARM ARM gives LDAR/STLR no offset field, yet the encoder
+        // matches `Operand::Mem { base, .. }` and never inspects `offset`.
+        // Hence any two offsets — including a non-zero, unrepresentable one —
+        // must encode to the SAME word. PASSES today; documents the drop.
+        #[test]
+        fn prop_offset_does_not_affect_word(
+            is_load in any::<bool>(),
+            rt_num in 0u32..=31u32,
+            base_num in 0u32..=31u32,
+            o1 in any::<i64>(),
+            o2 in any::<i64>(),
+        ) {
+            let w1 = word(encode_ldar_stlr(&ops('x', rt_num, base_num, o1), is_load, None));
+            let w2 = word(encode_ldar_stlr(&ops('x', rt_num, base_num, o2), is_load, None));
+            prop_assert_eq!(w1, w2, "offset must not change the word (it is dropped)");
+        }
+
+        // ── Property 2: NEGATIVE CONTRACT — non-zero offset must be Err. ──
+        // The acquire/release load/store group has no immediate-offset form,
+        // so a non-zero offset is unrepresentable and MUST be rejected rather
+        // than silently encoded as `[Rn]`.
+        //
+        // EXPECTED TO FAIL against current code: it accepts the offset and
+        // drops it. This failure IS the bug being reported.
+        #[test]
+        fn prop_nonzero_offset_rejected(
+            is_load in any::<bool>(),
+            rt_num in 0u32..=31u32,
+            base_num in 0u32..=31u32,
+            off in (-32768i64..32767i64).prop_filter("non-zero", |o| *o != 0),
+        ) {
+            let res = encode_ldar_stlr(&ops('x', rt_num, base_num, off), is_load, None);
+            prop_assert!(res.is_err(),
+                "non-zero offset {} on LDAR/STLR must be rejected (no offset field in encoding); got {:?}",
+                off, res);
+        }
+
+        // ── Property 3: the only legal form (offset == 0) is accepted. ──
+        #[test]
+        fn prop_zero_offset_accepted(
+            is_load in any::<bool>(),
+            rt_num in 0u32..=31u32,
+            base_num in 0u32..=31u32,
+        ) {
+            let res = encode_ldar_stlr(&ops('x', rt_num, base_num, 0), is_load, None);
+            prop_assert!(res.is_ok(), "offset 0 is the only legal form; got {:?}", res);
+        }
+
+        // ── Property 4: NEGATIVE CONTRACT — common programmer offsets. ──
+        // Concrete regression anchor for the offsets a human is most likely
+        // to actually write on an acquire/release load/store (positive,
+        // negative, aligned, page-spanning). All are unrepresentable (no
+        // offset field) and MUST be rejected. EXPECTED TO FAIL today.
+        #[test]
+        fn prop_common_offsets_rejected(
+            is_load in any::<bool>(),
+            off_idx in 0usize..8usize,
+        ) {
+            let offsets = [1i64, -1, 4, 8, 16, -8, 4096, 0x10000];
+            let off = offsets[off_idx];
+            let res = encode_ldar_stlr(&ops('x', 0, 1, off), is_load, None);
+            prop_assert!(res.is_err(),
+                "ldar/stlr offset {} is unrepresentable (no offset field) and must be Err; got {:?}",
+                off, res);
+        }
+    }
+}
+
 // ── Address computation ──────────────────────────────────────────────────
 
 pub(crate) fn encode_adrp(operands: &[Operand]) -> Result<EncodeResult, String> {

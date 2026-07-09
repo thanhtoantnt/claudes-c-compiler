@@ -2627,6 +2627,51 @@ mod prop_encode_csneg_tests {
                 slot, result
             );
         }
+
+        // Property G — MIXED-WIDTH negative contract (EXPECTED TO FAIL — see
+        // BUG report). This is the focus of this suite.
+        //
+        // Per ARM ARM (Conditional Select / CSNEG, C4.1.68), the `sf` field
+        // applies UNIFORMLY to Rd, Rn AND Rm: all three registers MUST share
+        // one width. An instruction that mixes a 64-bit (xN) register with a
+        // 32-bit (wN) register is UNPREDICTABLE / UNDEFINED and the encoder
+        // MUST reject it with Err. GAS and LLVM-MC both reject such input
+        // with "operand size mismatch".
+        //
+        // The implementation derives `sf` from Rd ONLY via
+        // `get_reg(operands, 0)` and DISCARDS the widths returned for Rn and
+        // Rm (`let (rn, _) = ...`, `let (rm, _) = ...`), so it silently
+        // encodes malformed mixed-width instructions. No cited spec permits
+        // mixed-width conditional-select encodings.
+        #[test]
+        fn prop_rejects_mixed_width_operands(
+            rd_is64 in any::<bool>(),
+            rn_is64 in any::<bool>(),
+            rm_is64 in any::<bool>(),
+            n in 0u32..=30u32,
+            m in 0u32..=30u32,
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            // Only interesting when the three widths are NOT all equal.
+            prop_assume!(!(rd_is64 == rn_is64 && rn_is64 == rm_is64));
+            let rd = if rd_is64 { format!("x{}", n) } else { format!("w{}", n) };
+            let rn = if rn_is64 { format!("x{}", n) } else { format!("w{}", n) };
+            let rm = if rm_is64 { format!("x{}", m) } else { format!("w{}", m) };
+            let (cond_name, _) = COND_TABLE[cond_idx];
+            let ops = vec![
+                Operand::Reg(rd),
+                Operand::Reg(rn),
+                Operand::Reg(rm),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            let res = encode_csneg(&ops);
+            prop_assert!(
+                res.is_err(),
+                "mixed-width CSNEG ({:?}/{:?}/{:?}, {:?}) MUST be rejected — all of \
+                 Rd/Rn/Rm must share the sf width; got {:?}",
+                ops[0], ops[1], ops[2], ops[3], res
+            );
+        }
     }
 }
 
