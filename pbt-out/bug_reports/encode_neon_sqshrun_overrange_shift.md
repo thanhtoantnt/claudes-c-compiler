@@ -86,3 +86,5 @@ The same `shift > element_bits` defect also appears in
 `encode_neon_scalar_qshrun` (`neon.rs:1845`); `encode_neon_shrn` (`neon.rs:1444`)
 already has the correct bound and should be used as the reference for all of
 them.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/96

@@ -84,3 +84,5 @@ the destination arrangement drives Q/sz. ARM requires dest and source
 arrangements to match, so a mismatch such as `Vd.4s, Vn.2d` is silently
 accepted. (Analogous to the documented behavior in `encode_neon_two_misc`.)
 The encoder trusts its caller here; lower priority than the overflow defect.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/169

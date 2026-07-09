@@ -50,3 +50,5 @@ for i in 0..2 {
 - No AArch64-capable assembler was available (`/usr/bin/as` is x86-64
   binutils, rejects `aese`). Oracle = ARMv8-A ARM bit diagram + canonical
   golden words, hand-derived.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/133

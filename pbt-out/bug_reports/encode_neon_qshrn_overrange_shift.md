@@ -76,3 +76,5 @@ if shift == 0 || shift > element_bits / 2 {
     ));
 }
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/67

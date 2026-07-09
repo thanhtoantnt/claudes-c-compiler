@@ -57,3 +57,5 @@ if shift > esize - 1 {           // valid SHLL shift is 0..=esize-1
 cargo test --lib neon_shll_pbt::over_range_shift_8_on_8b_silently_changes_size
 cargo test --lib neon_shll_pbt::prop_shll_rejects_over_range_shift
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/95

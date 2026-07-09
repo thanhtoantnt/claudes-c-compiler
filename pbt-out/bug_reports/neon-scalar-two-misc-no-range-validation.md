@@ -54,4 +54,4 @@ prop_assert!(encode_neon_scalar_two_misc(&[dreg(0), dreg(1)], 2, 0b00111).is_err
 prop_assert!(encode_neon_scalar_two_misc(&[dreg(0), dreg(1)], 0, 32).is_err());       // opcode overflow
 ```
 
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/176
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/202

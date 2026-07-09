@@ -58,3 +58,5 @@ if shift_i < 0 || shift_i as u32 >= esize {
 }
 let shift = shift_i as u32;
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/102

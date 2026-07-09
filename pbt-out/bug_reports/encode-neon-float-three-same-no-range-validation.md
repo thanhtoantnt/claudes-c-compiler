@@ -75,3 +75,5 @@ Confirmed to fail: `cargo test --lib neon_float_three_same_pbt::rejects_out_of_r
 → `1 failed`. The five non-ignored properties (golden table, differential oracle,
 field round-trip, fixed-bits invariant, arrangement/arity negative contract) all
 pass.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/51

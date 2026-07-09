@@ -57,3 +57,5 @@ let shift = shift_i as u32;
 ```
 cargo test --lib neon_shll_pbt::negative_shift_produces_unallocated
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/94

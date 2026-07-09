@@ -79,3 +79,5 @@ The core LD1R encoding is correct — the differential property
 `ld1r_matches_reference_encoder` (all 8 arrangements × v0–v31 × Rn 0–31 × both
 addressing modes) passes, and the no-offset `.4s` case matches the canonical
 `0x4D40C820`. Only the post-index immediate validation is missing.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/99

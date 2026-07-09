@@ -72,3 +72,5 @@ let shift = shift_i64 as u32;
 The first four properties confirm the encoder is bit-for-bit correct for every valid
 input (all arrangements, all opcodes, both U values, full register range). The fifth
 isolates and documents the truncation gap.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/73
