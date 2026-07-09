@@ -58,4 +58,13 @@ let word = (0b11 << 30) | (0b111 << 27) | (0b10 << 22) | (1 << 21)
 
 After this fix, `prop_prfm_register_offset_matches_reference` passes; the other
 four PRFM properties are unaffected.
+## Regression Property
+
+Failing property: `prop_prfm_register_offset_matches_reference`
+
+```rust
+prop_assert_eq!(encode_prfm_reg_offset(&[Operand::Reg("x0".into()), mem_reg_offset(xreg(1), xreg(2), "lsl", 0)]),
+               Ok(EncodeResult::Word(0xF8A06800)));  // ARM ARM reference
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/134
