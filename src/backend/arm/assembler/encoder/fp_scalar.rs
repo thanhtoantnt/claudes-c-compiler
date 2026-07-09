@@ -1422,6 +1422,142 @@ mod tests {
         }
     }
 
+    // ── encode_scvtf (SCVTF: signed integer→float conversion, public wrapper)
+    // encode_scvtf(ops) == encode_int_to_float(ops, /*is_signed*/ true).
+    // SCVTF is hard-wired to the SIGNED conversion: opcode[18:16] == 010.
+    // Canonical layout: sf 0 0 1 1 1 1 0 ftype 1 00 opcode 000000 Rn Rd.
+    //   SCVTF S0,W0 = 0x1E220000   SCVTF D0,W0 = 0x1E620000
+    //   SCVTF S0,X0 = 0x9E220000   SCVTF D0,X0 = 0x9E620000
+    // (0x1E_22.. vs UCVTF 0x1E_23..; only bit 16 differs.)
+    proptest! {
+        // Oracle: reference / field layout through the PUBLIC wrapper. A valid
+        // FP destination (Sd/Dd) + GP source (Wn/Xn) with in-range numbers =>
+        // every field at its canonical ARMv8 bit position, opcode hard-wired to 010.
+        #[test]
+        fn prop_scvtf_places_fields(
+            rd in 0u32..32, rn in 0u32..32,
+            dbl_dst in any::<bool>(), src64 in any::<bool>(),
+        ) {
+            let dst_reg = if dbl_dst { format!("d{}", rd) } else { format!("s{}", rd) };
+            let src_reg = if src64 { format!("x{}", rn) } else { format!("w{}", rn) };
+            let ops = vec![Operand::Reg(dst_reg), Operand::Reg(src_reg)];
+            let sf    = if src64  { 1u32 } else { 0u32 };
+            let ftype = if dbl_dst { 0b01u32 } else { 0b00u32 };
+            let w = expect_word(encode_scvtf(&ops));
+
+            prop_assert_eq!((w >> 24) & 0x7F, 0x1Eu32); // bits[30:24] = 0011110
+            prop_assert_eq!((w >> 21) & 1, 1u32);       // bit 21 = 1
+            prop_assert_eq!((w >> 19) & 0x3, 0u32);     // bits[20:19] = 00
+            prop_assert_eq!(itf_fixed_of(w), 0u32);     // bits[15:10] = 000000
+            prop_assert_eq!(sf_of(w), sf);
+            prop_assert_eq!(ftype_of(w), ftype);
+            prop_assert_eq!(itf_opcode_of(w), 0b010u32);// SCVTF == signed
+            prop_assert_eq!(rd_of(w), rd);
+            prop_assert_eq!(rn_of(w), rn);
+        }
+
+        // Oracle: ground-truth reference. Pins each (ftype, sf) corner for the
+        // Rn=Rd=0 case to an externally verified 32-bit word via the public
+        // encode_scvtf entry point (not the shared helper). Distinguishes
+        // encoder bugs from test-side re-implementation bugs.
+        #[test]
+        fn prop_scvtf_matches_armv8_ground_truth(
+            dbl_dst in any::<bool>(), src64 in any::<bool>(),
+        ) {
+            let dst = if dbl_dst { "d0" } else { "s0" };
+            let src = if src64 { "x0" } else { "w0" };
+            let ops = vec![Operand::Reg(dst.into()), Operand::Reg(src.into())];
+            let w = expect_word(encode_scvtf(&ops));
+            let expected = match (dbl_dst, src64) {
+                (false, false) => 0x1E220000u32, // SCVTF S0,W0
+                (true,  false) => 0x1E620000u32, // SCVTF D0,W0
+                (false, true)  => 0x9E220000u32, // SCVTF S0,X0
+                (true,  true)  => 0x9E620000u32, // SCVTF D0,X0
+            };
+            prop_assert_eq!(w, expected);
+        }
+
+        // Oracle: signedness invariant. encode_scvtf is the SIGNED conversion,
+        // so it must differ from encode_ucvtf (unsigned) ONLY in bit 16
+        // (opcode 010 vs 011) for identical operands — and bit 16 must be 0.
+        #[test]
+        fn prop_scvtf_is_signed_only(
+            rd in 0u32..32, rn in 0u32..32,
+            dbl_dst in any::<bool>(), src64 in any::<bool>(),
+        ) {
+            let dst_reg = if dbl_dst { format!("d{}", rd) } else { format!("s{}", rd) };
+            let src_reg = if src64 { format!("x{}", rn) } else { format!("w{}", rn) };
+            let ops = vec![Operand::Reg(dst_reg), Operand::Reg(src_reg)];
+            let ws = expect_word(encode_scvtf(&ops));
+            let wu = expect_word(encode_ucvtf(&ops));
+            prop_assert_eq!(ws ^ wu, 1u32 << 16);     // only opcode bit 16 differs
+            prop_assert_eq!((ws >> 16) & 1, 0u32);    // SCVTF opcode low bit = 0
+            prop_assert_eq!((wu >> 16) & 1, 1u32);    // UCVTF opcode low bit = 1
+            prop_assert_eq!(itf_opcode_of(ws), 0b010u32);
+        }
+
+        // Oracle: determinism. Same operands => identical word.
+        #[test]
+        fn prop_scvtf_is_deterministic(
+            rd in 0u32..32, rn in 0u32..32,
+            dbl_dst in any::<bool>(), src64 in any::<bool>(),
+        ) {
+            let dst_reg = if dbl_dst { format!("d{}", rd) } else { format!("s{}", rd) };
+            let src_reg = if src64 { format!("x{}", rn) } else { format!("w{}", rn) };
+            let ops = vec![Operand::Reg(dst_reg), Operand::Reg(src_reg)];
+            let w1 = expect_word(encode_scvtf(&ops));
+            let w2 = expect_word(encode_scvtf(&ops));
+            prop_assert_eq!(w1, w2);
+        }
+
+        // Negative contract (validated, PASSES): out-of-range register numbers
+        // (>= 32) MUST be rejected by get_reg/parse_reg_num (caps at 31), not
+        // masked into the 5-bit field; too-few operands and non-register dest
+        // operands are rejected too.
+        #[test]
+        fn prop_scvtf_rejects_bad_regs_and_arity(
+            n in 32u32..256u32, pos in 0u32..2u32, bad_imm in any::<i64>(),
+        ) {
+            let prefix = if pos == 0 { "s" } else { "w" };
+            let mut names = vec!["s0".to_string(), "w0".to_string()];
+            names[pos as usize] = format!("{}{}", prefix, n);
+            let ops: Vec<Operand> = names.into_iter().map(Operand::Reg).collect();
+            prop_assert!(
+                encode_scvtf(&ops).is_err(),
+                "register {}{} must be rejected (5-bit field), not silently masked", prefix, n
+            );
+            prop_assert!(encode_scvtf(&[]).is_err());
+            prop_assert!(encode_scvtf(&[Operand::Reg("s0".into())]).is_err());
+            let bad = vec![Operand::Imm(bad_imm), Operand::Reg("w0".into())];
+            prop_assert!(encode_scvtf(&bad).is_err());
+        }
+
+        // Negative contract (FINDING — FAILS): SCVTF converts a GP integer
+        // source (Wn/Xn) to an FP destination (Sd/Dd). The dest MUST be FP and
+        // the source MUST be GP; any other bank combination is illegal. But
+        // encode_scvtf never validates operand banks: it accepts a GP dest
+        // (mis-deriving ftype=00 from 'w') and an FP source (mis-deriving
+        // sf=0 from 'd'), silently producing words with wrong register-class
+        // semantics. Shared with encode_int_to_float — same root cause.
+        #[test]
+        fn prop_scvtf_rejects_wrong_operand_banks(n in 0u32..32) {
+            // GP dest: SCVTF Wd, Wn is not a valid instruction (dest must be FP).
+            let gp_dst = vec![Operand::Reg(format!("w{}", n)), Operand::Reg(format!("w{}", n))];
+            prop_assert!(
+                encode_scvtf(&gp_dst).is_err(),
+                "GP destination (w{}) must be rejected; SCVTF dest must be FP, got {:?}",
+                n, encode_scvtf(&gp_dst)
+            );
+            // FP source: SCVTF Dd, Dn is not a valid instruction (source must be GP).
+            let fp_src = vec![Operand::Reg(format!("d{}", n)), Operand::Reg(format!("d{}", n))];
+            prop_assert!(
+                encode_scvtf(&fp_src).is_err(),
+                "FP source (d{}) must be rejected; SCVTF source must be GP, got {:?}",
+                n, encode_scvtf(&fp_src)
+            );
+        }
+    }
+
     // ── encode_fcvt_precision (FCVT: float precision conversion) ============
     // ARMv8-A "Floating-point data-processing (1 source)" layout:
     //   0 00 11110 ftype 1 0001 opc 10000 Rn Rd

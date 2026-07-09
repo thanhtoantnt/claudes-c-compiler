@@ -308,6 +308,158 @@ pub(crate) fn encode_ldtr_sized(operands: &[Operand], is_load: bool, size: u32) 
     Ok(EncodeResult::Word(word))
 }
 
+#[cfg(test)]
+mod prop_encode_ldtr_sized_offset_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: spec-conformance / negative contract — OFFSET VALIDATION.
+    //
+    // Target: `encode_ldtr_sized` (LDTR/STTR/LDTRB/LDTRH — Load/Store
+    // Register (unprivileged / translate), ARM ARM §C6.2.105 / §C6.2.279).
+    //
+    // Encoding:  size 111 V=0 0 0 opc 0 imm9 MS=10 Rn Rt
+    //   size  = [31:30]  (passed in: 00=byte, 01=half, 10=word, 11=dword)
+    //   opc   = [23:22]  (01 load / 00 store)
+    //   imm9  = [20:12]  SIGNED 9-bit immediate offset
+    //   MS    = [11:10]  10 selects the LDTR/STTR (translate) form
+    //   Rn    = [9:5],  Rt = [4:0]
+    //
+    // Per the ARM ARM the imm9 field is "the signed immediate byte offset,
+    // in the range -256 to 255". Offsets outside [-256, 255] are NOT
+    // representable and MUST be rejected.
+    //
+    // BUG: the encoder computes `imm9_enc = (imm9 as u32) & 0x1FF` with NO
+    // range check, so out-of-range offsets are silently corrupted:
+    //   +256  -> low9=0x100 -> decoded -256
+    //   +512  -> low9=0x000 -> decoded   0
+    //   -257  -> low9=0x1FF -> decoded  -1
+    //   +1000 -> low9=0x1E8 -> decoded -24
+    // Properties 2 & 3 (negative contracts) fail today — that failure IS
+    // the bug being reported.
+
+    fn mem_op(base_num: u32, offset: i64) -> Operand {
+        Operand::Mem { base: format!("x{}", base_num), offset }
+    }
+    fn ops(rt: u32, base: u32, off: i64) -> Vec<Operand> {
+        vec![Operand::Reg(format!("x{}", rt)), mem_op(base, off)]
+    }
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+    /// Sign-extend the encoded 9-bit imm9 field ([20:12]) back to i32.
+    fn decode_imm9(w: u32) -> i32 {
+        let enc = (w >> 12) & 0x1FF;
+        if enc & 0x100 != 0 {
+            (enc | 0xFFFFFE00) as i32
+        } else {
+            enc as i32
+        }
+    }
+
+    proptest! {
+        // ── Property 1: in-range offsets round-trip faithfully (reference). ──
+        // For the legal range [-256, 255] the decoded imm9 field must equal
+        // the input offset. PASSES today.
+        #[test]
+        fn prop_in_range_offset_round_trips(
+            is_load in any::<bool>(),
+            size in 0u32..=3u32,
+            rt_num in 0u32..=31u32,
+            base_num in 0u32..=31u32,
+            off in -256i64..=255i64,
+        ) {
+            let w = word(encode_ldtr_sized(&ops(rt_num, base_num, off), is_load, size));
+            prop_assert_eq!(decode_imm9(w) as i64, off,
+                "in-range offset must round-trip through the imm9 field");
+        }
+
+        // ── Property 2: NEGATIVE CONTRACT — out-of-range offset must be Err.──
+        // imm9 is a signed 9-bit field, so any offset < -256 or > 255 is
+        // unrepresentable and MUST be rejected rather than silently masked.
+        //
+        // EXPECTED TO FAIL today: the encoder masks with & 0x1FF and returns
+        // Ok. This failure IS the bug being reported.
+        #[test]
+        fn prop_out_of_range_offset_rejected(
+            is_load in any::<bool>(),
+            size in 0u32..=3u32,
+            off in (-4096i64..4096i64).prop_filter(
+                "out of signed-9-bit range",
+                |o| *o < -256 || *o > 255,
+            ),
+        ) {
+            let res = encode_ldtr_sized(&ops(0, 1, off), is_load, size);
+            prop_assert!(res.is_err(),
+                "offset {} is outside the signed 9-bit range [-256,255] and must be \
+                 rejected; got {:?}", off, res);
+        }
+
+        // ── Property 3: NEGATIVE CONTRACT — common programmer offsets. ──
+        // Concrete regression anchors for offsets a human is likely to write
+        // on an unprivileged load/store. Every one is out of range and MUST
+        // be rejected. EXPECTED TO FAIL today.
+        #[test]
+        fn prop_common_offsets_rejected(
+            is_load in any::<bool>(),
+            off_idx in 0usize..9usize,
+        ) {
+            // 256/257 wrap to negative; 512/4096 wrap toward zero; negatives
+            // past -256 wrap toward zero / positive.
+            let offsets = [256i64, 257, 512, 1000, 4096, -257, -258, -512, -4096];
+            let off = offsets[off_idx];
+            let res = encode_ldtr_sized(&ops(0, 1, off), is_load, 0b11);
+            prop_assert!(res.is_err(),
+                "ldtr/sttr offset {} is out of the [-256,255] range and must be Err; \
+                 got {:?}", off, res);
+        }
+
+        // ── Property 4: out-of-range offset is silently corrupted (mechanism).──
+        // Documents HOW the bug manifests: the decoder does not recover the
+        // original out-of-range value because only the low 9 bits survive.
+        // PASSES today — it is the smoking gun for the masking.
+        #[test]
+        fn prop_out_of_range_offset_silently_corrupted(
+            is_load in any::<bool>(),
+            off in (256i64..4096i64).prop_filter("not a 512-period alias",
+                |o| (o & 0x1FF) as i64 != *o),
+        ) {
+            let w = word(encode_ldtr_sized(&ops(0, 1, off), is_load, 0b11));
+            prop_assert_ne!(decode_imm9(w) as i64, off,
+                "offset {} was silently truncated into the 9-bit field", off);
+        }
+
+        // ── Property 5: only the [base, #offset] Mem form is accepted. ──
+        // The other memory-operand variants (pre/post-index, register
+        // offset, literal) are not legal for LDTR/STTR and must be rejected.
+        // PASSES today.
+        #[test]
+        fn prop_non_base_offset_mem_rejected(
+            is_load in any::<bool>(),
+            off in -256i64..=255i64,
+            variant in 0u32..3u32,
+        ) {
+            let bad = match variant {
+                0 => Operand::MemPreIndex { base: "x1".to_string(), offset: off },
+                1 => Operand::MemPostIndex { base: "x1".to_string(), offset: off },
+                _ => Operand::MemRegOffset {
+                    base: "x1".to_string(),
+                    index: "x2".to_string(),
+                    extend: None,
+                    shift: None,
+                },
+            };
+            let res = encode_ldtr_sized(&[Operand::Reg("x0".to_string()), bad], is_load, 0b11);
+            prop_assert!(res.is_err(),
+                "LDTR/STTR only accepts [base, #offset]; got {:?}", res);
+        }
+    }
+}
+
 pub(crate) fn encode_ldrsw(operands: &[Operand]) -> Result<EncodeResult, String> {
     if operands.len() < 2 {
         return Err("ldrsw requires 2 operands".to_string());
