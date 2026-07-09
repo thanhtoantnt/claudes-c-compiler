@@ -64,6 +64,10 @@ mod neon_two_misc_narrow_pbt;
 mod neon_across_pbt;
 #[cfg(test)]
 mod neon_scalar_two_misc_pbt;
+#[cfg(test)]
+mod neon_float_three_same_pbt;
+#[cfg(test)]
+mod neon_ld1r_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
