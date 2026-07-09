@@ -33,4 +33,12 @@ if !rd64 || !ra64 {
     return Err("umaddl requires X destination and X accumulator".to_string());
 }
 ```
+## Regression Property
+
+Failing property: `umaddl_rejects_w_destination_register`
+
+```rust
+prop_assert!(encode_umaddl(&[wreg(0), wreg(1), wreg(2), xreg(0)]).is_err());  // W destination
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/105

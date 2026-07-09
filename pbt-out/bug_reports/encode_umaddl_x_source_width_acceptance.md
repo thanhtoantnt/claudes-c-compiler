@@ -33,4 +33,12 @@ if rn64 || rm64 {
     return Err("umaddl requires W source registers".to_string());
 }
 ```
+## Regression Property
+
+Failing property: `umaddl_rejects_x_source_registers`
+
+```rust
+prop_assert!(encode_umaddl(&[xreg(0), xreg(1), xreg(2), xreg(3)]).is_err());  // X sources
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/106
