@@ -1,34 +1,50 @@
-# Bug Report: `encode_ldnp_stnp` silently truncates unaligned offsets
+# Bug Report: `encode_ldnp_stnp` silently truncates unaligned immediate offsets
 
-**Location:** `src/backend/arm/assembler/encoder/load_store.rs`, function `encode_ldnp_stnp`
+**Target:** `src/backend/arm/assembler/encoder/load_store.rs` → `encode_ldnp_stnp`
+**Severity:** High
 
 ## Summary
 
-`encode_ldnp_stnp` scales byte offsets with a right shift before encoding. It does not check that the original byte offset is aligned to the access size, so unaligned offsets are silently rounded down to a different aligned address.
+`encode_ldnp_stnp` accepts non-aligned offsets and silently rounds down to nearest aligned value. ARMv8-A requires offsets to be aligned to access size (4 for W-registers, 8 for X-registers). Unaligned offsets should be rejected.
+
+## Root Cause
+
+```rust
+let imm7 = (*offset >> shift) as u32;  // integer division silently truncates
+```
 
 ## Reproduction
 
-Failing property: `prop_negative_misaligned_offset_rejects`
+**Input:** `ldnp w0, w1, [x2, #5]`
 
-Minimal input from the run:
+**Expected:** `Err` — LDNP offset must be aligned to 4 bytes
 
-```text
-ldnp w0, w1, [x2, #5]
-```
+**Actual:** `Ok(Word(...))` — offset 5 → imm7 = 5 >> 2 = 1, encodes as `#4`
 
-For W-register non-temporal pairs, offsets must be multiples of 4. Offset `#5` should return `Err`. The encoder shifts it right by 2, discarding the low bits and effectively encoding `#4`.
+**Minimal failing input:** offset = 5 (or 1, 2, 3, 6, 7, etc.)
 
 ## Impact
 
-Silent miscompilation: invalid unaligned source offsets assemble to a different aligned offset without any diagnostic.
+Unaligned offsets silently truncated. User expects operation at specific offset but gets different encoding.
 
-## Suggested fix
+## Suggested Fix
 
-Before scaling, require alignment:
+Validate alignment before masking:
 
 ```rust
-if offset % scale != 0 {
-    return Err(format!("ldnp/stnp offset must be aligned to {} bytes: {}", scale, offset));
+let align = if is_64 { 8 } else { 4 };
+if offset % align != 0 {
+    return Err(format!("LDNP offset must be aligned to {} bytes: {}", align, offset));
 }
 ```
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/45
+
+## Regression Property
+
+Failing property: `prop_unaligned_offset_rejected`
+
+```rust
+prop_assert!(encode_ldnp_stnp(&[wreg(0), wreg(1), mem_offset(xreg(2), 5)], false).is_err());
+prop_assert!(encode_ldnp_stnp(&[xreg(0), xreg(1), mem_offset(xreg(2), 3)], false).is_err());
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/116

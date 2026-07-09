@@ -1,34 +1,51 @@
 # Bug Report: `encode_ldnp_stnp` silently wraps out-of-range imm7 offsets
 
-**Location:** `src/backend/arm/assembler/encoder/load_store.rs`, function `encode_ldnp_stnp`
+**Target:** `src/backend/arm/assembler/encoder/load_store.rs` → `encode_ldnp_stnp`
+**Severity:** High
 
 ## Summary
 
-`encode_ldnp_stnp` encodes the non-temporal pair offset as `(*offset >> shift) & 0x7F` without validating the signed 7-bit scaled range. Out-of-range byte offsets are accepted and wrap to a different signed imm7 value.
+`encode_ldnp_stnp` encodes offset as `(*offset >> shift) & 0x7F` without validating signed 7-bit scaled range. Out-of-range byte offsets accepted and wrap to different signed imm7 value, accessing wrong address.
+
+## Root Cause
+
+```rust
+let imm7 = (*offset >> shift) & 0x7F;  // no range check
+```
 
 ## Reproduction
 
-Failing property: `prop_negative_imm7_range_violation_rejects`
+**Input:** `stnp w0, w1, [x2, #256]`
 
-Minimal input from the run:
+**Expected:** `Err` — STNP offset out of range: 256 (valid: -256 to 252)
 
-```text
-stnp w0, w1, [x2, #256]
-```
+**Actual:** `Ok(Word(...))` — imm7 = -64, encodes as `#-256` (wrong offset)
 
-For W-register non-temporal pairs, the offset is scaled by 4 and encoded in signed imm7, so the valid byte range is `[-256, 252]`. Offset `#256` is outside the range and should return `Err`. The encoder masks it into `imm7 = -64`, which decodes as `#-256`.
+**Minimal failing input:** is_w_reg = true, offset = 256 (or 257, 512, etc.)
 
 ## Impact
 
-Silent miscompilation: an out-of-range non-temporal pair load/store can access a different address from the one written in assembly.
+Silent miscompilation: out-of-range offsets accepted and access different address than written. Hard to debug.
 
-## Suggested fix
+## Suggested Fix
 
-Before masking, validate the signed scaled imm7 range for the access size:
+Validate signed scaled range before masking:
 
 ```rust
+let scale = if is_64 { 8 } else { 4 };
 if offset < -(64 * scale) || offset > (63 * scale) {
-    return Err(format!("ldnp/stnp offset out of range: {}", offset));
+    return Err(format!("STNP offset out of range: {} (valid: {} to {})", 
+                       offset, -(64 * scale), 63 * scale));
 }
 ```
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/44
+
+## Regression Property
+
+Failing property: `prop_negative_imm7_range_violation_rejects`
+
+```rust
+prop_assert!(encode_ldnp_stnp(&[wreg(0), wreg(1), mem_offset(xreg(2), 256)], false).is_err());
+prop_assert!(encode_ldnp_stnp(&[wreg(0), wreg(1), mem_offset(xreg(2), -260)], false).is_err());
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/115
