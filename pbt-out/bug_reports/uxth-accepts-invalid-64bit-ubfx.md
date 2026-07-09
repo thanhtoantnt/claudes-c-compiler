@@ -89,4 +89,12 @@ share the same "no width validation" pattern (their existing `*_props` modules
 already document the W-destination/X-source mismatch as a SPEC BUG). For those,
 64-bit destinations *are* spec-valid (sign/zero-extend into 64-bit); for
 `encode_uxth` the entire 64-bit path is invalid.
+## Regression Property
+
+Failing property: `uxth_rejects_64bit_destination_form` (P6)
+
+```rust
+prop_assert!(encode_uxth(&[xreg(0), xreg(0)]).is_err());  // X destination invalid
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/126
