@@ -1347,6 +1347,158 @@ mod prop_encode_swp_tests {
     }
 }
 
+#[cfg(test)]
+mod prop_encode_swp_offset_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent oracle ───────────────────────────────────────────────
+    // ORACLE: spec-conformance / negative contract — OFFSET VALIDATION.
+    //
+    // (The sibling `prop_encode_swp_tests` module covers golden encodings,
+    // register-field placement, fixed opcode bits, and the width /
+    // acquire-release differentials, always with offset 0. THIS module
+    // focuses solely on memory-offset handling.)
+    //
+    // Target: `encode_swp` (SWP/SWPA/SWPAL/SWPL and the byte/halfword
+    // variants SWPB/SWPH/... — Swap, ARMv8.1-A LSE atomics,
+    // ARM ARM §C6.2.272 SWP).
+    //
+    // Per the ARM ARM the ONLY permitted assembler syntax is:
+    //
+    //     SWP  <Xs>, <Xt>, [<Xn|SP>]
+    //     SWP  <Ws>, <Wt>, [<Xn|SP>]
+    //
+    // (and the byte/halfword/acquire/release variants likewise). The
+    // encoding carries NO immediate-offset / scaled-immediate field — the
+    // effective address is exactly the base register:
+    //
+    //     size 111000 A R 1 Rs 1 000 00 Rn Rt   (no imm field)
+    //
+    // OFFSET-VALIDATION consequence: a non-zero immediate offset is
+    // *unrepresentable*. `swp x0,x1,[x2,#8]` cannot be encoded and must be
+    // rejected with Err. This is the same silent-drop defect already
+    // documented for `encode_ldxr_stxr` and `encode_ldxp_stxp`: the matcher
+    // is `Operand::Mem { base, .. }` and never inspects `offset`.
+
+    /// All 12 SWP-family mnemonics dispatched to `encode_swp`.
+    const SWP_MNEMONICS: &[&str] = &[
+        "swp", "swpa", "swpal", "swpl",
+        "swpb", "swpab", "swpalb", "swplb",
+        "swph", "swpah", "swpalh", "swplh",
+    ];
+
+    fn gp_reg(width: char, num: u32) -> Operand {
+        Operand::Reg(format!("{}{}", width, num))
+    }
+    fn mem_op(base_num: u32, offset: i64) -> Operand {
+        Operand::Mem { base: format!("x{}", base_num), offset }
+    }
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+    /// SWP operand list: Rs, Rt, [Rn, #off].
+    fn swp_ops(rw: char, rs: u32, tw: char, rt: u32, base: u32, off: i64) -> Vec<Operand> {
+        vec![gp_reg(rw, rs), gp_reg(tw, rt), mem_op(base, off)]
+    }
+    prop_compose! {
+        fn arb_mn()(idx in 0usize..SWP_MNEMONICS.len()) -> &'static str {
+            SWP_MNEMONICS[idx]
+        }
+    }
+
+    proptest! {
+        // ── Property 1: the offset is silently discarded (BUG MECHANISM). ──
+        // The ARM ARM gives SWP no offset field, yet the encoder matches
+        // `Operand::Mem { base, .. }` and never inspects `offset`. Hence any
+        // two offsets — including a non-zero, unrepresentable one — must
+        // encode to the SAME word. PASSES today; documents the drop.
+        #[test]
+        fn prop_offset_does_not_affect_word(
+            mn in arb_mn(),
+            rs_num in 0u32..=31u32,
+            rt_num in 0u32..=31u32,
+            base_num in 0u32..=31u32,
+            o1 in any::<i64>(),
+            o2 in any::<i64>(),
+        ) {
+            let w1 = word(encode_swp(mn, &swp_ops('x', rs_num, 'x', rt_num, base_num, o1)));
+            let w2 = word(encode_swp(mn, &swp_ops('x', rs_num, 'x', rt_num, base_num, o2)));
+            prop_assert_eq!(w1, w2, "offset must not change the word (it is dropped)");
+        }
+
+        // ── Property 2: NEGATIVE CONTRACT — non-zero offset must be Err. ──
+        // The SWP group has no immediate-offset form, so a non-zero offset is
+        // unrepresentable and MUST be rejected rather than silently encoded
+        // as `[Rn]`.
+        //
+        // EXPECTED TO FAIL against current code: it accepts the offset and
+        // drops it. This failure IS the bug being reported.
+        #[test]
+        fn prop_nonzero_offset_rejected(
+            mn in arb_mn(),
+            rs_num in 0u32..=31u32,
+            rt_num in 0u32..=31u32,
+            base_num in 0u32..=31u32,
+            off in (-32768i64..32767i64).prop_filter("non-zero", |o| *o != 0),
+        ) {
+            let res = encode_swp(mn, &swp_ops('x', rs_num, 'x', rt_num, base_num, off));
+            prop_assert!(res.is_err(),
+                "non-zero offset {} on {} must be rejected (no offset field in encoding); got {:?}",
+                off, mn, res);
+        }
+
+        // ── Property 3: the only legal form (offset == 0) is accepted. ──
+        #[test]
+        fn prop_zero_offset_accepted(
+            mn in arb_mn(),
+            rs_num in 0u32..=31u32,
+            rt_num in 0u32..=31u32,
+            base_num in 0u32..=31u32,
+        ) {
+            let res = encode_swp(mn, &swp_ops('x', rs_num, 'x', rt_num, base_num, 0));
+            prop_assert!(res.is_ok(), "offset 0 is the only legal form; got {:?}", res);
+        }
+
+        // ── Property 4: NEGATIVE CONTRACT — common programmer offsets. ──
+        // Concrete regression anchor for the offsets a human is most likely
+        // to actually write on a SWP (positive, negative, aligned to the
+        // 1/2/4/8-byte access size, page-spanning). All are unrepresentable
+        // (no offset field) and MUST be rejected. EXPECTED TO FAIL today.
+        #[test]
+        fn prop_common_offsets_rejected(
+            mn in arb_mn(),
+            off_idx in 0usize..8usize,
+        ) {
+            let offsets = [1i64, -1, 4, 8, 16, -8, 4096, 0x10000];
+            let off = offsets[off_idx];
+            let res = encode_swp(mn, &swp_ops('x', 0, 'x', 1, 2, off));
+            prop_assert!(res.is_err(),
+                "{} offset {} is unrepresentable (no offset field) and must be Err; got {:?}",
+                mn, off, res);
+        }
+
+        // ── Property 5: signed-offset tail is NOT silently wrapped. ──
+        // A negative offset can never be expressed (no field), so regardless
+        // of magnitude the result must be Err. Guards against the encoder
+        // ever "interpreting" a negative offset via two's-complement masking
+        // into some imaginary field.
+        #[test]
+        fn prop_negative_offset_never_encoded(
+            mn in arb_mn(),
+            off in (-65536i64..=-1i64),
+        ) {
+            let res = encode_swp(mn, &swp_ops('x', 0, 'x', 1, 2, off));
+            prop_assert!(res.is_err(),
+                "negative offset {} on {} must be Err (no offset field); got {:?}",
+                off, mn, res);
+        }
+    }
+}
+
 /// Encode LDADD/LDCLR/LDEOR/LDSET and their acquire/release/byte/halfword variants (LSE atomics).
 /// LDADD Rs, Rt, [Xn]: size 111000 A R 1 Rs 0 opc 00 Rn Rt
 /// opc: LDADD=000, LDCLR=001, LDEOR=010, LDSET=011

@@ -2333,6 +2333,74 @@ mod prop_encode_csinv_tests {
                 slot, result
             );
         }
+
+        // Property G1 — MIXED-WIDTH negative contract (EXPECTED TO FAIL — see
+        // BUG-report). Per ARM ARM (C4.1.67, conditional-select group) the `sf`
+        // bit governs the width of Rd, Rn AND Rm COLLECTIVELY: all three
+        // registers MUST be the same size, otherwise the encoding is
+        // UNALLOCATED. A mixed-width tuple such as `csinv x0, w1, x2, eq` must
+        // therefore be rejected. The encoder, however, derives `sf` solely from
+        // Rd (operand 0) and silently discards the widths of Rn (operand 1)
+        // and Rm (operand 2), emitting a malformed instruction. A correct
+        // assembler MUST return Err for any non-uniform-width triple. No cited
+        // spec permits mixing register widths within one instruction.
+        #[test]
+        fn prop_rejects_mixed_width_operands(
+            rd_is64 in any::<bool>(),
+            rn_is64 in any::<bool>(),
+            rm_is64 in any::<bool>(),
+            rd in 0u32..=30u32,
+            rn in 0u32..=30u32,
+            rm in 0u32..=30u32,
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            // Only exercise genuinely MIXED-width operand triples.
+            prop_assume!(!(rd_is64 == rn_is64 && rn_is64 == rm_is64));
+            let cond_name = COND_TABLE[cond_idx].0;
+            let name = |is_64: bool, n: u32| {
+                if is_64 { format!("x{}", n) } else { format!("w{}", n) }
+            };
+            let ops = vec![
+                Operand::Reg(name(rd_is64, rd)),
+                Operand::Reg(name(rn_is64, rn)),
+                Operand::Reg(name(rm_is64, rm)),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            prop_assert!(
+                encode_csinv(&ops).is_err(),
+                "mixed-width CSINV {:?} must be rejected as UNALLOCATED; got {:?}",
+                ops, encode_csinv(&ops)
+            );
+        }
+
+        // Property G2 — mixed-width ROOT-CAUSE characterization (PASSING).
+        // Property G1 fails because `sf` is taken from Rd alone: the widths of
+        // Rn and Rm have ZERO effect on the encoded word. Holding Rd fixed and
+        // independently flipping Rn's and Rm's x<->w width leaves the word
+        // bit-identical — proving those widths are silently discarded, which is
+        // precisely the gap G1 exposes.
+        #[test]
+        fn prop_rn_and_rm_widths_do_not_affect_word(
+            rd_n in 0u32..=30u32,
+            rd_is64 in any::<bool>(),
+            rn_n in 0u32..=30u32,
+            rm_n in 0u32..=30u32,
+            cond_idx in 0usize..COND_TABLE.len(),
+        ) {
+            let cond_name = COND_TABLE[cond_idx].0;
+            let rd = if rd_is64 { format!("x{}", rd_n) } else { format!("w{}", rd_n) };
+            let mk = |rn_64: bool, rm_64: bool| vec![
+                Operand::Reg(rd.clone()),
+                Operand::Reg(if rn_64 { format!("x{}", rn_n) } else { format!("w{}", rn_n) }),
+                Operand::Reg(if rm_64 { format!("x{}", rm_n) } else { format!("w{}", rm_n) }),
+                Operand::Cond(cond_name.to_string()),
+            ];
+            let base = enc(&mk(false, false));
+            // Flipping Rn width, Rm width, or both must not change the word.
+            prop_assert_eq!(enc(&mk(true, false)), base);
+            prop_assert_eq!(enc(&mk(false, true)), base);
+            prop_assert_eq!(enc(&mk(true, true)), base);
+        }
     }
 }
 
