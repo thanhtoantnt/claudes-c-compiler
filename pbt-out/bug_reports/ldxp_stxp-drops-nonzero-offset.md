@@ -1,88 +1,68 @@
-# BUG: `encode_ldxp_stxp` silently drops non-zero immediate offsets
+# Bug Report: `encode_ldxp_stxp` silently drops non-zero immediate offsets
 
-## Target
-`src/backend/arm/assembler/encoder/load_store.rs`, function `encode_ldxp_stxp`
-(LDXP / LDAXP / STXP / STLXP — Load/Store Exclusive Pair).
+**Target:** `src/backend/arm/assembler/encoder/load_store.rs` → `encode_ldxp_stxp`
+**Severity:** High
 
-## Symptom
-A non-zero immediate offset on an exclusive-pair load/store is **silently
-accepted and encoded as if the offset were zero** — i.e. the encoder treats
-`ldxp x0,x1,[x2,#8]` identically to `ldxp x0,x1,[x2]`. No error is reported, so
-an assembler user gets an instruction with the *wrong effective address* and no
-diagnostic.
+## Summary
 
-## Spec (ARM ARM)
-The exclusive-pair load/store group has **no immediate-offset form**. The only
-permitted assembler syntax is:
+`encode_ldxp_stxp` matches memory operand with `Operand::Mem { base, .. }` and **silently discards the offset field**. Per ARMv8-A, LDXP/STXP have **no immediate-offset form** — only `[Xn|SP]` addressing is permitted. An operand like `[x2, #8]` is unrepresentable and should be rejected. Instead, the encoder treats `ldxp x0, x1, [x2, #8]` identically to `ldxp x0, x1, [x2]` — wrong address, no diagnostic.
 
-```
-LDXP  <Xt1>, <Xt2>, [<Xn|SP>]
-STXP  <Ws>, <Xt1>, <Xt2>, [<Xn|SP>]
-```
-
-Encodings (no immediate field exists in either):
-
-```
-LDXP/LDAXP: 1 sz 001000 0 1 1 11111 o0 Rt2 Rn Rt   (bit23=0, bit22=1)
-STXP/STLXP: 1 sz 001000 0 0 1 Rs   o0 Rt2 Rn Rt    (bit23=0, bit22=0)
-```
-
-The `..` in the operand match below is the root cause:
+## Root Cause
 
 ```rust
-let rn = match operands.get(2) {                 // (load branch)
-    Some(Operand::Mem { base, .. }) => parse_reg_num(base)...,
-    _ => return Err(...),
-};
-```
-```rust
-let rn = match operands.get(3) {                 // (store branch)
+let rn = match operands.get(2) {                 // load branch
     Some(Operand::Mem { base, .. }) => parse_reg_num(base)...,
     _ => return Err(...),
 };
 ```
 
-`offset` is bound with `..` and never inspected, so any value is silently lost.
+The `..` pattern discards `offset`. Store branch at `operands.get(3)` has identical bug.
 
-## PBT evidence
-`prop_encode_ldxp_stxp_offset_tests` (new module in `load_store.rs`, 4 properties).
-Two of four properties fail:
+## Reproduction
 
-| Property | Result | Meaning |
-|---|---|---|
-| `prop_offset_does_not_affect_word` | **PASS** | Documents the drop: any two offsets → identical word. |
-| `prop_nonzero_offset_rejected`     | **FAIL** | `off=1` returns `Ok(Word(..))`, must be `Err`. |
-| `prop_zero_offset_accepted`        | **PASS** | The only legal form works. |
-| `prop_common_offsets_rejected`     | **FAIL** | `off=1` returns `Ok`, must be `Err`. |
+**Input:** `ldxp x0, x1, [x2, #8]`
 
-Minimal failing input (proptest):
-```
-is_load=false, acquire_release=false,
-rt_num=0, rt2_num=0, base_num=0, ws_num=0, off=1
-  → Ok(Word(3357540352))   [expected Err]
-```
+**Expected:** `Err` — ldxp does not support immediate offset (got #8); use [Rn] only
+
+**Actual:** `Ok(Word(...))` — encodes as `ldxp x0, x1, [x2]` (offset silently dropped)
+
+**Minimal failing input:** is_load=false, acquire_release=false, rt_num=0, rt2_num=0, base_num=0, ws_num=0, off=1
 
 ## Impact
-Incorrect code generation for any source that writes a non-zero offset on an
-exclusive pair instruction (a common mistake, e.g. `stxp w0,x1,x2,[x4,#16]`),
-with no assembler diagnostic. The same defect class is already present in the
-sibling `encode_ldxr_stxr` (documented by `prop_encode_ldxr_stxr_offset_tests`).
 
-## Suggested fix
-Inspect the offset in both branches of `encode_ldxp_stxp` and reject non-zero
-values, e.g. for the load branch:
+Incorrect code generation for any source writing non-zero offset on exclusive pair instruction, with no assembler diagnostic. Same defect class as `encode_ldxr_stxr`.
+
+## Suggested Fix
+
+Inspect and reject non-zero offset in both branches:
 
 ```rust
 Some(Operand::Mem { base, offset }) => {
     if *offset != 0 {
         return Err(format!(
             "ldxp/ldaxp does not support an immediate offset (got #{}); use [Rn] only",
-            offset));
+            offset
+        ));
     }
     parse_reg_num(base).ok_or("ldxp needs memory operand")?
 }
 ```
 
-(analogously for the store branch's `operands.get(3)`). After this fix the two
-failing properties flip to PASS and the two passing properties continue to hold.
+## Regression Property
+
+Failing property: `prop_nonzero_offset_rejected`
+
+```rust
+prop_assert!(encode_ldxp_stxp(&[xreg(0), xreg(1), mem_offset(xreg(2), 1)], true, false).is_err());
+```
+
+## PBT Results (module `prop_encode_ldxp_stxp_offset_tests`)
+
+| Property | Result |
+|---|---|
+| `prop_offset_does_not_affect_word` | PASS |
+| `prop_nonzero_offset_rejected` | **FAIL** |
+| `prop_zero_offset_accepted` | PASS |
+| `prop_common_offsets_rejected` | **FAIL** |
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/179
