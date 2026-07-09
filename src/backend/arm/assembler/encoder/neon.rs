@@ -3324,3 +3324,149 @@ mod dup_pbt_extra_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_encode_neon_three_same_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ORACLE: field-placement / bit-layout, anchored to ARMv8-A ARM
+    // "Advanced SIMD three register, same" encoding:
+    //   0 Q U 0 1 1 1 0 size 1 Rm opcode 1 Rn Rd
+    //    31 30 29 28----24 23-22 21 20-16 15-11 10 9-5 4-0
+    // Field widths: Q=1b, U=1b, size=2b, Rm/Rn/Rd=5b, opcode=5b.
+    // The all-zero-fields golden (Q=U=size=Rm=opcode=Rn=Rd=0) is the fixed
+    // template: (0b01110<<24)|(1<<21)|(1<<10) = 0x0E200400.
+    const GOLDEN_TEMPLATE: u32 = 0x0E200400;
+    const ARRANGEMENTS: &[&str] = &["8b", "16b", "4h", "8h", "2s", "4s", "1d", "2d"];
+
+    fn vreg(num: u32, arr: &str) -> Operand {
+        Operand::RegArrangement {
+            reg: format!("v{}", num),
+            arrangement: arr.to_string(),
+        }
+    }
+
+    fn word(r: Result<EncodeResult, String>) -> u32 {
+        match r {
+            Ok(EncodeResult::Word(w)) => w,
+            other => panic!("expected Word, got {:?}", other),
+        }
+    }
+
+    // Independent arrangement -> (Q, size) table (NOT neon_arr_to_q_size).
+    fn ref_q_size(arr: &str) -> Option<(u32, u32)> {
+        match arr {
+            "8b" => Some((0, 0b00)),
+            "16b" => Some((1, 0b00)),
+            "4h" => Some((0, 0b01)),
+            "8h" => Some((1, 0b01)),
+            "2s" => Some((0, 0b10)),
+            "4s" => Some((1, 0b10)),
+            "1d" => Some((0, 0b11)),
+            "2d" => Some((1, 0b11)),
+            _ => None,
+        }
+    }
+
+    prop_compose! {
+        fn arb_vreg_num()(n in 0u32..=31u32) -> u32 { n }
+    }
+
+    proptest! {
+        // Property 1 — constant bitfield template is always present.
+        // Bits: [31]=0, [28:24]=01110, [21]=1, [10]=1, for any valid
+        // operands, u_bit, and opcode.
+        #[test]
+        fn prop_fixed_template(
+            rd in arb_vreg_num(), rn in arb_vreg_num(), rm in arb_vreg_num(),
+            arr in prop::sample::select(ARRANGEMENTS),
+            u_bit in 0u32..=1u32, opcode in 0u32..=0x1Fu32,
+        ) {
+            let _ = GOLDEN_TEMPLATE;
+            let ops = vec![vreg(rd, arr), vreg(rn, arr), vreg(rm, arr)];
+            let w = word(encode_neon_three_same(&ops, u_bit, opcode));
+            prop_assert_eq!(w >> 31, 0, "bit31 must be 0");
+            prop_assert_eq!((w >> 24) & 0b11111, 0b01110, "[28:24] must be 01110");
+            prop_assert_eq!((w >> 21) & 1, 1, "bit21 must be 1");
+            prop_assert_eq!((w >> 10) & 1, 1, "bit10 must be 1");
+        }
+
+        // Property 2 — arrangement drives Q[30] and size[23:22], per the
+        // independent reference table (not neon_arr_to_q_size).
+        #[test]
+        fn prop_arrangement_qsize(
+            rd in arb_vreg_num(), rn in arb_vreg_num(), rm in arb_vreg_num(),
+            arr in prop::sample::select(ARRANGEMENTS),
+        ) {
+            let (q, size) = ref_q_size(arr).unwrap();
+            let ops = vec![vreg(rd, arr), vreg(rn, arr), vreg(rm, arr)];
+            let w = word(encode_neon_three_same(&ops, 0, 0));
+            prop_assert_eq!((w >> 30) & 1, q, "Q bit for {}", arr);
+            prop_assert_eq!((w >> 22) & 0b11, size, "size field for {}", arr);
+        }
+
+        // Property 3 — register fields are independent and non-overlapping:
+        // Rd -> [4:0], Rn -> [9:5], Rm -> [20:16]; all other bits constant.
+        #[test]
+        fn prop_register_field_independence(
+            rd in arb_vreg_num(), rn in arb_vreg_num(), rm in arb_vreg_num(),
+            u_bit in 0u32..=1u32, opcode in 0u32..=0x1Fu32,
+        ) {
+            let arr = "4s"; // fixed arrangement
+            let base = word(encode_neon_three_same(
+                &[vreg(0, arr), vreg(0, arr), vreg(0, arr)], u_bit, opcode));
+
+            let w_rd = word(encode_neon_three_same(
+                &[vreg(rd, arr), vreg(0, arr), vreg(0, arr)], u_bit, opcode));
+            prop_assert_eq!(w_rd & !0x1F_u32, base & !0x1F_u32, "Rd must only touch bits 4:0");
+            prop_assert_eq!(w_rd & 0x1F, rd & 0x1F);
+
+            let w_rn = word(encode_neon_three_same(
+                &[vreg(0, arr), vreg(rn, arr), vreg(0, arr)], u_bit, opcode));
+            prop_assert_eq!(w_rn & !(0x1F_u32 << 5), base & !(0x1F_u32 << 5), "Rn must only touch bits 9:5");
+            prop_assert_eq!((w_rn >> 5) & 0x1F, rn & 0x1F);
+
+            let w_rm = word(encode_neon_three_same(
+                &[vreg(0, arr), vreg(0, arr), vreg(rm, arr)], u_bit, opcode));
+            prop_assert_eq!(w_rm & !(0x1F_u32 << 16), base & !(0x1F_u32 << 16), "Rm must only touch bits 20:16");
+            prop_assert_eq!((w_rm >> 16) & 0x1F, rm & 0x1F);
+        }
+
+        // Property 4 — error contract: fewer than 3 operands errors; an
+        // unsupported arrangement with 3 operands errors.
+        #[test]
+        fn prop_error_contract(
+            arr in prop::sample::select(&["8b", "4s"]),
+            n in 0usize..=2usize,
+        ) {
+            let ops: Vec<Operand> = (0..n).map(|_| vreg(0, arr)).collect();
+            let res = encode_neon_three_same(&ops, 0, 0);
+            prop_assert!(res.is_err(), "{} operands must error, got {:?}", n, res);
+
+            let bad = vec![vreg(0, "12b"), vreg(1, "12b"), vreg(2, "12b")];
+            let res2 = encode_neon_three_same(&bad, 0, 0);
+            prop_assert!(res2.is_err(), "unsupported arrangement must error, got {:?}", res2);
+        }
+
+        // Property 5 — NEGATIVE CONTRACT: out-of-range u_bit / opcode must
+        // error. u_bit occupies the single bit [29]; opcode the 5-bit field
+        // [15:11]. Larger values cannot be encoded and would silently
+        // corrupt adjacent fields (Q[30], Rm[20:16]). The encoder must
+        // reject them rather than emit a malformed word.
+        #[test]
+        fn prop_out_of_range_u_bit_and_opcode_must_error(extra in 1u32..=4u32) {
+            let ops = || vec![vreg(0, "4s"), vreg(1, "4s"), vreg(2, "4s")];
+
+            let res_u = encode_neon_three_same(&ops(), 1 + extra, 0);
+            prop_assert!(res_u.is_err(),
+                "out-of-range u_bit {} (field is 1 bit) must error, got {:?}",
+                1 + extra, res_u);
+
+            let res_o = encode_neon_three_same(&ops(), 0, 0x1F + extra);
+            prop_assert!(res_o.is_err(),
+                "out-of-range opcode 0x{:x} (field is 5 bits) must error, got {:?}",
+                0x1F + extra, res_o);
+        }
+    }
+}
