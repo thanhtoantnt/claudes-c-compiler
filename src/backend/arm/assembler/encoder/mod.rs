@@ -194,6 +194,10 @@ mod neon_mla_mls_fields_pbt;
 mod data_processing_mov_dispatch_pbt;
 #[cfg(test)]
 mod system_sys_at_dc_ic_tlbi_pbt;
+#[cfg(test)]
+mod compare_branch_cond_pbt;
+#[cfg(test)]
+mod data_processing_logical_not_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
