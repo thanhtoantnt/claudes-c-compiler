@@ -1,36 +1,38 @@
-# Bug: `encode_fp_arith` derives `ftype` from destination only — no precision-consistency check
+# Bug Report: `encode_fp_arith` derives `ftype` from destination only — no precision-consistency check
 
-**File:** `src/backend/arm/assembler/encoder/fp_scalar.rs`
-**Function:** `encode_fp_arith(operands: &[Operand], opcode: u32) -> Result<EncodeResult, String>`
-**Severity:** Medium (latent — masked only because well-formed inputs share precision.)
+**Target:** `src/backend/arm/assembler/encoder/fp_scalar.rs` → `encode_fp_arith`
+**Severity:** Medium
 
 ## Summary
-`ftype` is read **only** from `operands[0]`'s first character
-(`'d'` ⇒ `0b01` double, else ⇒ `0b00` single). The precision of the source
-operands (Rn, Rm) is never inspected, and no consistency is enforced. AArch64
-scalar FP data-processing (2-source) requires the destination and both sources to
-share precision; a mixed-precision word is **UNALLOCATED**. E.g.
-`FADD D0, S1, S2` encodes with `ftype = 0b01` (double, from `D0`) while the
-source fields carry single-precision register numbers — an invalid instruction
-`as`/`llvm-mc` reject.
 
-## Minimal failing input
-```
-encode_fp_arith(&[Reg("d0"), Reg("s1"), Reg("s2")], 0b0010)  // FADD D0, S1, S2
-```
-- **Expected:** `Err` (operands must share precision).
-- **Actual:** `Ok(Word(0x1E608820))` — `ftype = 0b01` from the `D0` destination,
-  source registers silently reinterpreted as double-precision slots.
+`ftype` read **only from destination (`operands[0]`)** first character. Source operands (`Rn`, `Rm`) precision never inspected, no consistency enforced. AArch64 scalar FP data-processing (2-source) requires destination and both sources share precision; mixed-precision word is UNALLOCATED.
 
-Discovered by property `prop_fp_arith_rejects_wrong_banks_precision_and_oversized_opcode`
-(mixed-precision sub-assertion; surface test reaches it after the GP-bank defect is fixed).
+## Root Cause
+
+```rust
+let rd_name = match &operands[0] { Operand::Reg(r) => r.to_lowercase(), _ => String::new() };
+let is_double = rd_name.starts_with('d');
+let ftype = if is_double { 0b01 } else { 0b00 };   // dest-only
+// No source precision check
+```
+
+## Reproduction
+
+**Input:** `fadd d0, s1, s2`
+
+**Expected:** `Err` — fp_arith operands must share precision (all D or all S)
+
+**Actual:** `Ok(Word(0x1E608820))` — `ftype=01` from D0, sources silently reinterpreted as double
+
+**Minimal failing input:** rd="d0", rn="s1", rm="s2"
 
 ## Impact
-Mismatched-precision operands yield UNALLOCATED encodings that real AArch64
-hardware rejects, with no compiler diagnostic.
 
-## Fix
-After the bank check, require homogeneous precision across all three FP operands:
+Mismatched-precision operands yield UNALLOCATED encodings that real AArch64 hardware rejects, with no compiler diagnostic.
+
+## Suggested Fix
+
+Require homogeneous precision across all three FP operands:
 
 ```rust
 let prec: Vec<char> = operands.iter().take(3).filter_map(|o| match o {
@@ -41,4 +43,14 @@ if !(prec.iter().all(|&c| c == 'd') || prec.iter().all(|&c| c == 's')) {
     return Err("fp_arith operands must share precision (all D or all S)".into());
 }
 ```
+
+## Regression Property
+
+Failing property: `prop_fp_arith_rejects_wrong_banks_precision_and_oversized_opcode`
+
+```rust
+prop_assert!(encode_fp_arith(&[dreg(0), sreg(1), sreg(2)], 0b0010).is_err());  // mixed precision
+prop_assert!(encode_fp_arith(&[sreg(0), dreg(1), dreg(2)], 0b0010).is_err());  // mixed precision
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/147
