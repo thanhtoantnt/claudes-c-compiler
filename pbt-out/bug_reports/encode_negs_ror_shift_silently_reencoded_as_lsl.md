@@ -1,37 +1,51 @@
-# Bug Report: `encode_negs` silently re-encodes ROR shift as LSL
+# Bug Report: `encode_negs` silently accepts `ror` shift (re-encoded as LSL)
 
-**Location:** `src/backend/arm/assembler/encoder/data_processing.rs`, function `encode_negs`
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_negs`
+**Severity:** High
 
 ## Summary
 
-`encode_negs` accepts `ror` in the optional shift operand and maps it through the default match arm to shift kind `0b00`, i.e. LSL. Add/sub shifted-register encodings permit only LSL/LSR/ASR; ROR is invalid and should be rejected.
+ARMv8-A defines `NEGS` only with LSL shift; values 01, 10, 11 in shift kind field are UNALLOCATED. `encode_negs` masks shift amount with `& 0x3` without validating shift kind, accepting invalid `ror` (and `lsr`, `asr`).
+
+## Root Cause
+
+```rust
+let st = *amount & 0x3;  // no shift kind validation
+```
 
 ## Reproduction
 
-Failing property: `negs_rejects_ror_shift`
+**Input:** `negs x0, x1, ror #16`
 
-Minimal input:
+**Expected:** `Err` — NEGS shift must be LSL only (kind 00)
 
-```text
-negs w0, w0, ror #0
-```
+**Actual:** `Ok(Word(...))` — st = 16 & 0x3 = 0, encoded as LSL (ror silently dropped)
 
-Actual result: `Ok(Word(_))`, encoded as if the shift were `lsl #0`.
+**Minimal failing input:** shift_kind = "ror" (or "lsr", "asr"), amount = 16 (or 0, 32, 48)
 
 ## Impact
 
-Invalid source code is silently accepted and assembled as a different instruction than written.
+UNALLOCATED encodings emitted without diagnostic. Shift kind silently coerced to LSL.
 
-## Suggested fix
+## Suggested Fix
 
-Reject unknown shift kinds instead of using a default LSL arm:
+Reject non-LSL shift kinds:
 
 ```rust
-let shift_type = match kind.as_str() {
-    "lsl" => 0b00,
-    "lsr" => 0b01,
-    "asr" => 0b10,
-    other => return Err(format!("negs invalid shift kind: {}", other)),
-};
+match kind.as_str() {
+    "lsl" => { /* proceed */ }
+    _ => return Err(format!("negs: invalid shift kind: {} (LSL only)", kind)),
+}
 ```
+
+## Regression Property
+
+Failing property: `negs_rejects_ror_shift`
+
+```rust
+prop_assert!(encode_negs(&[xreg(0), xreg(1), shift("ror", 16)], true).is_err());
+prop_assert!(encode_negs(&[xreg(0), xreg(1), shift("lsr", 16)], true).is_err());
+prop_assert!(encode_negs(&[xreg(0), xreg(1), shift("asr", 16)], true).is_err());
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/81
