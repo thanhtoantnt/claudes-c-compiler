@@ -1,69 +1,54 @@
-# Bug: `encode_bfxil` panics on `BFXIL Rd, Rn, #0, #0`
+# Bug Report: `encode_bfxil` panics on `BFXIL Rd, Rn, #0, #0`
 
-**Target:** `src/backend/arm/assembler/encoder/bitfield.rs`, function `encode_bfxil` (line 127)
-**Found by:** property `prop_encode_bfxil_tests::prop_rejects_out_of_range_operands`
-**Severity:** high (panic aborts the compiler in debug builds)
+**Target:** `src/backend/arm/assembler/encoder/bitfield.rs` → `encode_bfxil`
+**Severity:** High
 
-## Minimal input
+## Summary
 
-```
-BFXIL X0, X1, #0, #0
-```
-i.e. `lsb == 0 && width == 0` (any register width).
+`BFXIL Rd, Rn, #0, #0` causes compiler panic due to arithmetic underflow in `lsb + width - 1`. ARM ARM requires `1 <= width <= regsize - lsb`, so `width == 0` must be rejected.
 
-## Expected
-
-The assembler rejects the operand with a clean `Err`. `width == 0` is not a
-valid bitfield width — ARM ARM (BFXIL) requires `1 <= width <= regsize - lsb`,
-so `width == 0` is out of range and must be reported, never crash.
-
-## Actual
-
-The compiler panics:
-
-```
-panicked at src/backend/arm/assembler/encoder/bitfield.rs:127:16:
-attempt to subtract with overflow
-```
-
-## Root cause
+## Root Cause
 
 ```rust
 let imms = lsb + width - 1;   // line 127
 ```
 
-Rust evaluates this left-to-right as `(lsb + width) - 1`. With `lsb == 0` and
-`width == 0`, that is `0u32 - 1`, an arithmetic underflow that aborts in debug
-builds. There is no preceding check that `width >= 1`.
+Evaluated as `(0 + 0) - 1 = -1` → `0u32 - 1` underflow → panic. No check that `width >= 1`.
+
+## Reproduction
+
+**Input:** `bfxil x0, x1, #0, #0`
+
+**Expected:** `Err` — width 0 out of range (1 <= width <= regsize - lsb)
+
+**Actual:** Panic: `attempt to subtract with overflow` at bitfield.rs:127:16
+
+**Minimal failing input:** lsb = 0, width = 0 (any register width)
 
 ## Impact
 
-Any source containing `BFXIL Rd, Rn, #0, #0` (or any path that lowers to it,
-e.g. a macro / codegen emitting a zero-width extract) crashes the compiler
-instead of producing a diagnostic.
+Any source containing `BFXIL Rd, Rn, #0, #0` (or codegen emitting zero-width extract) crashes compiler instead of producing diagnostic.
 
-## Fix
+## Suggested Fix
 
 Validate before computing:
 
 ```rust
-let regsize = if is_64 { 64u32 } else { 32 };
 if width == 0 || lsb >= regsize || lsb + width > regsize {
     return Err(format!("BFXIL: lsb/width out of range (lsb={}, width={}, regsize={})",
                        lsb, width, regsize));
 }
-let imms = lsb + width - 1; // now width >= 1, so no underflow
+let imms = lsb + width - 1; // now width >= 1, no underflow
 ```
 
-or use `width.checked_sub(1)` / `lsb.checked_add(width).and_then(|s| s.checked_sub(1))`.
+Or use checked arithmetic: `width.checked_sub(1)`.
 
-## Test evidence
+## Regression Property
 
+Failing property: `prop_rejects_out_of_range_operands`
+
+```rust
+prop_assert!(encode_bfxil(&[xreg(0), xreg(1), imm(0), imm(0)]).is_err());  // width=0 panic
 ```
-Test failed: lsb=0,width=0 (imms underflow PANIC): lsb=0 width=0 should be Err but PANICKED
-minimal failing input: is_64 = false, over_lsb = 64, over_width = 65, neg = -3
-```
 
-The property wraps the call in `std::panic::catch_unwind`, so the panic is
-reported as a contract failure rather than aborting the proptest run.
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/138
