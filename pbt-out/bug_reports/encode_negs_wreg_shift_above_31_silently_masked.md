@@ -1,35 +1,50 @@
-# Bug Report: `encode_negs` silently accepts W-register shifts above 31
+# Bug Report: `encode_negs` silently masks W-register shifts above 3
 
-**Location:** `src/backend/arm/assembler/encoder/data_processing.rs`, function `encode_negs`
+**Target:** `src/backend/arm/assembler/encoder/data_processing.rs` → `encode_negs`
+**Severity:** High
 
 ## Summary
 
-`encode_negs` masks the shift amount with `& 0x3F` and does not validate the width-dependent limit. For 32-bit W-register forms, ARM permits shift amounts only in `0..=31`; amounts `32..=63` are accepted and encoded as UNDEFINED instructions.
+`encode_negs` masks shift amount with `& 0x3` without width-dependent validation. For 32-bit W-registers, amounts 4+ accepted and encoded as `amount % 4`, producing instruction with different shift.
+
+## Root Cause
+
+```rust
+let st = *amount & 0x3;  // no width check before masking
+```
 
 ## Reproduction
 
-Failing property: `negs_w_reg_rejects_shift_above_31`
+**Input:** `negs w0, w1, lsl #4`
 
-Minimal input:
+**Expected:** `Err` — NEGS shift out of range: 4 (W-register valid: 0 only)
 
-```text
-negs w0, w0, lsl #32
-```
+**Actual:** `Ok(Word(...))` — st = 4 & 0x3 = 0, encoded as `lsl #0`
 
-Actual result: `Ok(Word(_))` instead of `Err`.
+**Minimal failing input:** is_64 = false, amount = 4 (or 5, 7, 8, 12, etc.)
 
 ## Impact
 
-The assembler accepts invalid NEGS shifted-register source and emits an undefined 32-bit instruction encoding.
+W-register shifts 4+ silently modulo 4. User expects operation at specific shift but gets different encoding.
 
-## Suggested fix
+## Suggested Fix
 
-Check the destination/source width before masking:
+Validate against valid amounts before masking:
 
 ```rust
-let max_shift = if is_64 { 63 } else { 31 };
-if shift_amount > max_shift {
-    return Err(format!("negs shift out of range: {}", shift_amount));
+let valid = if is_64 { [0, 16, 32, 48] } else { [0] };
+if !valid.contains(amount) {
+    return Err(format!("negs shift out of range: {}", amount));
 }
 ```
+
+## Regression Property
+
+Failing property: `negs_wreg_rejects_invalid_shift_amounts`
+
+```rust
+prop_assert!(encode_negs(&[wreg(0), wreg(1), shift("lsl", 4)], false).is_err());  // not 0
+prop_assert!(encode_negs(&[wreg(0), wreg(1), shift("lsl", 16)], false).is_err()); // wraps to 0
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/82
