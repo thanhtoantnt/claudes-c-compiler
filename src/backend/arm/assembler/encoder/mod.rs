@@ -180,6 +180,10 @@ mod neon_scalar_qshrn_pbt;
 mod compare_branch_regclass_pbt;
 #[cfg(test)]
 mod neon_movi_16bit_split_pbt;
+#[cfg(test)]
+mod neon_elem_pbt;
+#[cfg(test)]
+mod neon_logical_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
