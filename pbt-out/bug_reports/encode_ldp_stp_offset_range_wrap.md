@@ -1,36 +1,51 @@
-# Bug Report: `encode_ldp_stp` silently wraps out-of-range pair offsets
+# Bug Report: `encode_ldp_stp` silently wraps out-of-range imm7 offsets
 
-**Location:** `src/backend/arm/assembler/encoder/load_store.rs`, function `encode_ldp_stp`
+**Target:** `src/backend/arm/assembler/encoder/load_store.rs` → `encode_ldp_stp`
+**Severity:** High
 
 ## Summary
 
-`encode_ldp_stp` masks the scaled pair offset with `& 0x7F` instead of validating the signed 7-bit immediate range. Out-of-range offsets are accepted and encoded as a different in-range offset.
+`encode_ldp_stp` encodes offset as `(*offset >> shift) & 0x7F` without validating signed 7-bit scaled range. Out-of-range byte offsets accepted and wrap to different signed imm7 value, accessing wrong address.
+
+## Root Cause
+
+```rust
+let imm7 = (*offset >> shift) & 0x7F;  // no range check
+```
 
 ## Reproduction
 
-Failing property: `prop_out_of_range_offset_is_rejected`
+**Input:** `stp w0, w1, [x2, #256]`
 
-Minimal input from the run:
+**Expected:** `Err` — STP offset out of range: 256 (valid: -256 to 252)
 
-```text
-ldp x0, x1, [x2, #505]
-```
+**Actual:** `Ok(Word(...))` — imm7 = -64, encodes as `#-256` (wrong offset)
 
-For 64-bit general-purpose pair loads/stores, the offset is scaled by 8 and encoded in signed imm7, so the valid byte range is `[-512, 504]`. Offset `505` is outside the range and should return `Err`. The encoder instead masks the shifted value with `& 0x7F`, silently producing a nearby/different offset encoding.
+**Minimal failing input:** is_w_reg = true, offset = 256 (or 257, 512, etc.)
 
 ## Impact
 
-Silent miscompilation: stack or memory pair operations can access a different address than the assembly source requested, with no diagnostic.
+Silent miscompilation: out-of-range offsets accepted and access different address than written. Hard to debug.
 
-## Suggested fix
+## Suggested Fix
 
-Before encoding, check that the offset is in the scaled signed imm7 range for the register class/element size:
+Validate signed scaled range before masking:
 
 ```rust
+let scale = if is_64 { 8 } else { 4 };
 if offset < -(64 * scale) || offset > (63 * scale) {
-    return Err(format!("ldp/stp offset out of range: {}", offset));
+    return Err(format!("STP/LDP offset out of range: {} (valid: {} to {})", 
+                       offset, -(64 * scale), 63 * scale));
 }
 ```
 
-Then encode only after validation.
-**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/46
+## Regression Property
+
+Failing property: `prop_imm7_range_violation_rejects`
+
+```rust
+prop_assert!(encode_ldp_stp(&[wreg(0), wreg(1), mem_offset(xreg(2), 256)], false).is_err());
+prop_assert!(encode_ldp_stp(&[wreg(0), wreg(1), mem_offset(xreg(2), -260)], false).is_err());
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/117
