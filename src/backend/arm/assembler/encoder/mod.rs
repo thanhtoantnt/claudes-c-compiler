@@ -190,6 +190,10 @@ mod neon_eor_rev_pbt;
 mod neon_ins_shl_addv_pbt;
 #[cfg(test)]
 mod neon_mla_mls_fields_pbt;
+#[cfg(test)]
+mod data_processing_mov_dispatch_pbt;
+#[cfg(test)]
+mod system_sys_at_dc_ic_tlbi_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
