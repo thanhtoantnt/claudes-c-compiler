@@ -29,4 +29,14 @@ let word = (1u32 << 31) | (size << 22) | (imm3 << 19) | (1 << 18)
        | (imm4 << 16) | (imm5 << 11) | (0b101 << 6) | (lane << 5) | rd;
 ```
 
+## Regression Property
+
+Failing property: `prop_neon_umov_q_dead`
+
+```rust
+// q derived from arrangement but never affects output
+prop_assert_eq!(encode_neon_umov(&[xreg(0), neon_reg(0, "b")]),
+               encode_neon_umov(&[xreg(0), neon_reg(0, "b")]));
+```
+
 **GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/90
