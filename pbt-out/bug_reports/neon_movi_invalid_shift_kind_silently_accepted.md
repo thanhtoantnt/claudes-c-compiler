@@ -1,16 +1,42 @@
-# Bug: `encode_neon_movi` silently accepts invalid shift kinds (lsr/asr/ror)
+# Bug Report: `encode_neon_movi` silently accepts invalid shift kinds
+
+**Target:** `src/backend/arm/assembler/encoder/neon.rs` → `encode_neon_movi`
+**Severity:** Medium
 
 ## Summary
-Only LSL and MSL are valid shift operators for MOVI. The encoder's else-branch falls through to `cmode = 0b0000` for any unrecognized shift kind (`lsr`/`asr`/`ror`), returning `Ok` instead of `Err`. The instruction silently becomes the unshifted form.
 
-## Witness
+Only LSL and MSL are valid MOVI shift operators. Unrecognized kinds (`lsr`/`asr`/`ror`) fall through to `cmode=0000` and return `Ok` as the unshifted form.
+
+## Root Cause
+
+No validation that `kind` is `"lsl"` or `"msl"`.
+
+## Reproduction
+
+**Input:** `movi v0.4s, #1, lsr #8`
+
+**Expected:** `Err` — lsr not a valid MOVI shift
+
+**Actual:** `Ok` — silently becomes unshifted form
+
+## Impact
+
+Invalid assembly accepted; produces wrong output without diagnostic.
+
+## Suggested Fix
+
+```rust
+if kind != "lsl" && kind != "msl" {
+    return Err(format!("movi: invalid shift kind '{}'", kind));
+}
 ```
-cargo test -- --ignored movi_silently_accepts_invalid_shift_kind
+
+## Regression Property
+
+Failing property: `movi_silently_accepts_invalid_shift_kind`
+
+```rust
+prop_assert!(encode_neon_movi_shift("lsr").is_err());
 ```
-Fails: `lsr is not a valid MOVI shift; expected Err but got Ok(0x...)`.
 
-## Root cause
-No validation that `kind` is `"lsl"` or `"msl"` — anything else falls through the else arm.
-
-## Severity
-MEDIUM — silent misencoding; invalid assembly is accepted and produces wrong output.
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/252

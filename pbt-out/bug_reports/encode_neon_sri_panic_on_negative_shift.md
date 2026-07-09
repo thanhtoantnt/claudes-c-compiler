@@ -119,3 +119,5 @@ fn sri_panics_on_overflow_shift() {
 ```
 
 Reproduce: `cargo test --lib neon_sri_pbt -- --ignored sri_panics_on_overflow_shift`.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/241

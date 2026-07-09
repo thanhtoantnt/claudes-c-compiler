@@ -1,51 +1,45 @@
-# Bug — `encode_neon_tbx` silently accepts non-byte destination arrangements
+# Bug Report: `encode_neon_tbx` silently accepts non-byte arrangements
 
 **Target:** `src/backend/arm/assembler/encoder/neon.rs` → `encode_neon_tbx`
-**Severity:** medium (silent mis-assembly of the Q bit)
-**Witness test:** `tbx_rejects_non_byte_arrangements`
-(`#[ignore]`d in `src/backend/arm/assembler/encoder/neon_tbx_pbt.rs`)
+**Severity:** Medium
 
-## Defect
+## Summary
+
+TBX is defined only for `.8b`/`.16b`. The encoder treats every other arrangement as `Q=0` and emits a bogus `.8b`-shaped word.
+
+## Root Cause
 
 ```rust
-let q: u32 = if arr_d == "16b" { 1 } else { 0 };
+let q: u32 = if arr_d == "16b" { 1 } else { 0 };  // all non-16b -> Q=0
 ```
 
-`TBX` is defined **only** for `.8b`/`.16b` destinations. The encoder treats
-*every* other arrangement (`.4h`, `.8h`, `.2s`, `.4s`, `.1d`, `.2d`, …) as
-`Q=0` and emits a bogus `.8b`-shaped word instead of `Err`. `get_neon_reg`
-accepts these arrangements, so they are not caught upstream.
+## Reproduction
 
-## Minimal failing input
+**Input:** `tbx v0.4h, {v1.16b}, v2.4h`
 
-`rd=0, arr_d="4h"` (table `{v1.16b}`, index `v2.4h`)
+**Expected:** `Err` — only .8b/.16b allowed
 
-## Expected vs. actual
-
-- **Expected:** `Err` (`tbx` is defined only for `.8b`/`.16b`).
-- **Actual:** `Ok(Word(0x0E021020))` — a `.8b` (Q=0) TBX word, even though
-  the source named a halfword arrangement.
+**Actual:** `Ok(Word(0x0E021020))` — silent .8b reinterpretation
 
 ## Impact
 
-A typo'd or unsupported arrangement is silently reinterpreted as `.8b`,
-producing an instruction whose element width does not match the source
-intent — a quiet correctness bug.
+Typo'd arrangements silently mis-assemble to wrong element width.
 
-## Fix
-
-Validate the arrangement before deriving `Q`:
+## Suggested Fix
 
 ```rust
 match arr_d.as_str() {
-    "8b"  => q = 0,
-    "16b" => q = 1,
-    other => return Err(format!("tbx: unsupported arrangement '{}', only .8b/.16b", other)),
+    "8b" => 0, "16b" => 1,
+    other => return Err(format!("tbx: unsupported arrangement '{}'", other)),
 }
 ```
 
-## Reproduce
+## Regression Property
 
-```bash
-cargo test --lib neon_tbx_pbt -- --ignored tbx_rejects_non_byte_arrangements
+Failing property: `tbx_rejects_non_byte_arrangements`
+
+```rust
+prop_assert!(encode_neon_tbx(&[va(0,"4h"), list, va(2,"4h")]).is_err());
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/246

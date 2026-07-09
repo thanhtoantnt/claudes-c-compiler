@@ -84,3 +84,5 @@ registers ARE correctly rejected.
    - reject a bare source register.
 2. Remove `"2s"` from the destination match arm (only `.4s` and `.2d` are valid
    FCVTL destinations).
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/238

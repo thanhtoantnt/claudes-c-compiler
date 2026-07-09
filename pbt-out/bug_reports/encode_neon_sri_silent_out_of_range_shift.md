@@ -126,3 +126,5 @@ proptest! {
 **Minimal failing input:** `rd = 0, rn = 0, arr = "8b", extra = 1` →
 `sri 8b shift 0 is out of range [1, 8] but was accepted as Some(Word(788546560))`.
 Reproduce: `cargo test --lib neon_sri_pbt -- --ignored sri_rejects_out_of_range_shift`.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/242

@@ -97,3 +97,5 @@ if is_high != is_wide_half {
   2 negative-contract tests (all pass on default `cargo test`), plus the
   `#[ignore]`d witness above.
 * Default `cargo test` stays green: 7 passed, 1 ignored.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/226

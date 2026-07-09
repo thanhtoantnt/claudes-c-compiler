@@ -125,3 +125,5 @@ fn not_rejects_mismatched_arrangements() {
     }
 }
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/239

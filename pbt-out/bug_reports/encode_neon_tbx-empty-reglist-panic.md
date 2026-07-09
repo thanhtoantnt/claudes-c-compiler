@@ -1,60 +1,46 @@
-# Bug — `encode_neon_tbx` panics on an empty register list
+# Bug Report: `encode_neon_tbx` panics on empty register list
 
 **Target:** `src/backend/arm/assembler/encoder/neon.rs` → `encode_neon_tbx`
-**Severity:** medium (robustness / abort instead of diagnostic)
-**Witness test:** `tbx_rejects_empty_register_list`
-(`#[ignore]`d in `src/backend/arm/assembler/encoder/neon_tbx_pbt.rs`)
+**Severity:** Medium
 
-## Defect
+## Summary
 
-```rust
-let (rn, num_regs) = match &operands[1] {
-    Operand::RegList(regs) => {
-        let first_reg = match &regs[0] {        // indexes element 0 unconditionally
-            ...
-        };
-        (first_reg, regs.len() as u32)
-    }
-    ...
-};
-```
+`encode_neon_tbx` indexes `regs[0]` without checking emptiness. An empty `RegList` panics instead of returning `Err`.
 
-When the table operand is an empty `Operand::RegList(vec![])`, the encoder
-indexes `regs[0]` and **panics** (index out of bounds) instead of returning
-`Err`. A malformed AST should never crash the assembler.
-
-## Minimal failing input
-
-operands = `[ va(0,"16b"), Operand::RegList(vec![]), va(2,"16b") ]`
-
-## Expected vs. actual
-
-- **Expected:** `Err` (empty table register list is not a legal instruction).
-- **Actual:** `panic` ("index out of bounds: the len is 0 but the index is 0").
-
-## Impact
-
-Any path that hands `encode_neon_tbx` an empty register list (a parser bug, a
-macro expansion edge case, or hand-built IR) crashes the whole assembler
-rather than emitting a recoverable error.
-
-## Fix
-
-Guard before indexing:
+## Root Cause
 
 ```rust
 Operand::RegList(regs) => {
-    if regs.is_empty() {
-        return Err("tbx: table register list is empty".to_string());
-    }
-    let first_reg = match &regs[0] { ... };
-    (first_reg, regs.len() as u32)
+    let first_reg = match &regs[0] { ... };  // panics if empty
 }
 ```
-(or use `regs.first()`).
 
-## Reproduce
+## Reproduction
 
-```bash
-cargo test --lib neon_tbx_pbt -- --ignored tbx_rejects_empty_register_list
+**Input:** `tbx` with empty table list
+
+**Expected:** `Err`
+
+**Actual:** panic: index out of bounds
+
+## Impact
+
+Malformed AST crashes the assembler instead of a recoverable diagnostic.
+
+## Suggested Fix
+
+```rust
+if regs.is_empty() {
+    return Err("tbx: table register list is empty".into());
+}
 ```
+
+## Regression Property
+
+Failing property: `tbx_rejects_empty_register_list`
+
+```rust
+prop_assert!(encode_neon_tbx(&[va(0,"16b"), RegList(vec![]), va(2,"16b")]).is_err());
+```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/245

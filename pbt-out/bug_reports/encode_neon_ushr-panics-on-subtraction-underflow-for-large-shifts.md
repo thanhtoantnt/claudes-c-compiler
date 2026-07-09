@@ -1,66 +1,40 @@
-# Bug — `encode_neon_ushr` panics on subtraction underflow for large shift amounts
+# Bug Report: `encode_neon_ushr` panics on subtraction underflow for large shifts
 
-Target: `encode_neon_ushr` in
-`src/backend/arm/assembler/encoder/neon.rs` (the per-size subtraction at line
-~1192).
+**Target:** `src/backend/arm/assembler/encoder/neon.rs` → `encode_neon_ushr`
+**Severity:** Medium
 
-Status: **confirmed** by the `#[ignore]`d property-based witness
-`neon_ushr_pbt::prop_overflowing_shifts_must_not_panic` in
-`src/backend/arm/assembler/encoder/neon_ushr_pbt.rs`. Default `cargo test`
-stays green; reproduce with `cargo test neon_ushr_pbt -- --ignored`.
+## Summary
 
-## Affected code
+Per-size subtraction `(16 - shift)` underflows when `shift > 2*esize`, panicking in debug builds before the mask can protect it.
+
+## Root Cause
 
 ```rust
-let immh_immb = match arr_d.as_str() {
-    "8b" | "16b" => (16 - shift) & 0xF,    // <-- 16u32 - shift underflows when shift > 16
-    "4h" | "8h" => (32 - shift) & 0x1F,
-    "2s" | "4s" => (64 - shift) & 0x3F,
-    "2d" => (128 - shift) & 0x7F,
-    _ => return Err(format!("unsupported ushr arrangement: {}", arr_d)),
-};
+"8b" | "16b" => (16 - shift) & 0xF,  // underflow when shift > 16
 ```
 
-The per-size subtraction runs *before* the masking, so the `& 0xF / 0x1F / …`
-does **not** protect against underflow — underflow happens first.
+## Reproduction
 
-## Minimal failing input
+**Input:** `ushr v0.8b, v1.8b, #20`
 
-```text
-ushr v0.8b, v1.8b, #20     // arrangement "8b", shift = 20  (> 2*esize = 16)
-```
+**Expected:** `Err`
 
-## Expected vs. actual
-
-* **Expected:** `Err` (the shift is not a valid USHR shift amount).
-* **Actual (debug build):** the process **panics**:
-
-> `thread '…' panicked at src/backend/arm/assembler/encoder/neon.rs:1192:25:
-> attempt to subtract with overflow`
-
-The witness covers `shift ∈ {2*esize+1, 4*esize}` for every supported
-arrangement; all panic in debug builds.
+**Actual:** panic: attempt to subtract with overflow
 
 ## Impact
 
-Any malformed `#shift` of roughly `≥ 17` (bytes) / `≥ 33` (half) / `≥ 65`
-(word) / `≥ 129` (double) aborts the entire assembler process instead of
-returning `Err`. This is a robustness/availability defect: malformed user
-input must never crash the encoder.
+Large malformed shifts abort the assembler instead of returning `Err`.
 
-## Suggested fix
+## Suggested Fix
 
-Use wrapping subtraction and reject out-of-range shifts before encoding:
+Validate range before subtraction (same fix as out-of-range sibling).
+
+## Regression Property
+
+Failing property: `prop_overflowing_shifts_must_not_panic`
 
 ```rust
-let (immh_immb, max) = match arr_d.as_str() {
-    "8b" | "16b" => (16u32.wrapping_sub(shift) & 0xF, 8u32),
-    "4h" | "8h"  => (32u32.wrapping_sub(shift) & 0x1F, 16u32),
-    "2s" | "4s"  => (64u32.wrapping_sub(shift) & 0x3F, 32u32),
-    "2d"         => (128u32.wrapping_sub(shift) & 0x7F, 64u32),
-    _ => return Err(format!("unsupported ushr arrangement: {}", arr_d)),
-};
-if shift == 0 || shift > max {
-    return Err(format!("ushr: shift {} out of range [1, {}] for {}", shift, max, arr_d));
-}
+prop_assert!(encode_neon_ushr(&[vreg(0,"8b"), vreg(1,"8b"), Imm(20)]).is_err());
 ```
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/249
