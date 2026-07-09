@@ -102,6 +102,10 @@ mod neon_sri_pbt;
 mod neon_sshr_pbt;
 #[cfg(test)]
 mod neon_ushr_pbt;
+#[cfg(test)]
+mod neon_movi_pbt;
+#[cfg(test)]
+mod neon_shrn_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
