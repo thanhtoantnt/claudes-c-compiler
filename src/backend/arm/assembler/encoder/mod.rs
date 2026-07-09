@@ -198,6 +198,10 @@ mod system_sys_at_dc_ic_tlbi_pbt;
 mod compare_branch_cond_pbt;
 #[cfg(test)]
 mod data_processing_logical_not_pbt;
+#[cfg(test)]
+mod load_store_ldar_ldxr_class_pbt;
+#[cfg(test)]
+mod data_processing_adc_sbc_neg_negs_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;
