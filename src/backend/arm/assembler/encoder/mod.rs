@@ -18,6 +18,8 @@ mod fp_scalar;
 mod system;
 mod bitfield;
 mod neon;
+#[cfg(test)]
+mod neon_ins_pbt;
 
 pub(crate) use data_processing::*;
 pub(crate) use compare_branch::*;

@@ -272,5 +272,142 @@ mod tests {
                 reference_decode_pua_byte(&input, pos)
             );
         }
+
+        // Oracle: State/progress — decoding an entire byte stream from start
+        // to finish must always make progress (consumed ∈ {1, 3}) and terminate
+        // exactly at input.len(), never overshooting or stalling.
+        #[test]
+        fn full_stream_decode_terminates_exactly(
+            input in prop::collection::vec(any::<u8>(), 0..=256)
+        ) {
+            let mut pos = 0usize;
+            let len = input.len();
+            while pos < len {
+                let (_, consumed) = decode_pua_byte(&input, pos);
+                prop_assert!(
+                    consumed == 1 || consumed == 3,
+                    "consumed must be 1 or 3, got {}", consumed
+                );
+                prop_assert!(
+                    pos + consumed <= len,
+                    "overshoot: pos={} consumed={} len={}", pos, consumed, len
+                );
+                pos += consumed;
+            }
+            prop_assert_eq!(pos, len);
+        }
+
+        // Oracle: Boundary — a complete PUA sequence occupying exactly the last
+        // three bytes of the input (len == pos + 3) must still be recognised,
+        // exercising the `pos + 2 < input.len()` guard at its tightest.
+        #[test]
+        fn complete_pua_sequence_at_exact_end(
+            byte in 0x80u8..=0xFF,
+            prefix in prop::collection::vec(any::<u8>(), 0..=32)
+        ) {
+            let mut input = prefix;
+            let pos = input.len();
+            let enc = char::from_u32(PUA_BASE + (byte - 0x80) as u32)
+                .unwrap()
+                .to_string();
+            input.extend_from_slice(enc.as_bytes());
+            prop_assert_eq!(input.len(), pos + 3);
+            let (decoded, consumed) = decode_pua_byte(&input, pos);
+            prop_assert_eq!((decoded, consumed), (byte, 3));
+        }
+
+        // Oracle: Negative contract — any byte other than 0xEE at the cursor
+        // must pass through unchanged consuming exactly one byte, regardless of
+        // the surrounding bytes.
+        #[test]
+        fn non_ee_first_byte_always_passthrough(
+            first in (any::<u8>()).prop_filter("exclude 0xEE", |&b| b != 0xEE),
+            rest in prop::collection::vec(any::<u8>(), 0..=32)
+        ) {
+            let mut input = vec![first];
+            input.extend_from_slice(&rest);
+            let (decoded, consumed) = decode_pua_byte(&input, 0);
+            prop_assert_eq!((decoded, consumed), (first, 1));
+        }
+
+        // Oracle: Algebraic — the consumed length fully determines the shape of
+        // the output: consumed==1 ⇒ passthrough (decoded == input[pos]);
+        // consumed==3 ⇒ PUA decode (decoded ∈ 0x80..=0xFF).
+        #[test]
+        fn consumed_length_implies_output_shape(
+            (input, pos) in prop::collection::vec(any::<u8>(), 1..=128)
+                .prop_flat_map(|input| {
+                    let len = input.len();
+                    (Just(input), 0..len)
+                })
+        ) {
+            let (decoded, consumed) = decode_pua_byte(&input, pos);
+            match consumed {
+                1 => prop_assert_eq!(decoded, input[pos]),
+                3 => prop_assert!(
+                    (0x80u8..=0xFF).contains(&decoded),
+                    "PUA-decoded byte must be >= 0x80, got 0x{:02X}", decoded
+                ),
+                other => prop_assert!(false, "unexpected consumed {}", other),
+            }
+        }
+
+        // Oracle: Round-trip / negative contract — encode->decode must return
+        // the ORIGINAL bytes. The generator deterministically seeds a raw
+        // 3-byte UTF-8 sequence in the PUA range U+E080..U+E0FF (which is itself
+        // valid UTF-8), surrounded by ASCII. This EXPECTS CORRECT OUTPUT and
+        // FAILS, demonstrating the encoder/decoder PUA-range ambiguity bug:
+        // `bytes_to_string` passes the valid-UTF-8 PUA triple through unchanged,
+        // but `decode_pua_byte` reinterprets it as a PUA-encoded single byte,
+        // collapsing 3 bytes into 1.
+        // See pbt-out/bug_reports/decode_pua_byte_pua_range_ambiguity.md
+        #[test]
+        fn raw_pua_range_utf8_does_not_roundtrip(
+            cp in 0xE080u32..=0xE0FF,
+            prefix in prop::collection::vec(0x00u8..=0x7F, 0..=32),
+            suffix in prop::collection::vec(0x00u8..=0x7F, 0..=32)
+        ) {
+            let pua_bytes = char::from_u32(cp).unwrap().to_string();
+            let mut bytes = prefix;
+            bytes.extend_from_slice(pua_bytes.as_bytes());
+            bytes.extend_from_slice(&suffix);
+
+            let encoded = bytes_to_string(bytes.clone());
+            let input: Vec<u8> = encoded.bytes().collect();
+            // Encoder passes the valid-UTF-8 PUA triple through verbatim
+            // (input == bytes), so any divergence is the decoder's fault.
+            assert_eq!(input, bytes, "encoder altered valid-UTF-8 PUA input");
+
+            let mut decoded = Vec::new();
+            let mut pos = 0;
+            while pos < input.len() {
+                let (b, c) = decode_pua_byte(&input, pos);
+                decoded.push(b);
+                pos += c;
+            }
+            // Failing assertion: decode collapses EE 82/83 xx into a single
+            // byte, losing the other two.
+            prop_assert_eq!(decoded, bytes);
+        }
+
+        // Oracle: Negative contract — decode must not panic for any position
+        // in 0..=len. This EXPECTS no-panic and FAILS, demonstrating that
+        // `decode_pua_byte` indexes input[pos] unguarded in its fallback
+        // branch and panics at pos == len (e.g. empty input, pos 0).
+        // See pbt-out/bug_reports/decode_pua_byte_panics_on_empty_input.md
+        #[test]
+        fn decode_does_not_panic_at_end_position(
+            (bytes, pos) in prop::collection::vec(any::<u8>(), 0..=32)
+                .prop_flat_map(|b| {
+                    let len = b.len() as u32;
+                    (Just(b), 0..=len)
+                })
+        ) {
+            let result = std::panic::catch_unwind(|| decode_pua_byte(&bytes, pos as usize));
+            prop_assert!(
+                result.is_ok(),
+                "decode_pua_byte panicked at pos={} of len={}", pos, bytes.len()
+            );
+        }
     }
 }
