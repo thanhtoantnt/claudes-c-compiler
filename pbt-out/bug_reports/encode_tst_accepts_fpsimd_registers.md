@@ -13,3 +13,5 @@ cargo test --lib div_tst_cbz_regclass_pbt -- --ignored prop_tst_rejects_fpsimd_r
 
 ## Severity
 MEDIUM — silent misencoding; accepts invalid assembly that should be rejected.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/346

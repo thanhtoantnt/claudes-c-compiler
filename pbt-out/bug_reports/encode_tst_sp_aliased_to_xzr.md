@@ -13,3 +13,5 @@ No SP rejection after `parse_reg_num` resolves `sp`/`wsp` → 31.
 
 ## Severity
 MEDIUM — silent semantic change; SP operand becomes zero-register, producing wrong results at runtime.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/347

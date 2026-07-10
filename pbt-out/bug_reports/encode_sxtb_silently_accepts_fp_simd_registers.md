@@ -64,4 +64,5 @@ Failing witness: `wit_sxtb_rejects_fp_simd_in_any_position`
 cargo test --lib data_processing_sxtb_sxth_sxtw_fpsimd_pbt::wit_sxtb_rejects_fp_simd_in_any_position -- --ignored
 ```
 
-**GitHub Issue:** (none)
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/343

@@ -76,3 +76,5 @@ The same module documents the *correct* behaviour with passing properties:
 - `prop_logical_accepts_sp_in_rd_rn_shifted` — SP is correctly accepted in Rd/Rn (field 31, sf=1).
 - `logical_accepts_sp_in_immediate` — SP correctly accepted in the logical-immediate form
   (`orr sp, sp, #0xff` → Rd=Rn=31).
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/342

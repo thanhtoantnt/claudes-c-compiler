@@ -63,4 +63,5 @@ Failing witness: `wit_umulh_rejects_sp_as_destination`
 cargo test --lib data_processing_smulh_umulh_uxtb_uxth_pbt::wit_umulh_rejects_sp_as_destination -- --ignored
 ```
 
-**GitHub Issue:** (none)
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/348

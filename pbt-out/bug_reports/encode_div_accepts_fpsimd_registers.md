@@ -77,3 +77,5 @@ this check — it just needs to be applied to `Rd`, `Rn`, and `Rm` in
   report that previously lumped this `encode_div` FP/SIMD finding together
   with the `encode_tst`/`encode_cbz` families. This file now provides the
   dedicated, per-function report for `encode_div` as required.
+
+**GitHub Issue:** https://github.com/thanhtoantnt/claudes-c-compiler/issues/341
